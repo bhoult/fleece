@@ -1291,6 +1291,7 @@ struct Channel {
     filtering: bool,
     /// a slow swell of the level (an accordion's bellows): depth, rate (Hz), phase
     swell: f32,
+    swell_s: f32,
     swell_rate: f32,
     swell_ph: f32,
     buf: [[f32; 2]; BLOCK],
@@ -1319,14 +1320,18 @@ impl Channel {
             filt: [Svf::default(); 2],
             filtering: false,
             swell: 0.0,
+            swell_s: 0.0,
             swell_rate: 0.5,
             swell_ph: 0.0,
             buf: [[0.0; 2]; BLOCK],
         }
     }
 
-    /// Renders the block into `buf`; whether anything sounded.
+    /// Renders the block into `buf`; whether anything sounded. (The swell
+    /// keeps time whether or not the channel sounds.)
     fn render(&mut self, n: usize) -> bool {
+        self.swell_s += (self.swell - self.swell_s) * 0.02;
+        self.swell_ph = wrap(self.swell_ph + self.swell_rate * n as f32 / SR);
         let Channel { voices, dv, buf, .. } = self;
         let buf = &mut buf[..n];
         buf.fill([0.0; 2]);
@@ -1367,9 +1372,8 @@ impl Channel {
         }
         self.gain_s += (self.gain - self.gain_s) * 0.05;
         let mut g = self.gain_s;
-        if self.swell > 0.0 {
-            self.swell_ph = wrap(self.swell_ph + self.swell_rate * n as f32 / SR);
-            g *= 1.0 - self.swell * (0.5 - 0.5 * sin01(self.swell_ph));
+        if self.swell_s > 1e-4 {
+            g *= 1.0 - self.swell_s * (0.5 - 0.5 * sin01(self.swell_ph));
         }
         let gl = g * (1.0 - self.pan).min(1.0);
         let gr = g * (1.0 + self.pan).min(1.0);
@@ -2100,6 +2104,18 @@ struct Song {
     walk: [f32; 4],
     phase: f32,
     period: f32,
+    /// the patterns' B variants, which 4-bar groups of the section play
+    /// them (bit k: group k), and the ambient pad's pulse (a beat's divisions)
+    kick2: [f32; 16],
+    snare2: [f32; 16],
+    hat2: [f32; 16],
+    perc2: [f32; 16],
+    bass2: [Step; 16],
+    arp2: Vec<u8>,
+    scheme: u8,
+    pulse: f32,
+    bass_style2: u8,
+    stab_shift: usize,
     /// an optional layer sitting out this phrase
     mute: u32,
     anticipated: bool,
@@ -2147,6 +2163,16 @@ impl Song {
             walk: [0.0; 4],
             phase: 0.0,
             period: 32.0,
+            kick2: [0.0; 16],
+            snare2: [0.0; 16],
+            hat2: [0.0; 16],
+            perc2: [0.0; 16],
+            bass2: [Step::default(); 16],
+            arp2: vec![0],
+            scheme: 0,
+            pulse: 1.0,
+            bass_style2: 0,
+            stab_shift: 0,
             mute: 0,
             anticipated: false,
             bell_motif: false,
@@ -2308,13 +2334,13 @@ impl Song {
         if self.sec_bar.is_multiple_of(8) && self.sec_bar > 0 && sec.kind == MAIN {
             // now and then an optional layer sits out a phrase
             let opt: &[u32] = match self.genre {
-                AMBIENT => &[L_BELL, L_DRONE, L_TEX, L_ARP],
-                TECHNO => &[L_OHAT, L_PERC, L_KEYS, L_HAT, L_SNARE],
-                SYNTHWAVE => &[L_ARP, L_OHAT, L_PAD, L_LEAD],
-                LOFI => &[L_LEAD, L_PERC],
+                AMBIENT => &[L_BELL, L_DRONE, L_TEX, L_HAT, L_KICK],
+                TECHNO => &[L_OHAT, L_PERC, L_KEYS, L_SNARE],
+                SYNTHWAVE => &[L_ARP, L_OHAT, L_PAD, L_PERC],
+                LOFI => &[L_LEAD, L_PERC, L_HAT],
                 _ => &[L_HAT],
             };
-            self.mute = if self.rng.chance(0.3) { self.rng.pick(opt) } else { 0 };
+            self.mute = if self.rng.chance(0.5) { self.rng.pick(opt) } else { 0 };
         }
         let m = sec.mask & !self.mute;
         for w in self.walk.iter_mut() {
@@ -2379,6 +2405,12 @@ impl Song {
     fn section_start(&mut self, s: &mut Synth) {
         let sec = self.plan[self.sec];
         self.mute = 0;
+        // which 4-bar groups play the B patterns: they alternate, never all A
+        self.scheme = if sec.kind == MAIN {
+            self.rng.pick(&[0b0110, 0b1010, 0b0100, 0b1110, 0b0101, 0b1001, 0b0010])
+        } else {
+            self.rng.pick(&[0, 0b10])
+        };
         // which progression: B for later main sections, choruses, some breaks
         let mains_before = self.plan[..self.sec].iter().filter(|x| x.kind == MAIN).count();
         let r = &mut self.rng;
@@ -2401,7 +2433,11 @@ impl Song {
                 if sec.kind == MAIN && r.chance(0.4) {
                     self.phrase = make_phrase(r, 0.3, 0, 11);
                 }
-                self.arp = make_arp(r);
+                if r.chance(0.5) {
+                    self.arp = make_arp(r);
+                } else {
+                    self.arp2 = make_arp(r);
+                }
             }
             TECHNO => {
                 s.ch[CH_KICK].rev2 = if sec.mask & L_RUMBLE != 0 { 0.7 } else { 0.0 };
@@ -2409,6 +2445,7 @@ impl Song {
                 if sec.kind == MAIN && r.chance(0.5) {
                     self.bass = new_bass(r, self.mode, self.bass_style);
                 }
+                self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
                 if r.chance(0.4) {
                     let k = r.pick(&[3, 5, 7]);
                     let e = euclid(k, 16, r.below(16));
@@ -2420,6 +2457,7 @@ impl Song {
             }
             SYNTHWAVE => {
                 self.arp = make_arp(r);
+                self.arp2 = make_arp(r);
                 if sec.kind == MAIN && r.chance(0.3) {
                     self.phrase = make_phrase(r, 0.55, -2, 9);
                 }
@@ -2434,6 +2472,24 @@ impl Song {
     }
 
     // -- the parts all genres share
+
+    /// Whether this 4-bar group plays the B patterns.
+    fn var_b(&self) -> bool {
+        (self.scheme >> (self.sec_bar / 4 % 8)) & 1 == 1
+    }
+
+    /// The fill this bar ends with: 0 none, 1 a small one (closing a 4-bar
+    /// group), 2 a big one (closing an 8-bar group or the section).
+    fn fill(&self, sec: Sec) -> u8 {
+        let i = self.sec_bar;
+        if i + 1 == sec.bars || i % 8 == 7 {
+            2
+        } else if i % 4 == 3 {
+            1
+        } else {
+            0
+        }
+    }
 
     /// The pad: a chord at each change, voice-led, held until the next.
     fn pads(&mut self, b: &mut Bar, ch: usize, lo: i32, hi: i32, vel: f32, open: bool, tail: f32) {
@@ -2526,41 +2582,65 @@ impl Song {
 
     fn piece_ambient(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
-        self.bpm = r.range(60.0, 76.0) as f64;
+        self.bpm = r.range(88.0, 100.0) as f64;
         self.swing = 0.0;
-        self.human = 0.01;
+        self.human = 0.006;
+        // a pulse throughout: the arpeggiated sequence from the first bar,
+        // soft percussion, and in fuller sections a bass pulse and a pad
+        // that swells with the beat
+        let core = L_PAD | L_ARP;
         self.plan = vec![
-            Sec { kind: INTRO, bars: 8, mask: L_DRONE | L_PAD, energy: 0.3 },
-            Sec { kind: MAIN, bars: 16, mask: L_DRONE | L_PAD | L_BELL, energy: 0.5 },
-            Sec {
-                kind: MAIN,
-                bars: 16,
-                mask: L_PAD | L_BELL | L_TEX | if r.chance(0.5) { L_ARP } else { 0 },
-                energy: 0.6,
-            },
+            Sec { kind: INTRO, bars: 4, mask: core | L_DRONE, energy: 0.35 },
+            Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_PERC, energy: 0.5 },
+            Sec { kind: MAIN, bars: 8, mask: core | L_BELL | L_PERC | L_BASS | L_HAT, energy: 0.65 },
         ];
+        if r.chance(0.5) {
+            self.plan.push(Sec { kind: BREAK, bars: 4, mask: L_PAD | L_BELL | L_TEX | L_DRONE, energy: 0.4 });
+        } else {
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_TEX, energy: 0.55 });
+        }
+        self.plan.push(Sec {
+            kind: MAIN,
+            bars: 8,
+            mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_KICK | L_TEX,
+            energy: 0.75,
+        });
+        self.plan.push(Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_PERC | L_TEX, energy: 0.6 });
         if r.chance(0.5) {
             self.plan.push(Sec {
                 kind: MAIN,
-                bars: 16,
-                mask: L_PAD | L_BASS | L_ARP | L_KICK | L_HAT | L_DRONE,
+                bars: 8,
+                mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_KICK,
                 energy: 0.7,
             });
-        } else {
-            self.plan.push(Sec { kind: BREAK, bars: 8, mask: L_PAD | L_TEX, energy: 0.35 });
         }
-        self.plan.push(Sec { kind: MAIN, bars: 16, mask: L_PAD | L_DRONE | L_BELL | L_TEX, energy: 0.5 });
-        self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_DRONE | L_PAD | L_TEX, energy: 0.3 });
+        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: core | L_DRONE | L_TEX, energy: 0.35 });
         self.phrase = make_phrase(r, 0.3, 0, 11);
         self.arp = make_arp(r);
-        self.arp_rate = r.pick(&[2, 2, 4]);
+        self.arp2 = make_arp(r);
+        self.arp_rate = r.pick(&[2, 2, 1]);
+        self.pulse = r.pick(&[1.0, 2.0]);
         self.lead_center = 78;
+        // a shaker in 8ths (A) or 16ths (B); a soft kick on the one (and three);
+        // a rim on two and four (A) or the off-beats (B)
+        self.perc = std::array::from_fn(|i| match i % 4 {
+            0 => 0.4,
+            2 => 0.28,
+            _ => 0.0,
+        });
+        self.perc2 = std::array::from_fn(|i| [0.42, 0.18, 0.3, 0.2][i % 4]);
         self.kick = [0.0; 16];
-        self.kick[0] = 0.6;
-        self.kick[8] = if r.chance(0.5) { 0.4 } else { 0.0 };
-        for i in 0..16 {
-            self.hat[i] = if i % 2 == 0 { if i % 4 == 0 { 0.5 } else { 0.35 } } else { 0.0 };
+        self.kick[0] = 0.55;
+        self.kick2 = self.kick;
+        self.kick2[8] = 0.4;
+        if r.chance(0.5) {
+            self.kick2[10] = 0.3;
         }
+        self.hat = [0.0; 16];
+        self.hat[4] = 0.35;
+        self.hat[12] = 0.35;
+        self.hat2 = std::array::from_fn(|i| if i % 4 == 2 { 0.25 } else { 0.0 });
+        self.hat2[12] = 0.35;
         self.prange = (0, 11);
         sounds_ambient(r, s);
         self.draw_progs();
@@ -2569,9 +2649,16 @@ impl Song {
     fn ambient(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let e = sec.energy;
         let i = self.sec_bar;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
         s.ch[CH_PAD].cut = (0.9 * self.walk[0] + 1.2 * (e - 0.5)).exp2();
         s.ch[CH_BELL].cut = 1.0;
-        s.rev_wet = 0.5 + 0.12 * self.walk[1];
+        s.rev_wet = 0.45 + 0.1 * self.walk[1];
+        // the pad pulses with the beat where the bass does, its peaks on the beats
+        let pad = &mut s.ch[CH_PAD];
+        pad.swell = if m & L_BASS != 0 { 0.35 } else { 0.0 };
+        pad.swell_rate = (self.bpm / 60.0) as f32 * self.pulse;
+        pad.swell_ph = 0.25;
         if m & L_PAD != 0 {
             self.pads(b, CH_PAD, 48, 76, 0.55 + 0.25 * e, true, 6.0);
         }
@@ -2584,19 +2671,18 @@ impl Song {
             }
         }
         if m & L_BASS != 0 {
-            for h in 0..2 {
-                let half = i * 2 + h;
-                let c = self.chord(half);
-                if half == 0 || self.chord(half - 1) != c {
-                    let n = self.bass_note(c, 36);
-                    b.note(h as f32 * 8.0, 0.0, CH_BASS, n, 0.8, 15.0, false);
-                }
+            // a soft pulse on the chord's root: quarters (A) or 8ths (B)
+            let every = if vb { 2 } else { 4 };
+            for st in (0..16).step_by(every) {
+                let c = self.chord(i * 2 + (st >= 8) as u32);
+                let n = self.bass_note(c, 36);
+                let v = if st % 8 == 0 { 0.8 } else { 0.55 };
+                b.note(st as f32, 0.0, CH_BASS, n, v, every as f32 * 0.8, false);
             }
         }
         if m & L_BELL != 0 {
-            if i.is_multiple_of(2) {
-                self.bell_motif = self.rng.chance(0.55);
-            }
+            // the motif in the B groups, loose notes in the A ones
+            self.bell_motif = vb;
             if self.bell_motif {
                 let pb = (i % 4) as u16;
                 if pb == 0 && i > 0 {
@@ -2605,7 +2691,7 @@ impl Song {
                 let tonic = self.tonic_near(self.lead_center);
                 for k in 0..self.phrase.len() {
                     let n = self.phrase[k];
-                    if n.step / 16 != pb || self.rng.chance(0.15) {
+                    if n.step / 16 != pb || self.rng.chance(0.1) {
                         continue;
                     }
                     let st = n.step % 16;
@@ -2619,7 +2705,7 @@ impl Song {
                 }
             } else {
                 for beat in 0..4 {
-                    if !self.rng.chance(0.16 + 0.22 * e) {
+                    if !self.rng.chance(0.25 + 0.25 * e) || (fill > 0 && beat == 3) {
                         continue;
                     }
                     let st = beat * 4 + self.rng.pick(&[0, 0, 2]);
@@ -2634,30 +2720,55 @@ impl Song {
             }
         }
         if m & L_ARP != 0 {
+            // the sequence: thin at first in the intro, an order per variant,
+            // and a rising flourish to close an 8-bar group
             let rate = self.arp_rate;
+            let thin = sec.kind == INTRO && i < 2;
             for st in (0..16).step_by(rate) {
-                if !self.rng.chance(0.55 + 0.4 * e) {
+                if fill == 2 && st >= 12 {
+                    continue;
+                }
+                if !self.rng.chance(if thin { 0.5 } else { 0.9 }) {
                     continue;
                 }
                 let c = self.chord(i * 2 + (st >= 8) as u32);
                 let tones = self.arp_tones(c, self.tonic_near(72) - 5);
-                let k = self.arp[(st / rate) % self.arp.len()] as usize;
-                let vel = if st % 8 == 0 { 0.6 } else { 0.42 };
+                let order = if vb { &self.arp2 } else { &self.arp };
+                let k = order[(st / rate) % order.len()] as usize;
+                let vel = if st % 4 == 0 { 0.6 } else { 0.42 };
                 b.note(st as f32, 0.0, CH_ARP, tones[k % tones.len()], vel, rate as f32 * 2.0, false);
             }
+            if fill == 2 {
+                let c = self.chord(i * 2 + 1);
+                let tones = self.arp_tones(c, self.tonic_near(72) - 5);
+                for (k, st) in (12..16).enumerate() {
+                    let n = tones[(k + 2).min(tones.len() - 1)];
+                    b.note(st as f32, 0.0, CH_ARP, n, 0.4 + 0.08 * k as f32, 2.0, false);
+                }
+            }
         }
-        if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_KICK, 0, self.kick[st]);
+        if m & L_PERC != 0 {
+            let p = if vb { self.perc2 } else { self.perc };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    let j = self.rng.range(0.0, self.human);
+                    b.hit(st as f32, j, CH_HAT, HAT_C, v * self.rng.range(0.7, 1.0));
                 }
             }
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                if self.hat[st] > 0.0 {
-                    let j = self.rng.range(0.0, self.human);
-                    b.hit(st as f32, j, CH_HAT, HAT_C, self.hat[st] * self.rng.range(0.7, 1.0));
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    b.hit(st as f32, self.rng.range(0.0, self.human), CH_PERC, RIM, v);
+                }
+            }
+        }
+        if m & L_KICK != 0 {
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(fill == 2 && st >= 8) {
+                    b.hit(st as f32, 0.0, CH_KICK, 0, v);
                 }
             }
         }
@@ -2668,50 +2779,56 @@ impl Song {
     fn piece_techno(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
         self.bpm = if self.piece == 1 {
-            r.range(124.0, 132.0) as f64
+            r.range(128.0, 136.0) as f64
         } else {
-            (self.bpm + r.range(-2.0, 2.0) as f64).clamp(122.0, 134.0)
+            (self.bpm + r.range(-3.0, 3.0) as f64).clamp(128.0, 138.0)
         };
         self.swing = r.pick(&[0.0, 0.0, 0.0, 0.08, 0.15]);
         self.human = 0.0;
         let rumble = if r.chance(0.6) { L_RUMBLE } else { 0 };
         let stabs = if r.chance(0.6) { L_KEYS } else { 0 };
         let drums = L_KICK | L_HAT | L_OHAT | L_SNARE | L_PERC;
+        let brk =
+            L_PAD | L_TEX | L_KEYS | if r.chance(0.6) { L_BASS } else { 0 } | if r.chance(0.5) { L_HAT } else { 0 };
         self.plan = vec![
-            Sec { kind: INTRO, bars: 16, mask: L_KICK | L_HAT | if r.chance(0.5) { L_PERC } else { 0 }, energy: 0.35 },
-            Sec { kind: BUILD, bars: r.pick(&[8, 16]), mask: L_KICK | L_HAT | L_OHAT | L_SNARE | L_BASS, energy: 0.55 },
-            Sec { kind: MAIN, bars: 32, mask: drums | L_BASS | rumble | stabs, energy: 0.8 },
-            Sec {
-                kind: BREAK,
-                bars: 16,
-                mask: L_PAD | L_TEX | if r.chance(0.6) { L_BASS } else { 0 } | if r.chance(0.4) { L_HAT } else { 0 },
-                energy: 0.3,
-            },
-            Sec { kind: MAIN, bars: 32, mask: drums | L_BASS | L_RUMBLE | L_KEYS, energy: 0.95 },
+            Sec { kind: INTRO, bars: 8, mask: L_KICK | L_HAT | L_PERC, energy: 0.4 },
+            Sec { kind: BUILD, bars: 8, mask: L_KICK | L_HAT | L_OHAT | L_SNARE | L_BASS, energy: 0.6 },
+            Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | rumble | stabs, energy: 0.8 },
+            Sec { kind: BREAK, bars: 8, mask: brk, energy: 0.35 },
+            Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | L_RUMBLE | L_KEYS, energy: 0.95 },
         ];
-        if r.chance(0.4) {
-            self.plan.push(Sec { kind: BREAK, bars: 8, mask: L_PAD | L_KEYS | L_HAT, energy: 0.4 });
-            self.plan.push(Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | rumble, energy: 0.9 });
+        if r.chance(0.5) {
+            self.plan.push(Sec { kind: BREAK, bars: 4, mask: L_PAD | L_KEYS | L_HAT | L_BASS, energy: 0.45 });
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_BASS | rumble | L_KEYS, energy: 0.9 });
         }
-        self.plan.push(Sec { kind: OUTRO, bars: 16, mask: L_KICK | L_HAT | L_PERC | L_BASS, energy: 0.45 });
+        self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_KICK | L_HAT | L_PERC | L_BASS, energy: 0.5 });
+        // A: four on the floor, claps on two and four, 8ths of hats with 16ths
+        // among them; B: a ghost kick before the bar, an extra clap and a
+        // ghost, 16ths of hats throughout
         self.kick = std::array::from_fn(|i| if i % 4 == 0 { 1.0 } else { 0.0 });
+        self.kick2 = self.kick;
+        self.kick2[r.pick(&[15, 14, 11])] = 0.5;
         self.snare = [0.0; 16];
         self.snare[4] = 0.9;
         self.snare[12] = 0.9;
-        if r.chance(0.3) {
-            self.snare[r.pick(&[7, 15, 14])] = 0.45;
-        }
+        self.snare2 = self.snare;
+        self.snare2[r.pick(&[7, 15, 14])] = 0.45;
+        self.snare2[r.pick(&[10, 3, 9])] = 0.22;
         let acc = r.range(0.7, 0.9);
         self.hat = std::array::from_fn(|i| [0.3, 0.2, acc, 0.22][i % 4]);
+        self.hat2 = std::array::from_fn(|i| [0.32, 0.26, acc, 0.28][i % 4]);
         self.ohat = std::array::from_fn(|i| if i % 4 == 2 { 0.55 } else { 0.0 });
         let e = euclid(r.pick(&[3, 5, 7]), 16, r.below(16));
         self.perc = std::array::from_fn(|i| if e[i] { 0.6 } else { 0.0 });
+        let e2 = euclid(r.pick(&[4, 5, 6, 9]), 16, r.below(16));
+        self.perc2 = std::array::from_fn(|i| if e2[i] { 0.55 } else { 0.0 });
         self.perc_kind = r.pick(&[RIM, RIM, TOM_MID, SHAKER]);
         let st = euclid(r.pick(&[3, 3, 5]), r.pick(&[8, 16]), r.below(8));
         self.stab = std::array::from_fn(|i| if st[i % st.len()] { 0.8 } else { 0.0 });
         self.bass_style = if r.chance(0.65) { 0 } else { 1 };
         self.bass = new_bass(r, self.mode, self.bass_style);
-        self.period = r.pick(&[16.0, 24.0, 32.0, 48.0]);
+        self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
+        self.period = r.pick(&[8.0, 16.0, 24.0, 32.0]);
         sounds_techno(r, s, self.bass_style);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
@@ -2721,6 +2838,8 @@ impl Song {
         let e = sec.energy;
         let i = self.sec_bar;
         let left = sec.bars - i;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
         let next_main = self.plan.get(self.sec + 1).is_some_and(|x| x.kind == MAIN);
         // the acid filter: a slow sweep over `period` bars, a walk, the energy
         self.phase = (self.phase + 1.0 / self.period).fract();
@@ -2730,22 +2849,38 @@ impl Song {
         s.ch[CH_PAD].cut = (0.7 * self.walk[1] + (left as f32 / sec.bars as f32 - 0.5) * -1.5).exp2();
         s.ch[CH_KEYS].cut = (0.8 * self.walk[2] + 0.5 * sweep).exp2();
         let pre_drop = next_main && left == 1 && sec.kind != OUTRO;
+        let rolling = next_main && ((sec.kind == BREAK && left <= 4) || (sec.kind == BUILD && left <= 2));
+        // in a main section, an 8-bar group ends with the kick out for a beat
+        // now and then, and a snare run; a 4-bar group with a short flourish
+        let big = fill == 2 && sec.kind == MAIN && !pre_drop;
+        let drop = big && self.rng.chance(0.4);
         if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 && !(pre_drop && st >= 8) {
-                    b.hit(st as f32, 0.0, CH_KICK, 0, self.kick[st]);
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(pre_drop && st >= 8) && !(drop && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_KICK, 0, v);
                 }
-            }
-            if i % 8 == 7 && self.rng.chance(0.25) {
-                b.hit(self.rng.pick(&[14.0, 15.0]), 0.0, CH_KICK, 0, 0.55);
             }
         }
-        let rolling = next_main && ((sec.kind == BREAK && left <= 4) || (sec.kind == BUILD && left <= 2));
         if m & L_SNARE != 0 && !rolling {
-            for st in 0..16 {
-                if self.snare[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_SNARE, 0, self.snare[st]);
+            let p = if vb { self.snare2 } else { self.snare };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(big && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_SNARE, 0, v);
                 }
+            }
+        }
+        if big {
+            for st in 12..16 {
+                b.hit(st as f32, 0.0, CH_SNARE, 1, 0.3 + 0.12 * (st - 12) as f32);
+            }
+        } else if fill == 1 && sec.kind == MAIN {
+            if self.rng.chance(0.5) {
+                for (k, st) in [13.0, 14.0, 15.0].iter().enumerate() {
+                    b.hit(*st, 0.0, CH_SNARE, 1, 0.25 + 0.1 * k as f32);
+                }
+            } else {
+                b.hit(15.0, 0.0, CH_HAT, HAT_O, 0.5);
             }
         }
         if rolling {
@@ -2763,41 +2898,43 @@ impl Song {
             b.ev.push((b.at(0.0, 0.0), Ev::Riser { secs: b.secs(16.0 * left as f32), vel: 0.5 }));
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                let v = self.hat[st];
-                if v > 0.0 && (st % 4 == 2 || self.rng.chance(0.2 + 0.75 * e)) {
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && (st % 4 == 2 || vb || self.rng.chance(0.2 + 0.75 * e)) {
                     b.hit(st as f32, 0.0, CH_HAT, HAT_C, v * self.rng.range(0.8, 1.0));
                 }
             }
         }
         if m & L_OHAT != 0 {
             for st in 0..16 {
-                if self.ohat[st] > 0.0 {
+                if self.ohat[st] > 0.0 && !(fill == 1 && st == 14) {
                     b.hit(st as f32, 0.0, CH_HAT, HAT_O, self.ohat[st]);
                 }
             }
         }
         if m & L_PERC != 0 {
-            for st in 0..16 {
-                if self.perc[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_PERC, self.perc_kind, self.perc[st] * self.rng.range(0.8, 1.0));
+            let p = if vb { self.perc2 } else { self.perc };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    b.hit(st as f32, 0.0, CH_PERC, self.perc_kind, v * self.rng.range(0.8, 1.0));
                 }
             }
         }
-        if i == 0 && sec.kind == MAIN {
-            b.hit(0.0, 0.0, CH_CYM, 0, 0.8);
+        if sec.kind == MAIN && i.is_multiple_of(8) {
+            b.hit(0.0, 0.0, CH_CYM, 0, if i == 0 { 0.8 } else { 0.55 });
         }
         if m & L_BASS != 0 {
             let c = self.chord(i * 2);
             let root = self.bass_note(c, self.tonic_near(36) - 3);
-            let prev_slide = self.bass[15].on && self.bass[15].slide;
+            let line = if vb { self.bass2 } else { self.bass };
+            let prev_slide = line[15].on && line[15].slide;
             for st in 0..16 {
-                let x = self.bass[st];
-                if !x.on {
+                let x = line[st];
+                if !x.on || (drop && st >= 12) {
                     continue;
                 }
-                let slide_in = if st == 0 { prev_slide } else { self.bass[st - 1].on && self.bass[st - 1].slide };
-                let next_on = self.bass[(st + 1) % 16].on;
+                let slide_in = if st == 0 { prev_slide } else { line[st - 1].on && line[st - 1].slide };
+                let next_on = line[(st + 1) % 16].on;
                 let len = if x.slide && next_on { 1.15 } else { 0.55 };
                 let vel = if x.accent { 1.0 } else { 0.72 };
                 b.note(st as f32, 0.0, CH_BASS, root + x.note, vel, len, slide_in && self.bass_style == 0);
@@ -2806,10 +2943,20 @@ impl Song {
         if m & L_KEYS != 0 {
             let c = self.chord(i * 2);
             let v = self.voicing(c, 55, 74, &self.keys_v, false);
+            // the stab pattern, shifted a 16th in the B groups
+            let shift = if vb { self.stab_shift } else { 0 };
             for st in 0..16 {
-                if self.stab[st] > 0.0 {
+                if self.stab[(st + 16 - shift) % 16] > 0.0 {
                     for &n in &v {
-                        b.note(st as f32, 0.0, CH_KEYS, n, self.stab[st] * self.rng.range(0.85, 1.0), 1.0, false);
+                        b.note(
+                            st as f32,
+                            0.0,
+                            CH_KEYS,
+                            n,
+                            self.stab[(st + 16 - shift) % 16] * self.rng.range(0.85, 1.0),
+                            1.0,
+                            false,
+                        );
                     }
                 }
             }
@@ -2819,22 +2966,16 @@ impl Song {
             self.pads(b, CH_PAD, 50, 72, 0.6, false, 4.0);
         }
         if i % 8 == 7 {
-            // phrase end: the line mutates a little
+            // the 8-bar group's end: the line mutates, and its variant with it
             let r = &mut self.rng;
-            for _ in 0..r.pick(&[1, 1, 2, 3]) {
-                let k = r.below(16);
-                let x = &mut self.bass[k];
-                match r.below(4) {
-                    0 => x.on = !x.on || k == 0,
-                    1 => x.note = deg_semi(self.mode, r.pick(&[0, 0, 0, 7, 7, 2, 4, 6, -1])),
-                    2 => x.accent = !x.accent,
-                    _ => x.slide = !x.slide,
-                }
-            }
-            if r.chance(0.3) {
+            let n = r.pick(&[1, 2, 2, 3]);
+            self.bass = mutate_bass(r, &self.bass, self.mode, n);
+            self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
+            if r.chance(0.4) {
                 let k = r.pick(&[1, 3, 5, 7, 9, 11, 13, 15]);
                 self.hat[k] = if self.hat[k] > 0.0 { 0.0 } else { 0.22 };
             }
+            self.stab_shift = r.pick(&[1, 2, 3, 6]);
         }
     }
 
@@ -2842,50 +2983,46 @@ impl Song {
 
     fn piece_synthwave(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
-        self.bpm = r.range(92.0, 112.0) as f64;
+        self.bpm = r.range(105.0, 120.0) as f64;
         self.swing = 0.0;
         self.human = 0.002;
-        let lead = L_LEAD | L_OHAT;
-        let beat = L_KICK | L_SNARE | L_HAT | L_BASS | L_PAD | L_ARP;
+        let verse = L_KICK | L_SNARE | L_HAT | L_BASS | L_PAD | L_ARP;
+        let chorus = verse | L_LEAD | L_OHAT;
+        let bridge = L_PAD | L_ARP | L_BASS | if r.chance(0.5) { L_LEAD } else { L_PERC } | L_HAT;
         self.plan = vec![
-            Sec { kind: INTRO, bars: 8, mask: L_PAD | L_ARP | if r.chance(0.5) { L_BASS } else { 0 }, energy: 0.3 },
-            Sec { kind: MAIN, bars: 16, mask: beat, energy: 0.6 },
-            Sec { kind: MAIN, bars: 16, mask: beat | lead, energy: 0.9 },
-            Sec {
-                kind: BREAK,
-                bars: 8,
-                mask: L_PAD | if r.chance(0.5) { L_LEAD } else { L_ARP } | if r.chance(0.5) { L_BASS } else { 0 },
-                energy: 0.4,
-            },
-            Sec { kind: MAIN, bars: 16, mask: beat | lead | L_PERC, energy: 1.0 },
+            Sec { kind: INTRO, bars: 4, mask: L_PAD | L_ARP | if r.chance(0.5) { L_BASS } else { 0 }, energy: 0.35 },
+            Sec { kind: MAIN, bars: 8, mask: verse, energy: 0.6 },
+            Sec { kind: MAIN, bars: 8, mask: chorus, energy: 0.9 },
+            Sec { kind: MAIN, bars: 8, mask: verse | L_PERC, energy: 0.65 },
+            Sec { kind: MAIN, bars: 8, mask: chorus, energy: 0.95 },
+            Sec { kind: BREAK, bars: 8, mask: bridge, energy: 0.5 },
+            Sec { kind: MAIN, bars: 8, mask: chorus | L_PERC, energy: 1.0 },
         ];
         if r.chance(0.4) {
-            self.plan.push(Sec { kind: MAIN, bars: 8, mask: beat & !L_ARP | L_LEAD, energy: 0.7 });
-            self.plan.push(Sec { kind: MAIN, bars: 16, mask: beat | lead, energy: 1.0 });
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: chorus, energy: 1.0 });
         }
-        self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_PAD | L_ARP | L_KICK, energy: 0.3 });
+        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: L_PAD | L_ARP | L_KICK, energy: 0.35 });
+        // A: the kick on one and three (or four on the floor), B: an extra
+        // kick, ghost snares; hats in 8ths (A) or 16ths (B)
         self.kick = [0.0; 16];
-        if r.chance(0.4) {
-            for i in (0..16).step_by(4) {
-                self.kick[i] = 0.95;
-            }
-        } else {
-            self.kick[0] = 1.0;
-            self.kick[8] = 0.95;
-            if r.chance(0.5) {
-                self.kick[r.pick(&[10, 7, 11])] = 0.75;
-            }
+        let four = r.chance(0.4);
+        for i in (0..16).step_by(if four { 4 } else { 8 }) {
+            self.kick[i] = 1.0;
         }
+        self.kick2 = self.kick;
+        self.kick2[r.pick(&[10, 7, 11, 14])] = 0.75;
         self.snare = [0.0; 16];
         self.snare[4] = 0.95;
         self.snare[12] = 0.95;
-        let sixteenths = r.chance(0.4);
-        self.hat = std::array::from_fn(|i| match (i % 4, sixteenths) {
-            (0, _) => 0.5,
-            (2, _) => 0.42,
-            (_, true) => 0.25,
+        self.snare2 = self.snare;
+        self.snare2[r.pick(&[15, 7])] = 0.25;
+        self.snare2[r.pick(&[10, 14, 3])] = 0.2;
+        self.hat = std::array::from_fn(|i| match i % 4 {
+            0 => 0.5,
+            2 => 0.42,
             _ => 0.0,
         });
+        self.hat2 = std::array::from_fn(|i| [0.45, 0.25, 0.4, 0.25][i % 4]);
         self.ohat = [0.0; 16];
         self.ohat[14] = 0.45;
         if r.chance(0.5) {
@@ -2893,7 +3030,9 @@ impl Song {
         }
         self.perc = [0.0; 16];
         self.bass_style = r.pick(&[0, 0, 1, 2]) as u8;
+        self.bass_style2 = r.pick(&[0, 1, 2, 2]) as u8;
         self.arp = make_arp(r);
+        self.arp2 = make_arp(r);
         self.arp_rate = r.pick(&[1, 1, 2]);
         self.lead_center = r.pick(&[72, 74, 76]);
         self.phrase = make_phrase(r, 0.55, -2, 9);
@@ -2906,24 +3045,29 @@ impl Song {
     fn synthwave(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let e = sec.energy;
         let i = self.sec_bar;
-        let fill = i % 8 == 7 && m & L_SNARE != 0;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        let big = fill == 2 && m & L_SNARE != 0;
+        let small = fill == 1 && m & L_SNARE != 0;
         s.ch[CH_PAD].cut = (0.6 * self.walk[0] + (e - 0.7)).exp2();
         s.ch[CH_ARP].cut = (0.8 * self.walk[1] + 1.2 * (e - 0.6)).exp2();
         if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 && !(fill && st >= 12) {
-                    b.hit(st as f32, 0.0, CH_KICK, 0, self.kick[st]);
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(big && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_KICK, 0, v);
                 }
             }
         }
         if m & L_SNARE != 0 {
-            for st in 0..16 {
-                if self.snare[st] > 0.0 && !(fill && st >= 12) {
-                    b.hit(st as f32, 0.0, CH_SNARE, 0, self.snare[st]);
+            let p = if vb { self.snare2 } else { self.snare };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(big && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_SNARE, if v < 0.5 { 1 } else { 0 }, v);
                 }
             }
         }
-        if fill {
+        if big {
             if self.rng.chance(0.6) {
                 let toms: &[(f32, u8)] = if self.rng.chance(0.5) {
                     &[(12.0, TOM_HI), (13.0, TOM_HI), (14.0, TOM_MID), (15.0, TOM_LO)]
@@ -2938,36 +3082,47 @@ impl Song {
                     b.hit(st as f32, 0.0, CH_SNARE, 1, 0.5 + 0.12 * (st - 12) as f32);
                 }
             }
+        } else if small {
+            // a flam into the next group: a ghost and the hat opened
+            b.hit(15.0, 0.0, CH_SNARE, 1, 0.35);
+            b.hit(14.0, 0.0, CH_HAT, HAT_O, 0.4);
         }
-        if i == 0 && sec.kind == MAIN && m & L_KICK != 0 {
-            b.hit(0.0, 0.0, CH_CYM, 0, 0.75);
+        if i.is_multiple_of(8) && sec.kind == MAIN && m & L_KICK != 0 {
+            b.hit(0.0, 0.0, CH_CYM, 0, if i == 0 { 0.75 } else { 0.5 });
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                if self.hat[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_HAT, HAT_C, self.hat[st] * self.rng.range(0.85, 1.0));
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    b.hit(st as f32, 0.0, CH_HAT, HAT_C, v * self.rng.range(0.85, 1.0));
                 }
             }
         }
         if m & L_OHAT != 0 {
             for st in 0..16 {
-                if self.ohat[st] > 0.0 {
+                if self.ohat[st] > 0.0 && !(small && st == 14) {
                     b.hit(st as f32, 0.0, CH_HAT, HAT_O, self.ohat[st]);
                 }
             }
         }
-        if m & L_PERC != 0 && i % 2 == 1 {
+        if m & L_PERC != 0 {
+            // a rim on the off-beat of four, a clap layering two and four in B
             b.hit(14.0, 0.0, CH_PERC, RIM, 0.5);
+            if vb {
+                b.hit(7.0, 0.0, CH_PERC, RIM, 0.35);
+            }
         }
         if m & L_BASS != 0 {
             let lo = self.tonic_near(36) - 4;
-            for st in (0..16).step_by(if self.bass_style == 2 { 1 } else { 2 }) {
+            // the verse's bass, or in a chorus the B groups' other one
+            let style = if e >= 0.9 && vb { self.bass_style2 } else { self.bass_style };
+            for st in (0..16).step_by(if style == 2 { 1 } else { 2 }) {
                 let c = self.chord(i * 2 + (st >= 8) as u32);
                 let root = self.bass_note(c, lo);
-                let (note, len, vel) = match self.bass_style {
+                let next = self.chord(i * 2 + (st >= 8) as u32 + 1);
+                let (note, len, vel) = match style {
                     0 => (root + if st % 4 == 2 { 12 } else { 0 }, 1.6, 0.85),
                     1 => {
-                        let next = self.chord(i * 2 + (st >= 8) as u32 + 1);
                         let n = if st % 8 == 6 && next != c {
                             root + self.semi(c.deg + 4) - self.semi(c.deg)
                         } else {
@@ -2989,13 +3144,16 @@ impl Song {
             self.pads(b, CH_PAD, 52, 76, 0.6, false, 2.0);
         }
         if m & L_ARP != 0 {
+            // the arpeggio's order per variant; the B groups an octave up in a chorus
             let rate = self.arp_rate;
+            let up = if vb && e >= 0.9 { 12 } else { 0 };
             for st in (0..16).step_by(rate) {
                 let c = self.chord(i * 2 + (st >= 8) as u32);
                 let tones = self.arp_tones(c, self.tonic_near(64) - 4);
-                let k = self.arp[(st / rate) % self.arp.len()] as usize;
+                let order = if vb { &self.arp2 } else { &self.arp };
+                let k = order[(st / rate) % order.len()] as usize;
                 let vel = if st % 4 == 0 { 0.85 } else { 0.65 };
-                b.note(st as f32, 0.0, CH_ARP, tones[k % tones.len()], vel, rate as f32 * 0.8, false);
+                b.note(st as f32, 0.0, CH_ARP, tones[k % tones.len()] + up, vel, rate as f32 * 0.8, false);
             }
         }
         if m & L_LEAD != 0 {
@@ -3007,41 +3165,55 @@ impl Song {
 
     fn piece_lofi(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
-        self.bpm = r.range(72.0, 90.0) as f64;
-        self.swing = r.range(0.12, 0.3);
-        self.human = 0.012;
+        self.bpm = r.range(85.0, 95.0) as f64;
+        self.swing = r.range(0.12, 0.28);
+        self.human = 0.01;
         let drums = L_KICK | L_SNARE | L_HAT | L_BASS | L_KEYS | L_TEX;
         self.plan = vec![
-            Sec { kind: INTRO, bars: 4, mask: L_KEYS | L_TEX | if r.chance(0.4) { L_BASS } else { 0 }, energy: 0.3 },
-            Sec { kind: MAIN, bars: 16, mask: drums, energy: 0.6 },
-            Sec { kind: MAIN, bars: 16, mask: drums | L_LEAD | L_PERC, energy: 0.75 },
+            Sec { kind: INTRO, bars: 4, mask: L_KEYS | L_TEX | if r.chance(0.6) { L_BASS } else { 0 }, energy: 0.35 },
+            Sec { kind: MAIN, bars: 8, mask: drums, energy: 0.6 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD, energy: 0.75 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_PERC, energy: 0.7 },
             Sec {
                 kind: BREAK,
-                bars: r.pick(&[4, 8]),
+                bars: 4,
                 mask: L_KEYS | L_TEX | if r.chance(0.5) { L_LEAD } else { L_BASS | L_HAT },
                 energy: 0.4,
             },
-            Sec { kind: MAIN, bars: 16, mask: drums | L_LEAD, energy: 0.8 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD | L_PERC, energy: 0.8 },
         ];
-        if r.chance(0.4) {
-            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums, energy: 0.65 });
+        if r.chance(0.5) {
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD, energy: 0.75 });
         }
-        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: L_KEYS | L_TEX, energy: 0.3 });
-        let kick: &[usize] = r.pick(&[&[0, 7, 10][..], &[0, 10, 11], &[0, 6, 9], &[0, 3, 10], &[0, 7, 9, 10]]);
+        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: L_KEYS | L_TEX | L_BASS, energy: 0.35 });
+        // two boom-bap kicks (A and B), snares on two and four with more
+        // ghosts in B; hats in 8ths with a few 16ths (A) or swung 16ths (B)
+        let kicks: [&[usize]; 6] =
+            [&[0, 7, 10], &[0, 10, 11], &[0, 6, 9], &[0, 3, 10], &[0, 7, 9, 10], &[0, 8, 11, 14]];
+        let ka = r.below(kicks.len());
+        let kb = (ka + 1 + r.below(kicks.len() - 1)) % kicks.len();
         self.kick = [0.0; 16];
-        for &k in kick {
-            self.kick[k] = if k == 0 { 1.0 } else { 0.8 };
+        self.kick2 = [0.0; 16];
+        for (p, k) in [(&mut self.kick, ka), (&mut self.kick2, kb)] {
+            for &st in kicks[k] {
+                p[st] = if st == 0 { 1.0 } else { 0.8 };
+            }
         }
         self.snare = [0.0; 16];
         self.snare[4] = 0.85;
         self.snare[12] = 0.9;
+        self.snare2 = self.snare;
+        self.snare2[7] = 0.18;
+        self.snare2[15] = 0.2;
         self.snare_kind = if r.chance(0.3) { 1 } else { 0 };
         self.hat = std::array::from_fn(|i| match i % 4 {
             0 => 0.55,
             2 => 0.4,
-            _ => 0.18,
+            _ => 0.0,
         });
+        self.hat2 = std::array::from_fn(|i| [0.5, 0.22, 0.38, 0.26][i % 4]);
         self.perc = std::array::from_fn(|i| if i % 2 == 1 { 0.35 } else { 0.0 });
+        self.perc2 = std::array::from_fn(|i| [0.0, 0.3, 0.2, 0.35][i % 4]);
         self.lead_center = r.pick(&[72, 74, 76]);
         self.phrase = make_phrase(r, 0.35, -2, 8);
         self.anticipated = false;
@@ -3056,44 +3228,58 @@ impl Song {
         let e = sec.energy;
         let i = self.sec_bar;
         let h = self.human;
-        let fill = i % 8 == 7;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        // an 8-bar group closes with the drums out on the last beat (or a
+        // snare pickup), a 4-bar group with the kick dropped and ghosts
+        let gap = fill == 2 && self.rng.chance(0.5);
         s.ch[CH_KEYS].cut = (0.5 * self.walk[0]).exp2();
         if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 && !(fill && st >= 8 && self.rng.chance(0.5)) {
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(fill > 0 && st >= 12) {
                     let j = self.rng.range(0.0, h * 0.3);
-                    b.hit(st as f32, j, CH_KICK, 0, self.kick[st] * self.rng.range(0.9, 1.0));
+                    b.hit(st as f32, j, CH_KICK, 0, v * self.rng.range(0.9, 1.0));
                 }
             }
         }
         if m & L_SNARE != 0 {
-            for st in 0..16 {
-                if self.snare[st] > 0.0 {
+            let p = if vb { self.snare2 } else { self.snare };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(gap && st >= 12) {
                     let j = self.rng.range(0.004, h + 0.004);
-                    b.hit(st as f32, j, CH_SNARE, self.snare_kind, self.snare[st] * self.rng.range(0.85, 1.0));
+                    let kind = if v < 0.5 { 0 } else { self.snare_kind };
+                    b.hit(st as f32, j, CH_SNARE, kind, v * self.rng.range(0.85, 1.0));
                 }
             }
-            for st in [3usize, 7, 9, 15] {
-                if self.rng.chance(0.12 + 0.15 * e) {
+            for st in [3usize, 9] {
+                if self.rng.chance(0.1 + 0.15 * e) {
                     b.hit(st as f32, self.rng.range(0.0, h), CH_SNARE, 0, self.rng.range(0.12, 0.22));
+                }
+            }
+            if fill == 1 || (fill == 2 && !gap) {
+                for (k, st) in [13.0, 14.0, 15.0].iter().enumerate() {
+                    b.hit(*st, self.rng.range(0.0, h), CH_SNARE, 0, 0.14 + 0.06 * k as f32);
                 }
             }
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                if self.hat[st] > 0.0 && (st % 2 == 0 || self.rng.chance(0.25 + 0.4 * e)) {
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(gap && st >= 12) {
                     let j = self.rng.range(0.0, h);
-                    b.hit(st as f32, j, CH_HAT, HAT_C, self.hat[st] * self.rng.range(0.7, 1.0));
+                    b.hit(st as f32, j, CH_HAT, HAT_C, v * self.rng.range(0.7, 1.0));
                 }
             }
-            if self.rng.chance(0.25) {
+            if vb || gap {
                 b.hit(14.0, self.rng.range(0.0, h), CH_HAT, HAT_O, 0.4);
             }
         }
         if m & L_PERC != 0 {
-            for st in 0..16 {
-                if self.perc[st] > 0.0 && self.rng.chance(0.7) {
-                    b.hit(st as f32, self.rng.range(0.0, h), CH_PERC, SHAKER, self.perc[st] * self.rng.range(0.6, 1.0));
+            let p = if vb { self.perc2 } else { self.perc };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && self.rng.chance(0.8) {
+                    b.hit(st as f32, self.rng.range(0.0, h), CH_PERC, SHAKER, v * self.rng.range(0.6, 1.0));
                 }
             }
         }
@@ -3108,11 +3294,11 @@ impl Song {
             self.anticipated = false;
             if c1 != c0 {
                 self.strum(b, 8.0, c1, 7.5, 0.55);
-            } else if self.rng.chance(0.55) {
+            } else if self.rng.chance(if vb { 0.75 } else { 0.45 }) {
                 let st = self.rng.pick(&[6.0, 10.0, 11.0]);
                 self.strum(b, st, c0, 16.0 - st, 0.42);
             }
-            if next != c1 && self.rng.chance(0.3) && i + 1 < sec.bars {
+            if next != c1 && self.rng.chance(if vb { 0.5 } else { 0.25 }) && i + 1 < sec.bars {
                 self.strum(b, 14.0, next, 16.0, 0.55);
                 self.anticipated = true;
             }
@@ -3120,18 +3306,21 @@ impl Song {
         if m & L_BASS != 0 {
             let lo = self.tonic_near(42) - 5;
             let next_root = self.bass_note(self.chord(i * 2 + 2), lo);
-            let approach = self.rng.chance(0.35) && next_root != self.bass_note(self.chord(i * 2 + 1), lo);
+            // the B groups push into the next chord a 16th early, or walk to it
+            let push = vb && next_root != self.bass_note(self.chord(i * 2 + 1), lo) && self.rng.chance(0.6);
+            let approach = !push && self.rng.chance(0.35) && next_root != self.bass_note(self.chord(i * 2 + 1), lo);
             for hh in 0..2u32 {
                 let c = self.chord(i * 2 + hh);
                 let root = self.bass_note(c, lo);
                 let st0 = hh as f32 * 8.0;
                 if hh == 1 && c == self.chord(i * 2) && self.rng.chance(0.4) {
-                    // the second half answers with the fifth
-                    b.note(st0 + 2.0, h * 0.5, CH_BASS, root + 7, 0.65, 2.0, false);
+                    // the second half answers with the fifth, or the octave pops
+                    let n = root + self.rng.pick(&[7, 12]);
+                    b.note(st0 + 2.0, h * 0.5, CH_BASS, n, 0.65, 2.0, false);
                     continue;
                 }
-                b.note(st0, h * 0.3, CH_BASS, root, 0.85, 5.8, false);
-                if !(hh == 1 && approach) && self.rng.chance(0.6) {
+                b.note(st0, h * 0.3, CH_BASS, root, 0.85, if hh == 1 && push { 5.0 } else { 5.8 }, false);
+                if !(hh == 1 && (approach || push)) && self.rng.chance(0.6) {
                     let n = root + self.rng.pick(&[7, 12, 7, 10]);
                     b.note(st0 + 6.0, h * 0.5, CH_BASS, n, 0.6, 1.8, false);
                 }
@@ -3139,6 +3328,9 @@ impl Song {
             if approach {
                 let n = next_root + self.rng.pick(&[-1, 1, -2]);
                 b.note(14.0, h * 0.5, CH_BASS, n, 0.6, 2.0, false);
+            }
+            if push {
+                b.note(15.0, h * 0.3, CH_BASS, next_root, 0.8, 1.6, false);
             }
         }
         if m & L_LEAD != 0 {
@@ -3711,6 +3903,23 @@ fn polka_strain(r: &mut Rng, plans: &[&str], bars: usize, key: i32, mode: usize)
     Strain { key, mode, chords, mel, ans }
 }
 
+/// A bassline changed in `k` places: a note on or off, another note, an
+/// accent or a slide.
+fn mutate_bass(r: &mut Rng, p: &[Step; 16], mode: usize, k: usize) -> [Step; 16] {
+    let mut p = *p;
+    for _ in 0..k {
+        let i = r.below(16);
+        let x = &mut p[i];
+        match r.below(4) {
+            0 => x.on = !x.on || i == 0,
+            1 => x.note = deg_semi(mode, r.pick(&[0, 0, 0, 7, 7, 2, 4, 6, -1])),
+            2 => x.accent = !x.accent,
+            _ => x.slide = !x.slide,
+        }
+    }
+    p
+}
+
 /// A bassline for techno: acid (16ths, accents, slides) or rolling (offbeats).
 fn new_bass(r: &mut Rng, mode: usize, style: u8) -> [Step; 16] {
     let mut p = [Step::default(); 16];
@@ -3893,17 +4102,20 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.25,
         ..PATCH
     };
+    // the pulse bass: soft round plucks
     ch[CH_BASS].patch = Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
         mix2: 0.3,
-        cutoff: 400.0,
+        cutoff: 450.0,
+        env_amt: 0.8,
+        fdec: 0.2,
         keytrack: 0.0,
-        a: 0.05,
-        d: 2.0,
-        s: 0.7,
-        r: 1.0,
-        gain: 0.6,
+        a: 0.008,
+        d: 0.6,
+        s: 0.4,
+        r: 0.15,
+        gain: 0.7,
         ..PATCH
     };
     ch[CH_BASS].mono = true;
@@ -3925,6 +4137,10 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
     mix(&mut ch[CH_BASS], 0.5, 0.0, 0.1, 0.0, 0.0);
     mix(&mut ch[CH_KICK], 0.45, 0.0, 0.2, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.25, 0.3, 0.4, 0.2, 0.0);
+    ch[CH_PERC].drums = percs(r);
+    mix(&mut ch[CH_PERC], 0.18, -0.3, 0.5, 0.25, 0.0);
+    ch[CH_PERC].lp_base = 4000.0;
+    ch[CH_PERC].lp = 4000.0;
     mix(&mut ch[CH_FX], 1.0, 0.0, 0.5, 0.0, 0.0);
     ch[CH_KICK].lp_base = 2500.0;
     ch[CH_KICK].lp = 2500.0;
