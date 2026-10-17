@@ -353,7 +353,27 @@ struct Patch {
     glide: f32,
     drive: f32,
     gain: f32,
+    /// Karplus-Strong (when > 0): a plucked string ringing for `ks` seconds,
+    /// `ks_tone` 0 (dull) .. 1 (bright)
+    ks: f32,
+    ks_tone: f32,
+    /// a vowel's formants (1 a, 2 e, 3 i, 4 o, 5 u; 0 none) on the oscillators
+    vowel: u8,
+    /// semitones the note starts away from itself, gliding in (`glide`)
+    bend: f32,
 }
+
+/// The vowels' first three formants, Hz.
+const VOWELS: [[f32; 3]; 5] = [
+    [730.0, 1090.0, 2440.0],
+    [530.0, 1840.0, 2480.0],
+    [300.0, 2200.0, 2950.0],
+    [570.0, 840.0, 2410.0],
+    [320.0, 800.0, 2240.0],
+];
+
+/// A string's delay line, a power of two (the lowest note: 48000 / 2048 Hz, 23 Hz).
+const KS_LEN: usize = 2048;
 
 const PATCH: Patch = Patch {
     wave: Wave::Saw,
@@ -389,6 +409,10 @@ const PATCH: Patch = Patch {
     glide: 0.0,
     drive: 0.0,
     gain: 1.0,
+    ks: 0.0,
+    ks_tone: 0.5,
+    vowel: 0,
+    bend: 0.0,
 };
 
 #[derive(Clone, Copy)]
@@ -418,6 +442,22 @@ struct Voice {
     /// the gain (velocity, tremolo, accent) as applied: it glides (4 ms), so
     /// a sounding voice retriggered softer or louder does not step
     g: f32,
+    /// the string: its delay line, where it writes, its length, its loop's
+    /// low-pass (coefficient, state) and its loss each time round
+    kb: [f32; KS_LEN],
+    ki: usize,
+    klen: f32,
+    kc: f32,
+    klp: f32,
+    kfb: f32,
+    /// a sounding voice restarted on another source (a string re-plucked, a
+    /// stolen voice of another kind): its output carried over the jump, the
+    /// last sample, an offset decaying from it, whether one is due
+    last: [f32; 2],
+    off: [f32; 2],
+    fix: bool,
+    /// the formants: three band-passes a side
+    ff: [Svf; 6],
 }
 
 /// The per-sample step of a voice's gain glide.
@@ -445,6 +485,16 @@ const VOICE: Voice = Voice {
     lfo: 0.0,
     noise: Noise(0x2545_F491),
     g: 0.0,
+    kb: [0.0; KS_LEN],
+    ki: 0,
+    klen: 100.0,
+    kc: 0.5,
+    klp: 0.0,
+    kfb: 0.0,
+    last: [0.0; 2],
+    off: [0.0; 2],
+    fix: false,
+    ff: [Svf { ic1: 0.0, ic2: 0.0, a1: 0.0, a2: 0.0, a3: 0.0, k: 2.0 }; 6],
 };
 
 impl Voice {
@@ -460,7 +510,8 @@ impl Voice {
             self.accent = accent;
             return;
         }
-        if !self.on {
+        let fresh = !self.on;
+        if fresh {
             // a fresh voice: oscillators at scattered phases (the attack
             // hides the start), filters empty
             self.noise = Noise(seed);
@@ -471,13 +522,60 @@ impl Voice {
             self.mph = 0.0;
             self.mph2 = 0.0;
             self.f = [Svf::default(); 2];
+            self.ff = [Svf::default(); 6];
             self.lfo = self.noise.next() * 0.5 + 0.5;
             self.amp.level = 0.0;
+            if p.ks > 0.0 {
+                self.kb.fill(0.0);
+                self.klp = 0.0;
+            }
+            self.last = [0.0; 2];
+            self.off = [0.0; 2];
+        } else {
+            let kind = |q: &Patch| {
+                if q.ks > 0.0 {
+                    2
+                } else if q.fm > 0.0 {
+                    1
+                } else {
+                    0
+                }
+            };
+            if p.ks > 0.0 {
+                // a string still ringing, plucked again: damped and restarted
+                self.kb.fill(0.0);
+                self.klp = 0.0;
+            }
+            // the output carried over the jump to the new source (no click)
+            self.fix = p.ks > 0.0 || kind(p) != kind(&self.p);
         }
         self.p = *p;
         self.on = true;
-        self.note = note;
+        self.note = note + p.bend;
         self.target = note;
+        if p.ks > 0.0 {
+            // the string: a delay a period long (less its loop filter's lag),
+            // losing -60 dB over `ks` seconds, plucked with a burst of noise
+            // as bright as its tone (added to what still rings: no click)
+            let f = mtof(note);
+            self.kc = 0.25 + 0.7 * p.ks_tone;
+            self.klen = (SR / f - (1.0 - self.kc) / self.kc).clamp(2.0, (KS_LEN - 2) as f32);
+            self.kfb = (-6.9 / (f * p.ks.max(0.01))).exp();
+            let n = self.klen.ceil() as usize;
+            let ce = 0.15 + 0.8 * p.ks_tone;
+            let amp = 1.4 / ce.sqrt();
+            let mut lp = 0.0;
+            for k in 0..n {
+                lp += (self.noise.next() - lp) * ce;
+                self.kb[(self.ki + KS_LEN - n + k) & (KS_LEN - 1)] += lp * amp;
+            }
+        }
+        if p.vowel > 0 {
+            let fs = VOWELS[(p.vowel as usize - 1) % VOWELS.len()];
+            for (k, f) in self.ff.iter_mut().enumerate() {
+                f.set(fs[k % 3], [0.9, 0.93, 0.93][k % 3]);
+            }
+        }
         self.vel = vel;
         self.accent = accent;
         self.hold = len;
@@ -490,6 +588,21 @@ impl Voice {
         self.fme2 = self.fme;
         self.fmc = t60(p.fm_dec);
         self.fmc2 = t60(p.fm2_dec);
+    }
+
+    /// One sample out, carried over a restart's jump when one is due.
+    #[inline]
+    fn out(&mut self, o: &mut [f32; 2], l: f32, r: f32) {
+        if self.fix {
+            self.off = [self.last[0] - l, self.last[1] - r];
+            self.fix = false;
+        }
+        let (l, r) = (l + self.off[0], r + self.off[1]);
+        self.off[0] *= 0.995;
+        self.off[1] *= 0.995;
+        self.last = [l, r];
+        o[0] += l;
+        o[1] += r;
     }
 
     /// Adds the voice into `buf`; `cut` scales the cutoff (the channel's drift).
@@ -537,7 +650,28 @@ impl Voice {
             }
             self.fenv *= (-6.9 * nf / (p.fdec * SR)).exp();
         }
-        if p.fm > 0.0 {
+        if p.ks > 0.0 {
+            for o in buf.iter_mut() {
+                let rp = self.ki as f32 + KS_LEN as f32 - self.klen;
+                let i0 = rp as usize;
+                let fr = rp - i0 as f32;
+                let a0 = self.kb[i0 & (KS_LEN - 1)];
+                let y = a0 + (self.kb[(i0 + 1) & (KS_LEN - 1)] - a0) * fr;
+                self.klp += (y - self.klp) * self.kc;
+                self.kb[self.ki] = self.klp * self.kfb;
+                self.ki = (self.ki + 1) & (KS_LEN - 1);
+                let mut x = y;
+                if p.filter {
+                    x = self.f[0].lp(x);
+                }
+                if p.drive > 0.0 {
+                    x = soft(x * (1.0 + p.drive));
+                }
+                self.g += (gain - self.g) * GLIDE_G;
+                let a = self.amp.next() * self.g;
+                self.out(o, x * a, x * a);
+            }
+        } else if p.fm > 0.0 {
             let (r1, r2) = (dt0 * p.ratio, dt0 * p.ratio2);
             // the second modulator (a tine's ping, high above) eases off up the keyboard
             let fm2 = p.fm2 * (400.0 / f).min(1.0);
@@ -561,8 +695,7 @@ impl Voice {
                 }
                 self.g += (gain - self.g) * GLIDE_G;
                 let a = self.amp.next() * self.g;
-                o[0] += x * a;
-                o[1] += x * a;
+                self.out(o, x * a, x * a);
             }
         } else {
             let u = (p.unison as usize).clamp(1, 3);
@@ -599,6 +732,18 @@ impl Voice {
                 }
                 l += c;
                 r += c;
+                if p.vowel > 0 {
+                    let ff = &mut self.ff;
+                    let form = |f: &mut [Svf], x: f32| 1.6 * (f[0].bp(x) + 0.6 * f[1].bp(x) + 0.35 * f[2].bp(x));
+                    if stereo {
+                        l = form(&mut ff[..3], l);
+                        r = form(&mut ff[3..], r);
+                    } else {
+                        let m = form(&mut ff[..3], (l + r) * 0.5);
+                        l = m;
+                        r = m;
+                    }
+                }
                 if p.filter {
                     if stereo {
                         l = self.f[0].lp(l);
@@ -618,8 +763,7 @@ impl Voice {
                 }
                 self.g += (gain - self.g) * GLIDE_G;
                 let a = self.amp.next() * self.g;
-                o[0] += l * a;
-                o[1] += r * a;
+                self.out(o, l * a, r * a);
             }
         }
         self.age = self.age.saturating_add(n as u32);
@@ -1126,6 +1270,12 @@ struct Fx {
     wwalk: f32,
     crackle: f32,
     crackle_rate: f32,
+    /// rain: a soft noise bed and drops (a ping through a resonant band-pass)
+    rain: f32,
+    rain_to: f32,
+    rz: [f32; 2],
+    drop: Svf,
+    dpan: f32,
     pop: f32,
     pan: f32,
     hiss: f32,
@@ -1148,6 +1298,11 @@ impl Fx {
             wwalk: 0.0,
             crackle: 0.0,
             crackle_rate: 0.0,
+            rain: 0.0,
+            rain_to: 0.0,
+            rz: [0.0; 2],
+            drop: Svf::default(),
+            dpan: 0.0,
             pop: 0.0,
             pan: 0.0,
             hiss: 0.0,
@@ -1196,6 +1351,23 @@ impl Fx {
                 self.wz[1] += (self.n2.next() - self.wz[1]) * 0.15;
                 o[0] += self.wf[0].bp(self.wz[0]) * self.wind * 2.0;
                 o[1] += self.wf[1].bp(self.wz[1]) * self.wind * 2.0;
+            }
+        }
+        self.rain += (self.rain_to - self.rain) * (n as f32 / (3.0 * SR));
+        if self.rain > 1e-4 {
+            any = true;
+            for o in buf.iter_mut() {
+                self.rz[0] += (self.n.next() - self.rz[0]) * 0.3;
+                self.rz[1] += (self.n2.next() - self.rz[1]) * 0.3;
+                let mut imp = 0.0;
+                if self.n.next() * 0.5 + 0.5 < 30.0 / SR {
+                    self.drop.set(1500.0 * (self.n2.next() * 1.5 + 1.6).exp2(), 0.96);
+                    self.dpan = self.n2.next() * 0.8;
+                    imp = self.n.next().abs() * 6.0;
+                }
+                let d = self.drop.bp(imp);
+                o[0] += (self.rz[0] * 0.5 + d * (1.0 - self.dpan)) * self.rain;
+                o[1] += (self.rz[1] * 0.5 + d * (1.0 + self.dpan)) * self.rain;
             }
         }
         if self.crackle > 0.0 {
@@ -2181,6 +2353,9 @@ struct Song {
     stab_shift: usize,
     /// techno's hook: a bar of melody
     hook: Vec<MNote>,
+    /// the piece's instruments, and whether ambient's texture is rain (or wind)
+    band: Band,
+    rain: bool,
     /// an optional layer sitting out this phrase
     mute: u32,
     anticipated: bool,
@@ -2244,6 +2419,8 @@ impl Song {
             bass_style2: 0,
             stab_shift: 0,
             hook: Vec::new(),
+            band: Band::default(),
+            rain: false,
             mute: 0,
             anticipated: false,
             bell_motif: false,
@@ -2511,6 +2688,15 @@ impl Song {
         };
         self.prog = self.progs[which.min(self.progs.len() - 1)].clone();
         self.pivot = None;
+        let dress = if self.genre == POLKA {
+            match self.pk.map.get(self.sec).map_or(0, |m| m.0) {
+                0 => 0,
+                1 => 1,
+                _ => r.below(3),
+            }
+        } else {
+            which
+        };
         let lift = self.lifts.get(self.sec).copied().unwrap_or(0);
         if lift != self.lift {
             self.lift = lift;
@@ -2519,7 +2705,9 @@ impl Song {
         }
         match self.genre {
             AMBIENT => {
-                s.fx.wind_to = if sec.mask & L_TEX != 0 { r.range(0.06, 0.12) } else { 0.0 };
+                let tex = sec.mask & L_TEX != 0;
+                s.fx.wind_to = if tex && !self.rain { r.range(0.06, 0.12) } else { 0.0 };
+                s.fx.rain_to = if tex && self.rain { r.range(0.05, 0.1) } else { 0.0 };
                 if sec.kind == MAIN && r.chance(0.4) {
                     self.phrase = make_melody(r, 0.3, 0, 11);
                 }
@@ -2559,9 +2747,27 @@ impl Song {
             }
             _ => self.polka_section(),
         }
+        self.dress(s, dress);
     }
 
     // -- the parts all genres share
+
+    /// The section's instruments: the B ones for choruses and bridges (`which`
+    /// 1 and 2), the A ones for verses, a fifth of the time the other way
+    /// round; the bass and drone keep theirs more often; the drum kits swap
+    /// together a third of the time.
+    fn dress(&mut self, s: &mut Synth, which: usize) {
+        let kit_b = self.rng.chance(0.35);
+        for k in 0..self.band.tones.len() {
+            let (ch, pair) = self.band.tones[k];
+            let melodic = matches!(ch, CH_PAD | CH_ARP | CH_LEAD | CH_BELL | CH_KEYS);
+            let b = if melodic { (which >= 1) != self.rng.chance(0.2) } else { which == 2 || self.rng.chance(0.25) };
+            s.ch[ch].patch = pair[b as usize];
+        }
+        for (ch, kits) in &self.band.kits {
+            s.ch[*ch].drums = kits[kit_b as usize].clone();
+        }
+    }
 
     /// Whether this 4-bar group plays the B patterns.
     fn var_b(&self) -> bool {
@@ -2810,6 +3016,8 @@ impl Song {
         self.hat2[12] = 0.35;
         self.prange = (0, 11);
         sounds_ambient(r, s);
+        self.band = band_ambient(r, s);
+        self.rain = r.chance(0.4);
         self.draw_progs();
     }
 
@@ -3002,6 +3210,7 @@ impl Song {
         self.hook = make_cell(r, 16, 0.45, 0, 9, false);
         self.lead_center = r.pick(&[67, 69, 72]);
         sounds_techno(r, s, self.bass_style);
+        self.band = band_techno(r, s, self.bass_style == 0);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
     }
@@ -3230,6 +3439,7 @@ impl Song {
         self.phrase = make_melody(r, 0.55, -2, 9);
         self.prange = (-2, 9);
         sounds_synthwave(r, s);
+        self.band = band_synthwave(r, s);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
     }
@@ -3414,6 +3624,7 @@ impl Song {
         self.phrase = make_melody(r, 0.4, -2, 8);
         self.anticipated = false;
         sounds_lofi(r, s);
+        self.band = band_lofi(r, s);
         self.prange = (-2, 8);
         let echo = r.pick(&[4.0, 3.0, 6.0]);
         s.dly.target = (self.step_len() * echo) as f32;
@@ -3497,6 +3708,23 @@ impl Song {
             if next != c1 && self.rng.chance(if vb { 0.5 } else { 0.25 }) && i + 1 < sec.bars {
                 self.strum(b, 14.0, next, 16.0, 0.55);
                 self.anticipated = true;
+            }
+            let k = s.ch[CH_KEYS].patch;
+            if k.ks > 0.0 || k.s < 0.1 {
+                // a guitar or a piano dies away: strum again on the off-beats
+                for st in [6.0, 11.0] {
+                    let c = if st < 8.0 { c0 } else { c1 };
+                    self.strum(b, st, c, 4.0, 0.4);
+                }
+            }
+            if m & L_KICK == 0 {
+                // with no drums the keys keep moving: a broken chord over the second half
+                let tones = self.arp_tones(c1, 60);
+                let up = self.rng.bit_chance();
+                for (k, st) in [8.0, 10.0, 12.0].iter().enumerate() {
+                    let n = tones[if up { k + 1 } else { 3 - k }.min(tones.len() - 1)];
+                    b.note(*st, self.rng.range(0.0, h), CH_KEYS, n, 0.35, 3.5, false);
+                }
             }
         }
         if m & L_BASS != 0 {
@@ -3611,6 +3839,7 @@ impl Song {
         };
         let trumpet = r.chance(0.5);
         sounds_polka(r, s, trumpet);
+        self.band = band_polka(r, s);
     }
 
     /// A polka section begins: its tune as it goes this time through (a
@@ -4235,6 +4464,1561 @@ fn crash(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.7,
         ..DRUM
     }]
+}
+
+// ---------------------------------------------------------------- the instruments
+
+/// An instrument of a palette: its name and how to make one (each a little
+/// different).
+type Make = fn(&mut Rng) -> Patch;
+/// A drum kit for one channel, its kinds in the channel's order.
+type MakeKit = fn(&mut Rng) -> Vec<DrumPatch>;
+
+/// How loud a patch plays: the RMS of one note at `note`, velocity 0.8, over
+/// 0.12 s after a short attack (the patch's own attack would only delay it).
+fn loudness(p: &Patch, note: f32) -> f32 {
+    let q = Patch { a: p.a.min(0.03), ..*p };
+    let mut v = VOICE;
+    v.start(&q, note, 0.8, (0.5 * SR) as i64, false, 0x1234_5679);
+    let mut buf = [[0.0f32; 2]; BLOCK];
+    let (mut sum, mut n) = (0.0f32, 0usize);
+    for k in 0..(0.15 * SR) as usize / BLOCK {
+        buf.fill([0.0; 2]);
+        v.render(1.0, &mut buf);
+        if k * BLOCK >= (0.03 * SR) as usize {
+            sum += buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>();
+            n += 2 * BLOCK;
+        }
+    }
+    (sum / n.max(1) as f32).sqrt().max(1e-5)
+}
+
+/// A piece's instruments: two for each tonal role (A and B: verses one,
+/// choruses and bridges the other, give or take), and two kits for each drum
+/// channel; swapped at section boundaries, each note keeping the patch it
+/// began with.
+#[derive(Default)]
+struct Band {
+    tones: Vec<(usize, [Patch; 2])>,
+    kits: Vec<(usize, [Vec<DrumPatch>; 2])>,
+}
+
+impl Band {
+    /// Channel `ch`'s pair: the role's tuned original (sometimes) or a pick
+    /// from `pal`, and another pick, both brought to the original's
+    /// loudness at `note`.
+    fn tone(&mut self, r: &mut Rng, s: &Synth, ch: usize, pal: &[(&str, Make)], note: f32) {
+        let orig = s.ch[ch].patch;
+        let target = loudness(&orig, note);
+        let level = |p: Patch| Patch { gain: p.gain * (target / loudness(&p, note)).clamp(0.2, 5.0), ..p };
+        let ia = if r.chance(0.35) { None } else { Some(r.below(pal.len())) };
+        let mut ib = r.below(pal.len());
+        if Some(ib) == ia {
+            ib = (ib + 1 + r.below(pal.len() - 1)) % pal.len();
+        }
+        let a = ia.map_or(orig, |i| level((pal[i].1)(r)));
+        let b = level((pal[ib].1)(r));
+        self.tones.push((ch, [a, b]));
+    }
+
+    /// Channel `ch`'s kits: the original and one from `kits`.
+    fn kit(&mut self, r: &mut Rng, s: &Synth, ch: usize, kits: &[(&str, MakeKit)]) {
+        let orig = s.ch[ch].drums.clone();
+        let alt = (r.pick(kits).1)(r);
+        let [a, b] = if r.bit_chance() { [orig, alt] } else { [alt, orig] };
+        self.kits.push((ch, [a, b]));
+    }
+}
+
+// -- pads
+
+fn pad_strings(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(18.0, 28.0),
+        width: 1.0,
+        cutoff: r.range(2500.0, 4000.0),
+        res: 0.05,
+        keytrack: 0.5,
+        a: r.range(0.6, 1.2),
+        d: 2.0,
+        s: 0.9,
+        r: 1.5,
+        vib: 0.08,
+        vib_rate: 5.0,
+        gain: 0.14,
+        ..PATCH
+    }
+}
+
+fn pad_brass(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 6.0,
+        width: 0.5,
+        cutoff: r.range(600.0, 900.0),
+        res: 0.15,
+        env_amt: 2.2,
+        fdec: 0.6,
+        keytrack: 0.4,
+        a: 0.08,
+        d: 1.0,
+        s: 0.8,
+        r: 0.6,
+        gain: 0.15,
+        ..PATCH
+    }
+}
+
+fn pad_choir(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(8.0, 14.0),
+        width: 0.8,
+        vowel: r.pick(&[1, 4, 5]),
+        cutoff: 3200.0,
+        keytrack: 0.2,
+        a: r.range(0.5, 1.2),
+        d: 2.0,
+        s: 0.9,
+        r: 2.0,
+        vib: 0.15,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn pad_glass(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.4),
+        ratio: r.pick(&[2.0, 3.0]),
+        fm_dec: 3.0,
+        a: r.range(0.5, 1.2),
+        d: 3.0,
+        s: 0.8,
+        r: 2.5,
+        gain: 0.2,
+        ..PATCH
+    }
+}
+
+fn pad_shimmer(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        unison: 3,
+        detune: 6.0,
+        width: 1.0,
+        wave2: Wave::Sine,
+        mix2: 0.4,
+        semi2: r.pick(&[19.0, 24.0]),
+        cutoff: 6000.0,
+        keytrack: 0.3,
+        a: r.range(0.8, 1.6),
+        d: 3.0,
+        s: 0.8,
+        r: 3.0,
+        trem: 0.25,
+        vib_rate: r.range(5.0, 7.0),
+        gain: 0.14,
+        ..PATCH
+    }
+}
+
+fn pad_warm(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        unison: 3,
+        detune: r.range(5.0, 9.0),
+        width: 0.8,
+        wave2: Wave::Sine,
+        mix2: 0.6,
+        cutoff: 1200.0,
+        keytrack: 0.4,
+        a: r.range(0.8, 1.8),
+        d: 3.0,
+        s: 0.9,
+        r: 2.5,
+        gain: 0.16,
+        ..PATCH
+    }
+}
+
+fn pad_organ(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.5,
+        wave2: Wave::Sine,
+        mix2: 0.5,
+        semi2: 12.0,
+        sub: 0.3,
+        cutoff: r.range(2000.0, 3000.0),
+        keytrack: 0.3,
+        a: 0.02,
+        d: 0.1,
+        s: 1.0,
+        r: 0.15,
+        trem: r.range(0.0, 0.15),
+        vib_rate: 6.0,
+        gain: 0.12,
+        ..PATCH
+    }
+}
+
+fn pad_dark(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(10.0, 18.0),
+        width: 0.9,
+        cutoff: r.range(400.0, 700.0),
+        res: 0.25,
+        keytrack: 0.3,
+        a: 1.5,
+        d: 2.0,
+        s: 0.8,
+        r: 2.5,
+        gain: 0.16,
+        ..PATCH
+    }
+}
+
+// -- keys and mallets
+
+fn ep_rhodes(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.2, 2.0),
+        ratio: 1.0,
+        fm_dec: r.range(0.6, 1.2),
+        fm2: r.range(0.4, 0.8),
+        ratio2: r.pick(&[14.0, 13.0, 15.0]),
+        fm2_dec: 0.05,
+        a: 0.002,
+        d: r.range(1.2, 2.0),
+        s: r.range(0.3, 0.42),
+        r: 0.35,
+        trem: r.range(0.1, 0.25),
+        vib_rate: r.range(3.0, 5.0),
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn ep_wurli(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(2.0, 3.0),
+        ratio: 1.0,
+        fm_dec: 0.4,
+        a: 0.002,
+        d: 1.5,
+        s: 0.3,
+        r: 0.25,
+        trem: r.range(0.15, 0.3),
+        vib_rate: 5.5,
+        drive: 0.6,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn piano_felt(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        wave2: Wave::Sine,
+        mix2: 0.6,
+        semi2: 12.0,
+        cutoff: r.range(1000.0, 1600.0),
+        env_amt: 1.0,
+        fdec: 0.5,
+        keytrack: 0.5,
+        a: 0.003,
+        d: 1.5,
+        s: 0.35,
+        r: 0.3,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn piano(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.0, 1.5),
+        ratio: 1.0,
+        fm_dec: 0.8,
+        fm2: 0.8,
+        ratio2: 3.0,
+        fm2_dec: 0.03,
+        a: 0.002,
+        d: 3.0,
+        s: 0.0,
+        r: 0.3,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn vibes(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.2),
+        ratio: 4.0,
+        fm_dec: 0.4,
+        a: 0.002,
+        d: 1.8,
+        s: 0.0,
+        r: 0.5,
+        trem: 0.3,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn marimba(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(2.0, 3.0),
+        ratio: 4.0,
+        fm_dec: 0.05,
+        a: 0.001,
+        d: r.range(0.4, 0.7),
+        s: 0.0,
+        r: 0.2,
+        gain: 0.35,
+        ..PATCH
+    }
+}
+
+fn celesta(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.2, 1.8),
+        ratio: r.pick(&[4.0, 7.0]),
+        fm_dec: 0.3,
+        a: 0.001,
+        d: 1.5,
+        s: 0.0,
+        r: 0.5,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn kalimba(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(0.6, 1.0), ks_tone: 0.75, a: 0.001, d: 3.0, s: 1.0, r: 0.2, gain: 0.5, ..PATCH }
+}
+
+fn harp(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(2.0, 3.0), ks_tone: 0.55, a: 0.001, d: 4.0, s: 1.0, r: 0.6, gain: 0.5, ..PATCH }
+}
+
+fn music_box(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.2),
+        ratio: 5.0,
+        fm_dec: 0.15,
+        a: 0.001,
+        d: 1.2,
+        s: 0.0,
+        r: 0.4,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn glockenspiel(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.5, 2.1),
+        ratio: 3.5,
+        fm_dec: 0.2,
+        a: 0.001,
+        d: 1.6,
+        s: 0.0,
+        r: 0.5,
+        gain: 0.26,
+        ..PATCH
+    }
+}
+
+fn bell_fm(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.5, 3.0),
+        ratio: r.pick(&[3.5, 1.41, 2.0, 4.0, 2.76]),
+        fm_dec: r.range(1.2, 2.5),
+        a: 0.002,
+        d: r.range(3.0, 5.0),
+        s: 0.0,
+        r: 2.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn dulcimer(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(1.2, 1.8), ks_tone: 0.9, a: 0.001, d: 3.0, s: 1.0, r: 0.4, gain: 0.45, ..PATCH }
+}
+
+fn glass_arp(_: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        wave2: Wave::Sine,
+        mix2: 0.6,
+        semi2: 12.0,
+        cutoff: 2500.0,
+        res: 0.1,
+        keytrack: 0.2,
+        a: 0.006,
+        d: 1.2,
+        s: 0.0,
+        r: 0.8,
+        gain: 0.25,
+        ..PATCH
+    }
+}
+
+// -- plucked strings
+
+fn nylon(r: &mut Rng) -> Patch {
+    Patch {
+        ks: r.range(1.8, 2.5),
+        ks_tone: 0.45,
+        cutoff: 3000.0,
+        keytrack: 0.3,
+        a: 0.001,
+        d: 3.0,
+        s: 1.0,
+        r: 0.3,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn lute(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(1.4, 2.0), ks_tone: 0.5, a: 0.001, d: 3.0, s: 1.0, r: 0.3, gain: 0.5, ..PATCH }
+}
+
+fn cittern(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(0.8, 1.2), ks_tone: 0.8, a: 0.001, d: 2.0, s: 1.0, r: 0.25, gain: 0.45, ..PATCH }
+}
+
+fn banjo(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        ks: r.range(0.5, 0.8),
+        ks_tone: 0.92,
+        drive: 0.4,
+        a: 0.001,
+        d: 1.5,
+        s: 1.0,
+        r: 0.15,
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+fn pizzicato(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(0.3, 0.45), ks_tone: 0.5, a: 0.001, d: 1.0, s: 1.0, r: 0.1, gain: 0.5, ..PATCH }
+}
+
+// -- leads
+
+fn lead_saw(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(6.0, 10.0),
+        width: 0.35,
+        cutoff: r.range(2500.0, 4500.0),
+        res: 0.15,
+        env_amt: 1.0,
+        fdec: 0.3,
+        keytrack: 0.3,
+        a: 0.015,
+        d: 0.6,
+        s: 0.75,
+        r: 0.3,
+        vib: r.range(0.18, 0.3),
+        vib_rate: r.range(5.0, 6.0),
+        glide: 0.06,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn lead_square(r: &mut Rng) -> Patch {
+    Patch { wave: Wave::Square, pw: r.range(0.4, 0.5), unison: 2, detune: 6.0, width: 0.3, ..lead_saw(r) }
+}
+
+fn lead_sync(r: &mut Rng) -> Patch {
+    // a tearing, sweeping lead (FM standing in for oscillator sync)
+    Patch {
+        fm: r.range(2.5, 3.5),
+        ratio: r.pick(&[2.5, 3.5, 1.5]),
+        fm_dec: r.range(0.25, 0.45),
+        cutoff: 4000.0,
+        keytrack: 0.3,
+        a: 0.01,
+        d: 0.6,
+        s: 0.8,
+        r: 0.25,
+        vib: 0.15,
+        vib_rate: 5.5,
+        glide: 0.05,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn sax(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(1.8, 2.6),
+        ratio: 1.0,
+        fm_dec: 2.0,
+        cutoff: r.range(2400.0, 3200.0),
+        res: 0.2,
+        keytrack: 0.4,
+        a: 0.04,
+        d: 0.4,
+        s: 0.85,
+        r: 0.12,
+        vib: 0.25,
+        vib_rate: 5.5,
+        glide: 0.03,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn flute(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.4,
+        noise: r.range(0.03, 0.05),
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.05,
+        d: 0.5,
+        s: 0.8,
+        r: 0.2,
+        vib: 0.15,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn ocarina(_: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.3,
+        noise: 0.015,
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.04,
+        d: 0.5,
+        s: 0.8,
+        r: 0.4,
+        vib: 0.12,
+        vib_rate: 4.5,
+        gain: 0.35,
+        ..PATCH
+    }
+}
+
+fn recorder(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.5,
+        semi2: 12.0,
+        noise: 0.03,
+        cutoff: 4000.0,
+        keytrack: 0.3,
+        a: 0.025,
+        d: 0.3,
+        s: 0.9,
+        r: 0.08,
+        vib: r.range(0.05, 0.1),
+        vib_rate: 5.0,
+        glide: 0.012,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn whistle(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        noise: r.range(0.04, 0.06),
+        cutoff: 6000.0,
+        keytrack: 0.2,
+        a: 0.015,
+        d: 0.3,
+        s: 0.9,
+        r: 0.06,
+        vib: 0.12,
+        vib_rate: 6.0,
+        glide: 0.01,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn muted_trumpet(r: &mut Rng) -> Patch {
+    Patch {
+        vowel: 2,
+        cutoff: r.range(1800.0, 2400.0),
+        env_amt: 1.0,
+        fdec: 0.1,
+        keytrack: 0.5,
+        a: 0.02,
+        d: 0.4,
+        s: 0.8,
+        r: 0.08,
+        vib: 0.1,
+        vib_rate: 5.5,
+        glide: 0.015,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+fn trumpet(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 4.0,
+        width: 0.1,
+        cutoff: r.range(1200.0, 1600.0),
+        res: 0.15,
+        env_amt: 1.6,
+        fdec: 0.09,
+        keytrack: 0.6,
+        a: 0.015,
+        d: 0.4,
+        s: 0.8,
+        r: 0.07,
+        vib: 0.1,
+        vib_rate: 5.5,
+        glide: 0.015,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn clarinet(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.5,
+        cutoff: r.range(1800.0, 2600.0),
+        res: 0.1,
+        env_amt: 0.5,
+        fdec: 0.1,
+        keytrack: 0.6,
+        noise: 0.012,
+        a: 0.02,
+        d: 0.3,
+        s: 0.85,
+        r: 0.06,
+        vib: 0.08,
+        vib_rate: 5.2,
+        glide: 0.015,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn trombone(r: &mut Rng) -> Patch {
+    Patch {
+        cutoff: r.range(700.0, 1000.0),
+        res: 0.15,
+        env_amt: 1.2,
+        fdec: 0.15,
+        keytrack: 0.5,
+        a: 0.03,
+        d: 0.4,
+        s: 0.85,
+        r: 0.1,
+        vib: 0.08,
+        vib_rate: 5.0,
+        glide: 0.05,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn fiddle(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 4.0,
+        width: 0.2,
+        vowel: 2,
+        noise: 0.02,
+        cutoff: 4500.0,
+        keytrack: 0.3,
+        a: 0.05,
+        d: 0.3,
+        s: 0.9,
+        r: 0.15,
+        vib: r.range(0.2, 0.3),
+        vib_rate: 5.8,
+        glide: 0.02,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn accordion(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: r.range(0.35, 0.45),
+        unison: 3,
+        detune: r.range(12.0, 22.0),
+        width: 0.5,
+        wave2: Wave::Saw,
+        mix2: 0.3,
+        semi2: if r.chance(0.4) { 12.0 } else { 0.0 },
+        cutoff: r.range(2600.0, 3600.0),
+        res: 0.25,
+        keytrack: 0.5,
+        a: 0.025,
+        d: 0.4,
+        s: 0.9,
+        r: 0.08,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn bandoneon(r: &mut Rng) -> Patch {
+    Patch { unison: 2, detune: r.range(2.0, 5.0), semi2: 0.0, cutoff: r.range(2000.0, 2600.0), ..accordion(r) }
+}
+
+fn harmonica(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.3,
+        vowel: 3,
+        cutoff: 3500.0,
+        keytrack: 0.3,
+        a: 0.03,
+        d: 0.3,
+        s: 0.85,
+        r: 0.08,
+        vib: r.range(0.1, 0.2),
+        vib_rate: 5.5,
+        trem: 0.1,
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+fn horn(r: &mut Rng) -> Patch {
+    Patch { cutoff: r.range(900.0, 1300.0), unison: 2, detune: 5.0, width: 0.2, ..trombone(r) }
+}
+
+fn hoover(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(25.0, 40.0),
+        width: 1.0,
+        wave2: Wave::Saw,
+        mix2: 0.6,
+        semi2: -12.0,
+        cutoff: r.range(1500.0, 2200.0),
+        res: 0.2,
+        keytrack: 0.3,
+        bend: -7.0,
+        glide: 0.12,
+        a: 0.02,
+        d: 0.5,
+        s: 0.8,
+        r: 0.3,
+        gain: 0.22,
+        ..PATCH
+    }
+}
+
+fn vox_chop(r: &mut Rng) -> Patch {
+    Patch {
+        vowel: r.pick(&[1, 2, 3, 4, 5]),
+        cutoff: 4000.0,
+        keytrack: 0.2,
+        a: 0.005,
+        d: 0.15,
+        s: 0.0,
+        r: 0.08,
+        vib: 0.0,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn pluck_hook(r: &mut Rng) -> Patch {
+    Patch {
+        wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
+        pw: 0.3,
+        cutoff: r.range(900.0, 1600.0),
+        res: 0.35,
+        env_amt: 2.5,
+        fdec: 0.12,
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.2,
+        s: 0.0,
+        r: 0.08,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn arp_pluck(r: &mut Rng) -> Patch {
+    Patch {
+        wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
+        pw: r.range(0.3, 0.5),
+        cutoff: r.range(1000.0, 2200.0),
+        res: r.range(0.2, 0.35),
+        env_amt: 2.0,
+        fdec: r.range(0.15, 0.3),
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.3,
+        s: 0.0,
+        r: 0.12,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn glass_fm(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.6),
+        ratio: r.pick(&[2.0, 3.0, 1.0]),
+        fm_dec: 0.5,
+        a: 0.003,
+        d: 1.2,
+        s: 0.2,
+        r: 0.3,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn stab_saw(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 12.0,
+        width: 0.7,
+        cutoff: r.range(600.0, 1200.0),
+        res: 0.3,
+        env_amt: 2.0,
+        fdec: r.range(0.12, 0.25),
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.35,
+        s: 0.0,
+        r: 0.2,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn stab_dub(r: &mut Rng) -> Patch {
+    Patch { cutoff: r.range(400.0, 700.0), res: 0.4, env_amt: 1.5, fdec: 0.1, d: 0.25, ..stab_saw(r) }
+}
+
+fn stab_organ(r: &mut Rng) -> Patch {
+    Patch { d: 0.2, s: 0.0, r: 0.1, ..pad_organ(r) }
+}
+
+// -- basses
+
+fn bass_reese(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: r.range(14.0, 24.0),
+        cutoff: r.range(450.0, 700.0),
+        res: 0.2,
+        keytrack: 0.3,
+        a: 0.005,
+        d: 0.5,
+        s: 0.9,
+        r: 0.08,
+        drive: 0.5,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_sub(_: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        cutoff: 300.0,
+        keytrack: 0.0,
+        a: 0.004,
+        d: 0.4,
+        s: 0.8,
+        r: 0.06,
+        drive: 0.3,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_fm(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(2.0, 3.0),
+        ratio: r.pick(&[1.0, 2.0]),
+        fm_dec: 0.15,
+        cutoff: 1200.0,
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.4,
+        s: 0.5,
+        r: 0.06,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_slap(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(3.5, 4.5),
+        ratio: 1.0,
+        fm_dec: 0.05,
+        cutoff: 2000.0,
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.3,
+        s: 0.4,
+        r: 0.05,
+        drive: 0.5,
+        gain: 0.55,
+        ..PATCH
+    }
+}
+
+fn bass_seq(r: &mut Rng) -> Patch {
+    Patch {
+        cutoff: r.range(350.0, 600.0),
+        res: 0.25,
+        env_amt: 2.0,
+        fdec: 0.1,
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.2,
+        s: 0.0,
+        r: 0.04,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_moog(r: &mut Rng) -> Patch {
+    Patch {
+        wave2: Wave::Square,
+        mix2: 0.6,
+        semi2: -12.0,
+        poles4: true,
+        cutoff: r.range(250.0, 400.0),
+        res: 0.5,
+        env_amt: 1.5,
+        fdec: 0.2,
+        keytrack: 0.3,
+        a: 0.003,
+        d: 0.3,
+        s: 0.6,
+        r: 0.06,
+        drive: 0.4,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_upright(r: &mut Rng) -> Patch {
+    Patch {
+        ks: r.range(1.0, 1.6),
+        ks_tone: 0.35,
+        cutoff: 900.0,
+        keytrack: 0.2,
+        a: 0.002,
+        d: 2.0,
+        s: 1.0,
+        r: 0.12,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_synth(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        wave2: Wave::Saw,
+        mix2: 0.25,
+        sub: 0.4,
+        cutoff: r.range(450.0, 700.0),
+        res: 0.1,
+        env_amt: 1.2,
+        fdec: 0.15,
+        keytrack: 0.3,
+        a: 0.004,
+        d: 0.8,
+        s: 0.35,
+        r: 0.08,
+        drive: 0.6,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_acid_sq(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        poles4: true,
+        cutoff: r.range(180.0, 320.0),
+        res: r.range(0.78, 0.9),
+        env_amt: r.range(2.5, 4.0),
+        fdec: r.range(0.2, 0.45),
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.5,
+        s: 0.6,
+        r: 0.02,
+        glide: r.range(0.04, 0.07),
+        drive: r.range(1.0, 2.5),
+        gain: 0.55,
+        ..PATCH
+    }
+}
+
+fn bass_acid_saw(r: &mut Rng) -> Patch {
+    Patch { wave: Wave::Saw, ..bass_acid_sq(r) }
+}
+
+fn tuba(r: &mut Rng) -> Patch {
+    Patch {
+        wave2: Wave::Sine,
+        mix2: 0.7,
+        cutoff: r.range(350.0, 550.0),
+        res: 0.15,
+        env_amt: 1.4,
+        fdec: 0.1,
+        keytrack: 0.5,
+        a: 0.015,
+        d: 0.25,
+        s: 0.6,
+        r: 0.07,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_accordion(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.4,
+        cutoff: r.range(700.0, 1000.0),
+        keytrack: 0.4,
+        a: 0.01,
+        d: 0.3,
+        s: 0.9,
+        r: 0.06,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn drone_hum(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Saw,
+        mix2: r.range(0.08, 0.18),
+        semi2: 0.08,
+        cutoff: r.range(250.0, 450.0),
+        res: 0.1,
+        keytrack: 0.0,
+        a: 4.0,
+        d: 2.0,
+        s: 1.0,
+        r: 6.0,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn drone_choir(r: &mut Rng) -> Patch {
+    Patch { vowel: r.pick(&[4, 5]), unison: 2, detune: 8.0, width: 0.6, a: 3.0, r: 5.0, keytrack: 0.0, ..pad_choir(r) }
+}
+
+fn drone_reed(r: &mut Rng) -> Patch {
+    // a hurdy-gurdy or a bagpipe's drone: a buzzing, nasal saw
+    Patch {
+        unison: 2,
+        detune: r.range(3.0, 6.0),
+        vowel: r.pick(&[2, 3]),
+        cutoff: r.range(1800.0, 2600.0),
+        res: 0.2,
+        keytrack: 0.0,
+        a: 0.4,
+        d: 1.0,
+        s: 1.0,
+        r: 1.0,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+// -- drum kits (each channel's kinds in their order)
+
+fn kit_kick_808(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![DrumPatch { drive: 0.2, ..kick(r, (80.0, 100.0), (43.0, 48.0), (1.0, 1.5), 0.0, 0.0) }]
+}
+fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), 0.25, 0.8)]
+}
+fn kit_kick_dist(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (180.0, 230.0), (50.0, 56.0), (0.4, 0.55), 0.3, 3.0)]
+}
+fn kit_kick_deep(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)]
+}
+fn kit_kick_linn(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)]
+}
+fn kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)]
+}
+fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![DrumPatch {
+        tone: 1.0,
+        f0: r.range(100.0, 120.0),
+        f1: r.range(80.0, 95.0),
+        pdec: 0.03,
+        tdec: 0.6,
+        noise: 0.35,
+        nmode: 0,
+        ncut: 800.0,
+        ndec: 0.25,
+        gain: 0.9,
+        ..DRUM
+    }]
+}
+
+/// Snares and claps: [the main hit, a softer one for rolls and ghosts].
+fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(800.0, 1000.0),
+        nres: 0.3,
+        ndec: 0.45,
+        claps: 4,
+        gain: 0.9,
+        ..DRUM
+    };
+    vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }]
+}
+fn kit_snap(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch { noise: 1.0, nmode: 1, ncut: r.range(2200.0, 2800.0), nres: 0.4, ndec: 0.06, gain: 0.9, ..DRUM };
+    vec![c, DrumPatch { gain: 0.6, ..c }]
+}
+fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.55,
+        f0: 200.0,
+        f1: r.range(170.0, 185.0),
+        pdec: 0.01,
+        tdec: 0.1,
+        noise: 0.9,
+        nmode: 2,
+        ncut: 1800.0,
+        nres: 0.1,
+        ndec: 0.15,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }]
+}
+fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.15,
+        f0: 220.0,
+        f1: 200.0,
+        tdec: 0.1,
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(3000.0, 4000.0),
+        nres: 0.1,
+        ndec: 0.25,
+        natt: 0.03,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.12, gain: 0.6, ..c }]
+}
+fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(1300.0, 1700.0),
+        nres: 0.3,
+        ndec: 0.12,
+        claps: 2,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { claps: 0, gain: 0.5, ..c }]
+}
+
+/// Hats: [closed, open].
+fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
+    hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8)
+}
+fn kit_hats_909(r: &mut Rng) -> Vec<DrumPatch> {
+    hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8)
+}
+fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(5500.0, 7000.0),
+        nres: 0.2,
+        ndec: 0.08,
+        natt: 0.01,
+        gain: 0.65,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.2, ..c }]
+}
+fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 2,
+        ncut: 6000.0,
+        nres: 0.2,
+        ndec: 0.12,
+        metal: 0.7,
+        mf: r.range(3.5, 4.5),
+        natt: 0.002,
+        gain: 0.7,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.35, ..c }]
+}
+fn kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.12,
+        f0: 480.0,
+        f1: 480.0,
+        tdec: 0.8,
+        noise: 1.0,
+        nmode: 2,
+        ncut: 5000.0,
+        ndec: 0.9,
+        metal: 0.6,
+        mf: r.range(2.4, 2.8),
+        gain: 0.5,
+        ..DRUM
+    };
+    vec![DrumPatch { ndec: 0.25, ..c }, c]
+}
+
+/// Percussion: [rim (or a click), tom low, mid, high, shaker].
+fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
+    // clave, congas and a bongo, a shaker
+    let conga = |f: f32| DrumPatch {
+        tone: 1.0,
+        f0: f * 1.25,
+        f1: f,
+        pdec: 0.02,
+        tdec: 0.2,
+        noise: 0.1,
+        nmode: 1,
+        ncut: 2000.0,
+        ndec: 0.02,
+        gain: 0.7,
+        ..DRUM
+    };
+    let clave = DrumPatch { tone: 0.9, f0: 2500.0, f1: 2500.0, tdec: 0.05, gain: 0.6, ..DRUM };
+    let base = r.range(260.0, 320.0);
+    vec![clave, conga(base), conga(base * 1.3), conga(base * 1.8), kit_shaker(r)[0]]
+}
+fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
+    // a cowbell, electronic toms, a woodblock
+    let cow = DrumPatch {
+        tone: 0.7,
+        f0: 560.0,
+        f1: 560.0,
+        tdec: 0.18,
+        tone2: 0.8,
+        ratio2: 1.48,
+        noise: 0.2,
+        nmode: 1,
+        ncut: 800.0,
+        ndec: 0.05,
+        drive: 1.5,
+        gain: 0.45,
+        ..DRUM
+    };
+    let tom = |f: f32| DrumPatch {
+        tone: 1.0,
+        f0: f * 2.0,
+        f1: f,
+        pdec: 0.08,
+        tdec: 0.4,
+        noise: 0.25,
+        nmode: 0,
+        ncut: 3000.0,
+        ndec: 0.1,
+        gain: 0.75,
+        ..DRUM
+    };
+    let wood = DrumPatch {
+        tone: 0.8,
+        f0: 1000.0,
+        f1: 950.0,
+        tdec: 0.06,
+        noise: 0.3,
+        nmode: 1,
+        ncut: 1000.0,
+        ndec: 0.03,
+        gain: 0.5,
+        ..DRUM
+    };
+    let base = r.range(90.0, 120.0);
+    vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood]
+}
+fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
+    // spoons (two clicks), a frame drum's rim, finger cymbals
+    let spoons = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(2800.0, 3500.0),
+        nres: 0.3,
+        ndec: 0.03,
+        claps: 2,
+        gain: 0.6,
+        ..DRUM
+    };
+    let ding = DrumPatch { tone: 0.6, f0: 2600.0, f1: 2600.0, tdec: 1.2, tone2: 0.5, ratio2: 2.76, gain: 0.25, ..DRUM };
+    let tom = |f: f32| DrumPatch {
+        tone: 0.9,
+        f0: f * 1.2,
+        f1: f,
+        pdec: 0.03,
+        tdec: 0.3,
+        noise: 0.2,
+        nmode: 0,
+        ncut: 900.0,
+        ndec: 0.1,
+        gain: 0.7,
+        ..DRUM
+    };
+    vec![spoons, tom(140.0), tom(190.0), ding, kit_shaker(r)[0]]
+}
+
+// -- the genres' palettes (each role's tuned original comes on top)
+
+const P_AMB_PAD: &[(&str, Make)] = &[
+    ("string ensemble", pad_strings),
+    ("choir", pad_choir),
+    ("glassy FM pad", pad_glass),
+    ("shimmer", pad_shimmer),
+    ("warm triangle pad", pad_warm),
+    ("organ pad", pad_organ),
+];
+const P_AMB_BELL: &[(&str, Make)] = &[
+    ("FM bell", bell_fm),
+    ("celesta", celesta),
+    ("marimba", marimba),
+    ("kalimba", kalimba),
+    ("harp", harp),
+    ("piano", piano),
+    ("music box", music_box),
+    ("vibraphone", vibes),
+    ("hammered dulcimer", dulcimer),
+];
+const P_AMB_ARP: &[(&str, Make)] = &[
+    ("glass pluck", glass_arp),
+    ("kalimba", kalimba),
+    ("harp", harp),
+    ("marimba", marimba),
+    ("nylon guitar", nylon),
+    ("celesta", celesta),
+    ("lute", lute),
+];
+const P_AMB_LEAD: &[(&str, Make)] =
+    &[("flute", flute), ("recorder", recorder), ("ocarina", ocarina), ("tin whistle", whistle)];
+const P_AMB_BASS: &[(&str, Make)] =
+    &[("sub", bass_sub), ("upright bass", bass_upright), ("soft synth bass", bass_synth)];
+const P_AMB_DRONE: &[(&str, Make)] =
+    &[("choir drone", drone_choir), ("hum", drone_hum), ("reed organ drone", drone_reed)];
+const K_AMB_KICK: &[(&str, MakeKit)] = &[("frame drum", kit_kick_frame), ("deep kick", kit_kick_deep)];
+const K_AMB_PERC: &[(&str, MakeKit)] = &[("hand percussion", kit_perc_hand), ("spoons and finger cymbals", kit_spoons)];
+const K_AMB_HAT: &[(&str, MakeKit)] = &[("shaker", kit_shaker), ("tambourine", kit_tambourine)];
+
+const P_TECH_ACID: &[(&str, Make)] = &[("303 (saw)", bass_acid_saw), ("303 (square)", bass_acid_sq)];
+const P_TECH_BASS: &[(&str, Make)] =
+    &[("Reese", bass_reese), ("sub", bass_sub), ("FM bass", bass_fm), ("sequenced saw", bass_seq)];
+const P_TECH_STAB: &[(&str, Make)] = &[("chord stab", stab_saw), ("dub chord", stab_dub), ("organ stab", stab_organ)];
+const P_TECH_PAD: &[(&str, Make)] = &[("dark pad", pad_dark), ("strings", pad_strings), ("choir", pad_choir)];
+const P_TECH_LEAD: &[(&str, Make)] = &[
+    ("pluck", pluck_hook),
+    ("hoover", hoover),
+    ("vocal chop", vox_chop),
+    ("marimba blip", marimba),
+    ("sync lead", lead_sync),
+];
+const K_TECH_KICK: &[(&str, MakeKit)] = &[
+    ("808 kick", kit_kick_808),
+    ("distorted kick", kit_kick_dist),
+    ("deep kick", kit_kick_deep),
+    ("909 kick", kit_kick_909),
+];
+const K_TECH_SNARE: &[(&str, MakeKit)] =
+    &[("808 clap", kit_clap_808), ("snap", kit_snap), ("Linn snare", kit_snare_linn)];
+const K_TECH_HAT: &[(&str, MakeKit)] =
+    &[("808 hats", kit_hats_808), ("909 hats", kit_hats_909), ("shaker", kit_shaker)];
+const K_TECH_PERC: &[(&str, MakeKit)] =
+    &[("cowbell, toms, woodblock", kit_perc_metal), ("clave, congas", kit_perc_hand)];
+const K_CYM: &[(&str, MakeKit)] = &[("ride", kit_ride)];
+
+const P_SW_BASS: &[(&str, Make)] =
+    &[("Moog-ish bass", bass_moog), ("slap bass", bass_slap), ("sequenced bass", bass_seq), ("FM bass", bass_fm)];
+const P_SW_PAD: &[(&str, Make)] =
+    &[("strings", pad_strings), ("brass", pad_brass), ("choir", pad_choir), ("warm pad", pad_warm)];
+const P_SW_ARP: &[(&str, Make)] = &[
+    ("saw pluck", arp_pluck),
+    ("glockenspiel", glockenspiel),
+    ("electric piano", ep_rhodes),
+    ("marimba", marimba),
+    ("pizzicato strings", pizzicato),
+];
+const P_SW_LEAD: &[(&str, Make)] =
+    &[("saw lead", lead_saw), ("square lead", lead_square), ("sync lead", lead_sync), ("sax", sax)];
+const P_SW_BELL: &[(&str, Make)] =
+    &[("glassy FM", glass_fm), ("electric piano", ep_rhodes), ("vibraphone", vibes), ("celesta", celesta)];
+const K_SW_KICK: &[(&str, MakeKit)] =
+    &[("Linn kick", kit_kick_linn), ("909 kick", kit_kick_909), ("808 kick", kit_kick_808)];
+const K_SW_SNARE: &[(&str, MakeKit)] = &[("Linn snare", kit_snare_linn), ("808 clap", kit_clap_808)];
+const K_SW_HAT: &[(&str, MakeKit)] = &[("808 hats", kit_hats_808), ("909 hats", kit_hats_909)];
+const K_SW_PERC: &[(&str, MakeKit)] = &[("cowbell and electronic toms", kit_perc_metal), ("congas", kit_perc_hand)];
+
+const P_LOFI_KEYS: &[(&str, Make)] = &[
+    ("Rhodes", ep_rhodes),
+    ("Wurlitzer", ep_wurli),
+    ("felt piano", piano_felt),
+    ("nylon guitar", nylon),
+    ("piano", piano),
+    ("organ", pad_organ),
+];
+const P_LOFI_BASS: &[(&str, Make)] = &[("upright bass", bass_upright), ("sub", bass_sub), ("synth bass", bass_synth)];
+const P_LOFI_LEAD: &[(&str, Make)] = &[
+    ("vibraphone", vibes),
+    ("flute", flute),
+    ("muted trumpet", muted_trumpet),
+    ("sax", sax),
+    ("harmonica", harmonica),
+    ("trumpet", trumpet),
+    ("clarinet", clarinet),
+];
+const K_LOFI_KICK: &[(&str, MakeKit)] = &[("Linn kick", kit_kick_linn), ("soft kick", kit_kick_soft)];
+const K_LOFI_SNARE: &[(&str, MakeKit)] = &[("brushes", kit_brush), ("snap", kit_snap)];
+const K_LOFI_HAT: &[(&str, MakeKit)] = &[("shaker", kit_shaker), ("808 hats", kit_hats_808)];
+const K_LOFI_PERC: &[(&str, MakeKit)] = &[("clave, congas", kit_perc_hand)];
+
+const P_POLKA_BASS: &[(&str, Make)] =
+    &[("tuba", tuba), ("bass accordion", bass_accordion), ("upright bass", bass_upright)];
+const P_POLKA_PAH: &[(&str, Make)] = &[("banjo", banjo), ("piano", piano), ("cittern", cittern)];
+const P_POLKA_LEAD: &[(&str, Make)] =
+    &[("musette accordion", accordion), ("bandoneon", bandoneon), ("harmonica", harmonica), ("fiddle", fiddle)];
+const P_POLKA_OTHER: &[(&str, Make)] = &[
+    ("clarinet", clarinet),
+    ("trumpet", trumpet),
+    ("trombone", trombone),
+    ("tenor horn", horn),
+    ("sax", sax),
+    ("fiddle", fiddle),
+    ("glockenspiel", glockenspiel),
+    ("piccolo", whistle),
+];
+const K_POLKA_KICK: &[(&str, MakeKit)] = &[("deep bass drum", kit_kick_deep)];
+const K_POLKA_SNARE: &[(&str, MakeKit)] = &[("brushes", kit_brush), ("hand claps", kit_hand_clap)];
+const K_POLKA_HAT: &[(&str, MakeKit)] = &[("tambourine", kit_tambourine), ("ride", kit_ride)];
+
+fn band_ambient(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_PAD, P_AMB_PAD, 60.0);
+    b.tone(r, s, CH_BELL, P_AMB_BELL, 76.0);
+    b.tone(r, s, CH_ARP, P_AMB_ARP, 72.0);
+    b.tone(r, s, CH_LEAD, P_AMB_LEAD, 67.0);
+    b.tone(r, s, CH_BASS, P_AMB_BASS, 40.0);
+    b.tone(r, s, CH_DRONE, P_AMB_DRONE, 38.0);
+    b.kit(r, s, CH_KICK, K_AMB_KICK);
+    b.kit(r, s, CH_PERC, K_AMB_PERC);
+    b.kit(r, s, CH_HAT, K_AMB_HAT);
+    b
+}
+
+fn band_techno(r: &mut Rng, s: &Synth, acid: bool) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_BASS, if acid { P_TECH_ACID } else { P_TECH_BASS }, 40.0);
+    b.tone(r, s, CH_KEYS, P_TECH_STAB, 62.0);
+    b.tone(r, s, CH_PAD, P_TECH_PAD, 60.0);
+    b.tone(r, s, CH_LEAD, P_TECH_LEAD, 70.0);
+    b.kit(r, s, CH_KICK, K_TECH_KICK);
+    b.kit(r, s, CH_SNARE, K_TECH_SNARE);
+    b.kit(r, s, CH_HAT, K_TECH_HAT);
+    b.kit(r, s, CH_PERC, K_TECH_PERC);
+    b.kit(r, s, CH_CYM, K_CYM);
+    b
+}
+
+fn band_synthwave(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_BASS, P_SW_BASS, 40.0);
+    b.tone(r, s, CH_PAD, P_SW_PAD, 62.0);
+    b.tone(r, s, CH_ARP, P_SW_ARP, 70.0);
+    b.tone(r, s, CH_LEAD, P_SW_LEAD, 74.0);
+    b.tone(r, s, CH_BELL, P_SW_BELL, 64.0);
+    b.kit(r, s, CH_KICK, K_SW_KICK);
+    b.kit(r, s, CH_SNARE, K_SW_SNARE);
+    b.kit(r, s, CH_HAT, K_SW_HAT);
+    b.kit(r, s, CH_PERC, K_SW_PERC);
+    b.kit(r, s, CH_CYM, K_CYM);
+    b
+}
+
+fn band_lofi(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_KEYS, P_LOFI_KEYS, 62.0);
+    b.tone(r, s, CH_BASS, P_LOFI_BASS, 40.0);
+    b.tone(r, s, CH_LEAD, P_LOFI_LEAD, 74.0);
+    b.tone(r, s, CH_BELL, P_LOFI_LEAD, 66.0);
+    b.kit(r, s, CH_KICK, K_LOFI_KICK);
+    b.kit(r, s, CH_SNARE, K_LOFI_SNARE);
+    b.kit(r, s, CH_HAT, K_LOFI_HAT);
+    b.kit(r, s, CH_PERC, K_LOFI_PERC);
+    b
+}
+
+fn band_polka(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_BASS, P_POLKA_BASS, 40.0);
+    b.tone(r, s, CH_KEYS, P_POLKA_PAH, 62.0);
+    b.tone(r, s, CH_LEAD, P_POLKA_LEAD, 74.0);
+    b.tone(r, s, CH_ARP, P_POLKA_OTHER, 70.0);
+    b.kit(r, s, CH_KICK, K_POLKA_KICK);
+    b.kit(r, s, CH_SNARE, K_POLKA_SNARE);
+    b.kit(r, s, CH_HAT, K_POLKA_HAT);
+    b
 }
 
 fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
