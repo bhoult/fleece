@@ -15,6 +15,7 @@ mod gl;
 mod gpu;
 mod hud;
 mod interp;
+mod music;
 mod png;
 mod render;
 mod rng;
@@ -42,6 +43,7 @@ enum Mode {
     Bench,
     TasteFit,
     AudioCheck,
+    MusicWav,
 }
 
 pub struct Opts {
@@ -96,6 +98,8 @@ pub struct Opts {
     pub sound_delay: Option<f64>,
     /// the window optimizes itself for the display's rate at the start
     pub optimize: bool,
+    /// --musicwav: genre, seconds, file
+    pub musicwav: Vec<String>,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -119,6 +123,7 @@ fn usage() -> ! {
     eprintln!("       fleece --varcheck   CPU against GPU, every variation");
     eprintln!("       fleece --audiocheck [FILE.wav | -] [--seconds S]   audio levels of a WAV (-: stdin), or live from");
     eprintln!("              what the speakers play for S seconds (10)");
+    eprintln!("       fleece --musicwav GENRE SECONDS OUT.wav [--seed N]   generated music to a WAV");
     std::process::exit(2)
 }
 
@@ -157,6 +162,7 @@ fn parse() -> Opts {
         soundtrack: None,
         sound_delay: None,
         optimize: true,
+        musicwav: Vec::new(),
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -221,6 +227,12 @@ fn parse() -> Opts {
                     o.out = f.clone();
                     i += 1;
                 }
+            }
+            "--musicwav" => {
+                // GENRE SECONDS OUT.wav: generated music to a file
+                o.mode = Mode::MusicWav;
+                o.musicwav = args.get(i + 1..i + 4).unwrap_or_else(|| usage()).to_vec();
+                i += 3;
             }
             "--out" => {
                 i += 1;
@@ -1055,5 +1067,6 @@ fn main() {
         Mode::Video => app::video(&o),
         Mode::TasteFit => tastefit(&o),
         Mode::AudioCheck => audio::check(&o.out, o.frames),
+        Mode::MusicWav => music::cli(&o.musicwav, o.seed as u64),
     }
 }
