@@ -263,6 +263,15 @@ pub fn edge(a: &Genome, b: &Genome, angle: f32, t: f32) -> Genome {
         g.background[i] = lerp(a.background[i], b.background[i], t);
         g.de[i] = lerp(a.de[i], b.de[i], t);
     }
+    g.filter = lerp(a.filter, b.filter, t);
+    g.supersample = if t < 0.5 { a.supersample } else { b.supersample };
+    g.cam = crate::genome::Cam3 {
+        pitch: lerp(a.cam.pitch, b.cam.pitch, t),
+        yaw: lerp(a.cam.yaw, b.cam.yaw, t),
+        persp: lerp(a.cam.persp, b.cam.persp, t),
+        zpos: lerp(a.cam.zpos, b.cam.zpos, t),
+        dof: lerp(a.cam.dof, b.cam.dof, t),
+    };
     g.name = if t < 0.5 { a.name.clone() } else { b.name.clone() };
     g
 }

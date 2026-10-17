@@ -199,6 +199,32 @@ pub struct Genome {
     /// is, or descends from, an evolved Electric Sheep (CC BY-NC: its
     /// descendants stay non-commercial however they are crossed)
     pub nc: bool,
+    /// flam3's spatial supersampling (buckets per pixel on each axis; the
+    /// Electric Sheep server rendered at 4) and its gaussian filter's radius
+    /// in pixels (flam3's default 0.5; the server's sheep say 1)
+    pub supersample: u32,
+    pub filter: f32,
+    /// a 3D camera (Apophysis 7X's and Fractorium's cam_* attributes)
+    pub cam: Cam3,
+}
+
+/// The 3D camera: the flame is tilted by `pitch` and turned by `yaw`
+/// (radians) about the view's centre, seen with `persp` perspective; `zpos`
+/// moves the points along z and `dof` blurs them with their distance from
+/// the focal plane. All zero: the flat flam3 camera.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Cam3 {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub persp: f32,
+    pub zpos: f32,
+    pub dof: f32,
+}
+
+impl Cam3 {
+    pub fn is_flat(&self) -> bool {
+        *self == Cam3::default()
+    }
 }
 
 static PALETTES: &[u8] = include_bytes!("../assets/flam3-palettes.bin");
@@ -300,6 +326,9 @@ impl Genome {
             curated: false,
             nick: String::new(),
             nc: false,
+            supersample: 1,
+            filter: 0.5,
+            cam: Cam3::default(),
         }
     }
 
@@ -565,7 +594,7 @@ impl Genome {
         let aff = |a: &Affine| format!("{} {} {} {} {} {}", f(a[0][0]), f(a[0][1]), f(a[1][0]), f(a[1][1]), f(a[2][0]), f(a[2][1]));
         let _ = writeln!(
             s,
-            "<flame name=\"{}\"{} version=\"fleece\" size=\"{w} {h}\" center=\"{} {}\" scale=\"{}\" rotate=\"{}\" brightness=\"{}\" gamma=\"{}\" gamma_threshold=\"{}\" vibrancy=\"{}\" highlight_power=\"{}\" background=\"{} {} {}\" estimator_radius=\"{}\" estimator_minimum=\"{}\" estimator_curve=\"{}\" palette_mode=\"{}\" interpolation=\"linear\" palette_interpolation=\"hsv_circular\" symmetry=\"{}\">",
+            "<flame name=\"{}\"{} version=\"fleece\" size=\"{w} {h}\" center=\"{} {}\" scale=\"{}\" rotate=\"{}\" brightness=\"{}\" gamma=\"{}\" gamma_threshold=\"{}\" vibrancy=\"{}\" highlight_power=\"{}\" background=\"{} {} {}\" estimator_radius=\"{}\" estimator_minimum=\"{}\" estimator_curve=\"{}\" palette_mode=\"{}\" supersample=\"{}\" filter=\"{}\" filter_shape=\"gaussian\"{} interpolation=\"linear\" palette_interpolation=\"hsv_circular\" symmetry=\"{}\">",
             self.name.replace('"', "'"),
             if self.nick.is_empty() { String::new() } else { format!(" nick=\"{}\"", self.nick.replace('"', "'")) }
                 + if self.nc { " fleece_nc=\"1\"" } else { "" },
@@ -585,6 +614,20 @@ impl Genome {
             f(self.de[1]),
             f(self.de[2]),
             if self.palette_linear { "linear" } else { "step" },
+            self.supersample,
+            f(self.filter),
+            if self.cam.is_flat() {
+                String::new()
+            } else {
+                format!(
+                    " cam_pitch=\"{}\" cam_yaw=\"{}\" cam_perspective=\"{}\" cam_zpos=\"{}\" cam_dof=\"{}\"",
+                    f(self.cam.pitch),
+                    f(self.cam.yaw),
+                    f(self.cam.persp),
+                    f(self.cam.zpos),
+                    f(self.cam.dof)
+                )
+            },
             self.symmetry
         );
         let xf = |s: &mut String, tag: &str, x: &Xform, fin: bool| {

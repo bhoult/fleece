@@ -226,6 +226,13 @@ pub fn parse(xml: &str) -> (Vec<(Genome, i32)>, Vec<String>) {
                     "estimator_minimum" => g.de[1] = f.unwrap_or(0.0),
                     "estimator_curve" => g.de[2] = f.unwrap_or(0.4),
                     "palette_mode" => g.palette_linear = v.trim() == "linear",
+                    "supersample" => g.supersample = f.unwrap_or(1.0).clamp(1.0, 4.0) as u32,
+                    "filter" => g.filter = f.unwrap_or(0.5).clamp(0.0, 4.0),
+                    "cam_pitch" => g.cam.pitch = f.unwrap_or(0.0),
+                    "cam_yaw" => g.cam.yaw = f.unwrap_or(0.0),
+                    "cam_perspective" => g.cam.persp = f.unwrap_or(0.0),
+                    "cam_zpos" => g.cam.zpos = f.unwrap_or(0.0),
+                    "cam_dof" => g.cam.dof = f.unwrap_or(0.0),
                     "palette" => {
                         g.palette_index = f.unwrap_or(0.0) as i32;
                         g.palette = crate::genome::palette(g.palette_index, 0.0);
