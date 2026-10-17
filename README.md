@@ -10,7 +10,7 @@ target/release/fleece --quality 2000  # Electric Sheep's own quality every frame
 target/release/fleece 2k              # render at a size instead: 1080p, 2k (2560x1440), 4k (3840x2160), WxH
 ```
 
-By default fleece renders Electric Sheep's standard frame, 800x592, and scales it to the window with black bars, as the Electric Sheep player shows its 800x592 videos. At that size this machine gets roughly 700–2,500 samples per pixel per frame at 30 fps; the server renders each frame at 2,000. `--quality N` holds every frame at N samples per pixel (2,000 runs at about 14–20 fps here). `--es-hd` renders the HD flock's 1280x720, `--render WxH` any fixed size, and `--native` the window's own size.
+By default fleece renders Electric Sheep's standard frame, 800x592, and scales it to the window with black bars, as the Electric Sheep player shows its 800x592 videos. At that size this machine gets roughly 700–2,500 samples per pixel per frame at 30 fps without supersampling, and about 60 % of that at the automatic 2x; the server renders each frame at 2,000. `--quality N` holds every frame at N samples per pixel (2,000 runs at about 14–20 fps here). `--es-hd` renders the HD flock's 1280x720, `--render WxH` any fixed size, and `--native` the window's own size.
 
 ## Version 2
 
