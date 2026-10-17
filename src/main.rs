@@ -4,6 +4,7 @@
 #![allow(clippy::collapsible_if, clippy::neg_cmp_op_on_partial_ord, clippy::new_without_default)]
 
 mod app;
+mod audio;
 mod breed;
 mod cpu;
 mod cpuvar;
@@ -40,6 +41,7 @@ enum Mode {
     Video,
     Bench,
     TasteFit,
+    AudioCheck,
 }
 
 pub struct Opts {
@@ -109,6 +111,8 @@ fn usage() -> ! {
     eprintln!("              - is raw RGB24 on stdout); the credit is burned in for the first --credit-secs (10)");
     eprintln!("              unless off, and always in the metadata");
     eprintln!("       fleece --varcheck   CPU against GPU, every variation");
+    eprintln!("       fleece --audiocheck [FILE.wav | -] [--seconds S]   audio levels of a WAV (-: stdin), or live from");
+    eprintln!("              what the speakers play for S seconds (10)");
     std::process::exit(2)
 }
 
@@ -201,6 +205,14 @@ fn parse() -> Opts {
             "--varcheck" => o.mode = Mode::VarCheck,
             "--mutcheck" => o.mode = Mode::MutCheck,
             "--tastefit" => o.mode = Mode::TasteFit,
+            "--audiocheck" => {
+                o.mode = Mode::AudioCheck;
+                // a WAV file to analyse (- for stdin); none: live
+                if let Some(f) = args.get(i + 1).filter(|s| !s.starts_with("--")) {
+                    o.out = f.clone();
+                    i += 1;
+                }
+            }
             "--out" => {
                 i += 1;
                 o.out = args.get(i).cloned().unwrap_or_else(|| usage());
@@ -365,6 +377,10 @@ fn parse() -> Opts {
         if o.frames == 0 {
             o.frames = (60.0 * o.fps) as u64;
         }
+    }
+    if o.mode == Mode::AudioCheck {
+        // the live check's length, in tenths of a second
+        o.frames = (seconds.unwrap_or(10.0) * 10.0).round() as u64;
     }
     o
 }
@@ -931,5 +947,6 @@ fn main() {
         Mode::Bench => bench(&o),
         Mode::Video => app::video(&o),
         Mode::TasteFit => tastefit(&o),
+        Mode::AudioCheck => audio::check(&o.out, o.frames),
     }
 }
