@@ -102,8 +102,10 @@ pub struct App {
     look: Look,
     /// supersampling: 0 automatic, else buckets per pixel on each axis
     supersample: u32,
-    /// auto-exposure: ln of the brightness multiplier
+    /// auto-exposure: ln of the brightness multiplier, and whether it has
+    /// yet to be set (the first measure sets it outright: no fade-in)
     exposure: f64,
+    exposure_unset: bool,
     /// what the speakers play (while audio is on), or a soundtrack's levels
     /// every hop (a video made to music) and the time in it
     audio: Option<crate::audio::Audio>,
@@ -204,6 +206,7 @@ impl App {
             look: Look::default(),
             supersample,
             exposure: 0.0,
+            exposure_unset: true,
             audio: None,
             track: None,
             track_t: 0.0,
@@ -292,7 +295,8 @@ impl App {
         if sat > LEVEL_MAX_SATURATED {
             want = want.min(self.exposure - g * 0.5 * (sat / LEVEL_MAX_SATURATED).ln());
         }
-        let step = ((want - self.exposure) * dt * 2.0).clamp(-0.3, 0.3);
+        let step = if self.exposure_unset { want - self.exposure } else { ((want - self.exposure) * dt * 2.0).clamp(-0.3, 0.3) };
+        self.exposure_unset = false;
         self.exposure = (self.exposure + step).clamp(-(8f64.ln()), 16f64.ln());
     }
 
@@ -337,6 +341,10 @@ impl App {
     }
 
     pub fn present(&mut self) {
+        // right after a resize nothing is finished yet: the screen keeps the last picture
+        if !self.r.gpu.has_frame {
+            return;
+        }
         let (dw, dh) = self.screen();
         if !self.headless && self.show.cur.id != self.titled {
             self.titled = self.show.cur.id;
@@ -879,7 +887,7 @@ pub fn headless(o: &Opts) {
                 );
             }
         }
-        if o.every > 0 && f % o.every == 0 && !o.out.is_empty() {
+        if o.every > 0 && f % o.every == 0 && !o.out.is_empty() && app.r.gpu.has_frame {
             let (sw, sh) = app.screen();
             let (rgb, w, h) = if app.hud { (app.r.gpu.read_screen(sw, sh), sw, sh) } else { (app.r.gpu.read_rgb(), app.rw, app.rh) };
             let _ = std::fs::write(format!("{}/f{f:05}.png", o.out), png::encode(w, h, &rgb));
@@ -942,6 +950,13 @@ pub fn video(o: &Opts) {
     let t0 = Instant::now();
     let mut said = Instant::now();
     let mut credits = crate::video::Credits::default();
+    // a few frames before the first, so auto-exposure has measured it (its
+    // counts come two frames late) and trails have something to blend with
+    for _ in 0..4 {
+        app.track_t = 0.0;
+        app.frame(0.0, Some(rounds));
+        app.r.gpu.finish();
+    }
     // one frame of latency: frame f is on screen after step f + 1
     for f in 0..=frames {
         for k in &o.keys {

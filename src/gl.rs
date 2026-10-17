@@ -106,6 +106,7 @@ gl_fns! {
     glMaxShaderCompilerThreadsKHR(count: GLuint);
     glReadPixels(x: GLint, y: GLint, w: GLsizei, h: GLsizei, fmt: GLenum, kind: GLenum, px: *mut c_void);
     glProgramUniform1fv(p: GLuint, l: GLint, n: GLsizei, v: *const f32);
+    glClearTexImage(t: GLuint, lvl: GLint, fmt: GLenum, kind: GLenum, data: *const c_void);
 }
 
 pub const GL_VENDOR: GLenum = 0x1F00;

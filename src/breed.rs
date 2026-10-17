@@ -578,6 +578,13 @@ impl Sheep {
     }
 }
 
+/// The Electric Sheep server's render settings, which its sheep carry:
+/// supersample 4 and a spatial filter of radius 1.
+pub fn server_render(g: &mut Genome) {
+    g.supersample = 4;
+    g.filter = 1.0;
+}
+
 /// The local flock: Electric Sheep's server, in miniature. New sheep are
 /// 70 % descendants of the flock (a third mutations, the rest crosses), the
 /// rest random; parents are picked by rating; 20 % get a symmetry
@@ -700,6 +707,9 @@ impl Flock {
         } else {
             Genome::random(self.r.next_u32())
         };
+        // rendered as the server rendered every sheep (random genomes say
+        // flam3's 1x, filter 0.5; real sheep already say this)
+        server_render(&mut g);
         if self.r.f01() < 0.2 {
             // a symmetry singularity (as many as fit)
             let s = 11 + self.r.below(45) as i32;

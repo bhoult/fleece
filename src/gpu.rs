@@ -196,6 +196,8 @@ pub struct Gpu {
     stats_frame: usize,
     /// the brightness counts of a frame or two ago
     pub frame_stats: Option<FrameStats>,
+    /// a frame has been finished since the last resize (until then there is nothing to show)
+    pub has_frame: bool,
     knorm: GLuint,
     hud: GLuint,
     hud_size: (u32, u32),
@@ -314,6 +316,7 @@ impl Gpu {
             stats_fence: [std::ptr::null(); STATS_RING],
             stats_frame: 0,
             frame_stats: None,
+            has_frame: false,
             knorm: 0,
             hud: 0,
             hud_size: (0, 0),
@@ -546,8 +549,14 @@ impl Gpu {
             for i in 0..2 {
                 std::ptr::write_bytes(self.cpu_ptr[i] as *mut u8, 0, n as usize);
             }
+            // new storage holds whatever the memory held (a frame blend reads
+            // acc from the start, and a NaN in it would stay for good)
+            for t in [self.acc, self.dens, self.out, self.glowed] {
+                gl.glClearTexImage(t, 0, GL_RGBA, GL_FLOAT, std::ptr::null());
+            }
         }
         (self.w, self.h, self.os, self.bw, self.bh) = (w, h, os, bw, bh);
+        self.has_frame = false;
         self.clear_hist();
         Ok(())
     }
@@ -738,6 +747,7 @@ impl Gpu {
             self.stats_fence[si] = gl.glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         }
         self.stats_frame += 1;
+        self.has_frame = true;
         self.read_stats();
         if self.glow > 0.0 {
             self.run_glow();

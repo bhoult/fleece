@@ -99,7 +99,9 @@ impl Renderer {
         // 2. finish the previous frame
         let done = self.close(cpu_iters, keep);
         if done.is_none() {
+            // a fresh start (or after a resize): nothing behind acc yet
             self.gpu.clear_hist();
+            self.total = 0.0;
         }
         // 3. the GPU starts the new frame
         if reset {

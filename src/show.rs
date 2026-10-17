@@ -103,7 +103,11 @@ impl Show {
     pub fn new(seed: u32, saved: Vec<(Genome, i32)>, play: Vec<Genome>, genebank: (Vec<Genome>, Vec<f32>)) -> Show {
         let mut flock = Flock::new(seed);
         (flock.genebank, flock.bank_weight) = genebank;
-        for (g, rating) in saved {
+        for (mut g, rating) in saved {
+            // v1's flock file did not say how to render; the server rendered all at 4x, filter 1
+            if g.supersample == 1 && g.filter == 0.5 {
+                crate::breed::server_render(&mut g);
+            }
             let id = flock.next_id();
             flock.add(Sheep::new(g, rating, id));
         }
