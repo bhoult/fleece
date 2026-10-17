@@ -22,7 +22,10 @@ const SDL_GL_CONTEXT_PROFILE_CORE: c_int = 1;
 pub const SDL_QUIT: u32 = 0x100;
 pub const SDL_WINDOWEVENT: u32 = 0x200;
 pub const SDL_KEYDOWN: u32 = 0x300;
+pub const SDL_MOUSEMOTION: u32 = 0x400;
+pub const SDL_MOUSEBUTTONDOWN: u32 = 0x401;
 pub const SDL_MOUSEWHEEL: u32 = 0x403;
+pub const SDL_BUTTON_LEFT: u8 = 1;
 pub const SDL_WINDOWEVENT_SIZE_CHANGED: u8 = 6;
 
 pub const K_ESCAPE: i32 = 27;
@@ -65,6 +68,14 @@ impl Event {
     pub fn wheel_y(&self) -> i32 {
         self.i32_at(20)
     }
+    /// SDL_MOUSEMOTION, SDL_MOUSEBUTTONDOWN: where, in window coordinates
+    pub fn mouse_xy(&self) -> (i32, i32) {
+        (self.i32_at(20), self.i32_at(24))
+    }
+    /// SDL_MOUSEBUTTONDOWN: which button (1 left), and 2 for a double click
+    pub fn button(&self) -> (u8, u8) {
+        (self.raw[16 - 4], self.raw[18 - 4])
+    }
 }
 
 unsafe extern "C" {
@@ -83,6 +94,7 @@ unsafe extern "C" {
     fn SDL_GL_SetSwapInterval(interval: c_int) -> c_int;
     fn SDL_GL_SwapWindow(win: *mut c_void);
     fn SDL_GL_GetDrawableSize(win: *mut c_void, w: *mut c_int, h: *mut c_int);
+    fn SDL_GetWindowSize(win: *mut c_void, w: *mut c_int, h: *mut c_int);
     fn SDL_GetCurrentVideoDriver() -> *const c_char;
     fn SDL_PollEvent(ev: *mut Event) -> c_int;
     fn SDL_ShowCursor(toggle: c_int) -> c_int;
@@ -193,6 +205,22 @@ impl Window {
         let (mut w, mut h) = (0, 0);
         unsafe { SDL_GL_GetDrawableSize(self.win, &mut w, &mut h) };
         (w.max(1) as u32, h.max(1) as u32)
+    }
+
+    /// The window's size in its own coordinates (the mouse's; the drawable
+    /// may have more pixels on a scaled display).
+    pub fn window_size(&self) -> (u32, u32) {
+        let (mut w, mut h) = (0, 0);
+        unsafe { SDL_GetWindowSize(self.win, &mut w, &mut h) };
+        (w.max(1) as u32, h.max(1) as u32)
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    pub fn show_cursor(&self, on: bool) {
+        unsafe { SDL_ShowCursor(if on { 1 } else { 0 }) };
     }
 
     pub fn set_title(&self, title: &str) {

@@ -3,7 +3,7 @@
 //! the HUD and the keys.
 
 use crate::gpu::{self, Gpu};
-use crate::hud::Hud;
+use crate::hud::{self, Hud, Item, Style};
 use crate::render::{Renderer, Stats};
 use crate::sample::Sample;
 use crate::sdl::{self, Window};
@@ -71,6 +71,16 @@ pub struct App {
     blur: bool,
     hud: bool,
     hud_at: Instant,
+    /// the HUD wants redrawing now (a key, the mouse over another button)
+    hud_dirty: bool,
+    /// the mouse (drawable pixels), the HUD's buttons (overlay pixels), the
+    /// one under the mouse, and until when the HUD shows after the mouse
+    /// moved (it shows while the mouse moves, even when hidden)
+    mouse: Option<(f64, f64)>,
+    buttons: Vec<hud::Button>,
+    hover: Option<char>,
+    peek_until: Option<Instant>,
+    cursor: bool,
     /// the display's frame time, seconds
     period: f64,
     /// per-second rates for the HUD
@@ -191,6 +201,12 @@ impl App {
             blur: true,
             hud: o.hud,
             hud_at: Instant::now(),
+            hud_dirty: true,
+            mouse: None,
+            buttons: Vec::new(),
+            hover: None,
+            peek_until: None,
+            cursor: !o.fullscreen,
             period,
             rate_gpu: 0.0,
             rate_cpu: 0.0,
@@ -386,30 +402,42 @@ impl App {
             self.titled = self.show.cur.id;
             self.win.set_title(&format!("fleece: sheep {} ({})", self.show.cur.id, self.show.cur.genome.name));
         }
-        if self.hud && self.hud_at.elapsed().as_secs_f64() > 0.25 {
+        let shown = self.hud_shown();
+        if shown && (self.hud_dirty || self.hud_at.elapsed().as_secs_f64() > 0.25) {
             // wrapped to the window, so nothing is cut off
             let max = ((dw / (dh / 540).max(1)).saturating_sub(40) / 6) as usize;
-            let lines: Vec<String> = self
+            let mut rows: Vec<Vec<Item>> = self
                 .hud_lines()
                 .into_iter()
                 .flat_map(|l| {
-                    let (mark, text) = match l.chars().next() {
-                        Some(c @ ('~' | '*')) => (c.to_string(), l[1..].to_string()),
-                        _ => (String::new(), l),
+                    let (style, text) = match l.chars().next() {
+                        Some('~') => (Style::Dim, l[1..].to_string()),
+                        Some('*') => (Style::Red, l[1..].to_string()),
+                        _ => (Style::Plain, l),
                     };
-                    wrap(&text, max).into_iter().map(move |w| format!("{mark}{}", w.trim_start()))
+                    wrap(&text, max).into_iter().map(move |w| vec![Item::text(w.trim_start(), style)])
                 })
                 .collect();
-            let h = Hud::new(&lines);
+            rows.extend(self.button_rows());
+            let hover = self.mouse.and_then(|(x, y)| self.hud_point(x, y));
+            let h = Hud::panel(&rows, max as u32 * 6, hover);
             self.r.gpu.set_hud(h.w, h.h, &h.px);
+            self.buttons = h.buttons;
             self.hud_at = Instant::now();
+            self.hud_dirty = false;
+        }
+        // full screen hides the mouse pointer until the mouse moves
+        let cursor = !self.win.is_fullscreen() || self.peek_until.is_some_and(|t| Instant::now() < t);
+        if !self.headless && cursor != self.cursor {
+            self.win.show_cursor(cursor);
+            self.cursor = cursor;
         }
         self.record_frame();
         let s = (dh / 540).max(1);
         // the picture's shape kept, with black bars, as Electric Sheep's player shows its 800x592 videos
         let (ar, aw) = (self.rw as f32 / self.rh as f32, dw as f32 / dh as f32);
         let (w, h) = if ar > aw { (2.0, 2.0 * aw / ar) } else { (2.0 * ar / aw, 2.0) };
-        self.r.gpu.present(dw, dh, [-w / 2.0, -h / 2.0, w, h], self.hud.then_some(s));
+        self.r.gpu.present(dw, dh, [-w / 2.0, -h / 2.0, w, h], shown.then_some(s));
         if !self.headless {
             self.win.swap();
         }
@@ -457,41 +485,123 @@ impl App {
                 if self.show.mutating() { "   BREEDING A MUTATION" } else { "" },
                 if self.paused { "   PAUSED (REFINING)" } else { "" }
             ),
-            self.fx_line(),
-            match &self.rec {
-                Some(r) => format!(
-                    "*REC {}:{:02}  {}  CREDIT {}  (R TO STOP)",
-                    r.seconds() as u64 / 60,
-                    r.seconds() as u64 % 60,
-                    r.path,
-                    if self.burn_credit { "ON" } else { "OFF (METADATA ONLY)" }
-                ),
-                None => "~LEFT/RIGHT PREVIOUS/NEXT   UP LIKE   DOWN DISLIKE   M MUTATE   P PAUSE   R RECORD   -/+ SPEED".into(),
-            },
-            "~C CPU   G GPU   B BLUR   E/1/2/4 ES 800X592/1080P/2K/4K   S SAVE   K CREDIT IN RECORDINGS   F FULLSCREEN   H HIDE   ESC QUIT".into(),
-            "~V CLASSIC/V2   O GLOW   T TRAILS   X SUPERSAMPLE   L LEVELS   D DRIFT   U HUE   W WOBBLE   3 3D   A AUDIO".into(),
+        ]
+        .into_iter()
+        .chain(self.rec.as_ref().map(|r| {
+            format!(
+                "*REC {}:{:02}  {}  CREDIT {}  (R TO STOP)",
+                r.seconds() as u64 / 60,
+                r.seconds() as u64 % 60,
+                r.path,
+                if self.burn_credit { "ON" } else { "OFF (METADATA ONLY)" }
+            )
+        }))
+        .collect()
+    }
+
+    /// The HUD's buttons, each labelled with its key and lit when its setting
+    /// is on: the show, v2's effects, the renderer.
+    fn button_rows(&self) -> Vec<Vec<Item>> {
+        let f = &self.fx;
+        let classic = *f == Fx::CLASSIC;
+        let lines = |n: u32| self.fixed.is_none() && self.rh == n;
+        vec![
+            vec![
+                Item::button("LEFT", "PREVIOUS", '<', false),
+                Item::button("RIGHT", "NEXT", '>', false),
+                Item::button("UP", "LIKE", '^', false),
+                Item::button("DOWN", "DISLIKE", '_', false),
+                Item::button("M", "MUTATE", 'm', self.show.mutating()),
+                Item::button("P", "PAUSE", 'p', self.paused),
+                Item::button("-", "SLOWER", '-', false),
+                Item::text(format!("SPEED {}X", SPEEDS[self.speed]), Style::Dim),
+                Item::button("+", "FASTER", '+', false),
+                Item::button("R", "RECORD", 'r', self.rec.is_some()),
+                Item::button("S", "SAVE", 's', false),
+                Item::button("F", "FULLSCREEN", 'f', !self.headless && self.win.is_fullscreen()),
+                Item::button("H", "HIDE", 'h', false),
+                Item::button("ESC", "QUIT", 'q', false),
+            ],
+            vec![
+                Item::button("V", if classic { "CLASSIC" } else { "V2" }, 'v', !classic),
+                Item::button("O", format!("GLOW {}", ["OFF", "SUBTLE", "SOFT", "STRONG"][f.glow as usize % 4]), 'o', f.glow > 0),
+                Item::button("T", format!("TRAILS {}", ["OFF", "SHORT", "LONG"][f.trails as usize % 3]), 't', f.trails > 0),
+                Item::button("X", format!("SUPERSAMPLE {}", self.ss_label()), 'x', self.r.gpu.os > 1),
+                Item::button("L", if f.levels { format!("LEVELS {:+.1}", self.exposure / 2f64.ln()) } else { "LEVELS".into() }, 'l', f.levels),
+                Item::button("D", "DRIFT", 'd', f.drift),
+                Item::button("U", "HUE", 'u', f.hue),
+                Item::button("W", "WOBBLE", 'w', f.wobble),
+                Item::button("3", ["3D", "3D TILT", "3D TILT+DOF"][f.tilt as usize % 3], '3', f.tilt > 0),
+                Item::button("A", "AUDIO", 'a', f.audio),
+            ],
+            vec![
+                Item::button("C", "CPU", 'c', self.r.use_cpu && self.r.workers() > 0),
+                Item::button("G", "GPU", 'g', self.r.use_gpu),
+                Item::button("B", "BLUR", 'b', self.blur),
+                Item::button("E", "800X592", 'e', self.fixed == Some(crate::ES_SIZE)),
+                Item::button("1", "1080P", '1', lines(1080)),
+                Item::button("2", "2K", '2', lines(1440)),
+                Item::button("4", "4K", '4', lines(2160)),
+                Item::button("K", "CREDIT IN RECORDINGS", 'k', self.burn_credit),
+            ],
         ]
     }
 
-    /// The HUD line naming v2's effects and their state.
-    fn fx_line(&self) -> String {
-        let f = &self.fx;
-        if *f == Fx::CLASSIC {
-            return format!("CLASSIC (ELECTRIC SHEEP AS IT WAS)   SUPERSAMPLE {}", self.ss_label());
+    /// The HUD shows when on, and for a while after the mouse moves.
+    fn hud_shown(&self) -> bool {
+        self.hud || self.peek_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// Drawable pixel (`x`, `y`) on the HUD overlay, if past its corner.
+    fn hud_point(&self, x: f64, y: f64) -> Option<(u32, u32)> {
+        let (_, dh) = self.screen();
+        // as present() draws it: 12 pixels in, `s` drawable pixels per overlay pixel
+        let s = (dh / 540).max(1) as f64;
+        let (hx, hy) = ((x - 12.0) / s, (y - 12.0) / s);
+        (hx >= 0.0 && hy >= 0.0).then_some((hx as u32, hy as u32))
+    }
+
+    /// The window's mouse coordinates in drawable pixels.
+    fn to_drawable(&self, (x, y): (i32, i32)) -> (f64, f64) {
+        let ((dw, dh), (ww, wh)) = (self.win.drawable_size(), self.win.window_size());
+        (x as f64 * dw as f64 / ww as f64, y as f64 * dh as f64 / wh as f64)
+    }
+
+    /// The mouse moved to drawable pixel `p`: the HUD shows for a while, and
+    /// lights the button under it.
+    fn mouse_moved(&mut self, p: (f64, f64)) {
+        if !self.hud_shown() {
+            self.hud_dirty = true;
         }
-        let on = |b: bool| if b { "ON" } else { "OFF" };
-        format!(
-            "V2   GLOW {}   TRAILS {}   SUPERSAMPLE {}   LEVELS {}   DRIFT {}   HUE {}   WOBBLE {}   3D {}   AUDIO {}",
-            ["OFF", "SUBTLE", "SOFT", "STRONG"][f.glow as usize % 4],
-            ["OFF", "SHORT", "LONG"][f.trails as usize % 3],
-            self.ss_label(),
-            if f.levels { format!("{:+.1}", self.exposure / 2f64.ln()) } else { "OFF".into() },
-            on(f.drift),
-            on(f.hue),
-            on(f.wobble),
-            ["OFF", "TILT", "TILT+DOF"][f.tilt as usize % 3],
-            on(f.audio),
-        )
+        self.mouse = Some(p);
+        self.peek_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+        let over = if self.hud_shown() { self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)) } else { None };
+        if over != self.hover {
+            self.hover = over;
+            self.hud_dirty = true;
+        }
+    }
+
+    /// A left click at drawable pixel `p` (`clicks` 2: a double click): a
+    /// button does what its key does, a double click elsewhere toggles full
+    /// screen. False to quit.
+    pub fn click(&mut self, p: (f64, f64), clicks: u8) -> bool {
+        self.mouse_moved(p);
+        if let Some(c) = self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)) {
+            return self.key(c);
+        }
+        if clicks == 2 {
+            self.toggle_fullscreen();
+        }
+        true
+    }
+
+    /// Where the button for key `c` is (drawable pixels), for testing clicks.
+    pub fn button_centre(&self, c: char) -> Option<(f64, f64)> {
+        let (_, dh) = self.screen();
+        let s = (dh / 540).max(1) as f64;
+        let b = self.buttons.iter().find(|b| b.action == c)?;
+        Some((12.0 + s * (b.x0 + b.x1) as f64 / 2.0, 12.0 + s * (b.y0 + b.y1) as f64 / 2.0))
     }
 
     fn ss_label(&self) -> String {
@@ -504,6 +614,16 @@ impl App {
             match ev.kind {
                 sdl::SDL_QUIT => return false,
                 sdl::SDL_WINDOWEVENT if ev.window_event() == sdl::SDL_WINDOWEVENT_SIZE_CHANGED => self.fit(),
+                sdl::SDL_MOUSEMOTION => {
+                    let p = self.to_drawable(ev.mouse_xy());
+                    self.mouse_moved(p);
+                }
+                sdl::SDL_MOUSEBUTTONDOWN => {
+                    let (button, clicks) = ev.button();
+                    if button == sdl::SDL_BUTTON_LEFT && !self.click(self.to_drawable(ev.mouse_xy()), clicks) {
+                        return false;
+                    }
+                }
                 sdl::SDL_MOUSEWHEEL => {
                     let y = ev.wheel_y();
                     if y > 0 {
@@ -608,16 +728,27 @@ impl App {
     /// A key, in the window or from --keys: false to quit.
     pub fn key(&mut self, c: char) -> bool {
         let next = |v: u8, n: u8| (v + 1) % n;
+        self.hud_dirty = true;
         match c {
             'q' => return false,
-            ' ' => self.show.skip(),
+            ' ' | '>' => self.show.skip(),
+            '<' => self.show.back(),
+            // the HUD's like and dislike buttons (the arrow keys in the window)
+            '^' | '_' => {
+                self.show.vote(if c == '^' { 1 } else { -1 });
+                self.save_flock();
+            }
             '-' => self.speed = self.speed.saturating_sub(1),
             '=' | '+' => self.speed = (self.speed + 1).min(SPEEDS.len() - 1),
             'f' => self.toggle_fullscreen(),
             'm' => self.show.mutate_next(),
             'p' => self.paused = !self.paused,
             'b' => self.blur = !self.blur,
-            'h' => self.hud = !self.hud,
+            'h' => {
+                self.hud = !self.hud;
+                // hidden from the HUD's own button: gone until the mouse moves again
+                self.peek_until = None;
+            }
             'c' => {
                 if self.r.workers() > 0 {
                     self.r.use_cpu = !self.r.use_cpu || !self.r.use_gpu;
@@ -900,6 +1031,14 @@ pub fn headless(o: &Opts) {
                         app.set_render(w * 3 / 4, h * 3 / 4);
                     }
                     'R' => app.toggle_recording(),
+                    // other capitals click the HUD's button for that key
+                    c if c.is_ascii_uppercase() => match app.button_centre(c.to_ascii_lowercase()) {
+                        Some(p) => {
+                            println!("click {c} at {:.0},{:.0}", p.0, p.1);
+                            app.click(p, 1);
+                        }
+                        None => println!("click {c}: no button"),
+                    },
                     c => {
                         app.key(c);
                     }
