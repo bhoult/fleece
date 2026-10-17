@@ -186,6 +186,8 @@ tools/video.sh -s 30 -l 1080                                     # the same thro
 - It holds the picture without the controls, with the sheep's credit burned into its first 10 seconds (K turns that on or off; `--credit off` starts with it off).
 - Changing the render size (E, 1, 2, 4, or fullscreen without a fixed size) ends the recording. So does quitting, which finishes the file.
 
+Videos get v2's look by default, like the window: automatic supersampling, glow, short trails, levels, drift and wobble. `--classic` renders the show as Electric Sheep's server did, and `--classic --supersample 4` matches its renders most closely.
+
 `--video FILE` renders frames at a fixed quality, `--quality` samples per pixel (default 2,000, Electric Sheep's), at `--fps` (30) for `--seconds` (60) or `--frames`, at Electric Sheep's 800x592 unless a size is given.
 - ffmpeg encodes the file, chosen by its extension: H.264 for .mp4/.mkv/.mov (`--crf`, default 17), VP9 for .webm. `.y4m` is written directly and `-` streams raw RGB24 to stdout.
 - Credits:
