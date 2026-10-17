@@ -586,8 +586,10 @@ impl App {
     /// button does what its key does, a double click elsewhere toggles full
     /// screen. False to quit.
     pub fn click(&mut self, p: (f64, f64), clicks: u8) -> bool {
+        // a click on the hidden HUD only shows it
+        let visible = self.hud_shown();
         self.mouse_moved(p);
-        if let Some(c) = self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)) {
+        if let Some(c) = self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)).filter(|_| visible) {
             return self.key(c);
         }
         if clicks == 2 {
