@@ -33,15 +33,18 @@ pub struct Fx {
     pub wobble: bool,
     /// 3D camera: 0 flat, 1 tilted, 2 tilted with depth of field
     pub tilt: u8,
-    /// the music drives the show
-    pub audio: bool,
+    /// how strongly the music drives the show: 0 off, 1 low, 2 medium, 3 high
+    pub audio: u8,
 }
 
 impl Fx {
-    pub const CLASSIC: Fx = Fx { glow: 0, trails: 0, levels: false, drift: false, hue: false, wobble: false, tilt: 0, audio: false };
-    pub const V2: Fx = Fx { glow: 2, trails: 1, levels: true, drift: true, hue: false, wobble: true, tilt: 0, audio: false };
+    pub const CLASSIC: Fx = Fx { glow: 0, trails: 0, levels: false, drift: false, hue: false, wobble: false, tilt: 0, audio: 0 };
+    pub const V2: Fx = Fx { glow: 2, trails: 1, levels: true, drift: true, hue: false, wobble: true, tilt: 0, audio: 0 };
 }
 
+/// How strongly the music moves the picture (A: off, low, medium, high): a
+/// factor on every response to it.
+const AUDIO_STRENGTH: [f64; 4] = [0.0, 0.5, 1.0, 1.8];
 /// Frame blending's time constants (animation seconds) for short and long trails.
 const TRAILS: [f64; 3] = [0.0, 0.06, 0.35];
 /// Glow (subtle, soft, strong): its strength, and the most light it adds,
@@ -244,12 +247,13 @@ impl App {
     /// overrides the adaptive budget (video).
     pub fn frame(&mut self, dt: f64, fixed: Option<u32>) -> Option<Stats> {
         let audio = self.audio_levels();
+        let k = AUDIO_STRENGTH[self.fx.audio as usize % 4];
+        let [loud, _, _, _, high, beat] = audio.map(|v| v as f64 * k);
         // loud music turns the sheep faster
-        let dt_show = if self.paused { 0.0 } else { dt * SPEEDS[self.speed] * (1.0 + 0.6 * audio[0] as f64) };
+        let dt_show = if self.paused { 0.0 } else { dt * SPEEDS[self.speed] * (1.0 + 0.6 * loud) };
         if !self.paused {
             self.show.advance(dt_show);
         }
-        let [loud, _, _, _, high, beat] = audio.map(|v| v as f64);
         // the music runs the drift ahead when loud, and turns the hues with
         // its highs and a step on each beat (~0.03 of a turn)
         self.drift_lead += dt_show * 3.0 * loud;
@@ -260,6 +264,7 @@ impl App {
             wobble: self.fx.wobble,
             tilt: self.fx.tilt,
             audio,
+            react: k as f32,
             drift_lead: self.drift_lead,
             hue_lead: self.hue_lead,
         };
@@ -268,7 +273,7 @@ impl App {
         let (mut glow, mut cap) = GLOW[self.fx.glow as usize % 4];
         if glow > 0.0 {
             // the glow swells with the music and flares on the beats
-            glow *= (0.7 + 0.6 * loud + 0.8 * beat) as f32;
+            glow *= (1.0 + 0.6 * loud - 0.3 * k + 0.8 * beat) as f32;
             cap *= (1.0 + 0.6 * beat) as f32;
         }
         (self.r.gpu.glow, self.r.gpu.glow_cap) = (glow, cap);
@@ -283,7 +288,7 @@ impl App {
         // of what it steers): louder is brighter, each beat a flash; the
         // picture moves as exposure^(1 / gamma), hence the gamma
         let g = mid.gamma.max(1.0) as f64;
-        let ev = if self.fx.audio { g * (0.25 * (loud - 0.5) + 0.25 * beat) } else { 0.0 };
+        let ev = g * (0.25 * (loud - 0.5 * k) + 0.25 * beat);
         self.audio_ev = [ev, self.audio_ev[0]];
         let levels = if self.fx.levels { self.exposure } else { 0.0 };
         tone.exposure = (levels + self.audio_ev[0]).exp() as f32;
@@ -356,7 +361,7 @@ impl App {
     /// soundtrack's at this point of the video, else what the speakers play
     /// (parec runs only while audio is on).
     fn audio_levels(&mut self) -> [f32; 6] {
-        if !self.fx.audio {
+        if self.fx.audio == 0 {
             self.audio = None;
             return [0.0; 6];
         }
@@ -368,7 +373,7 @@ impl App {
                         Ok(a) => self.audio = Some(a),
                         Err(e) => {
                             eprintln!("fleece: no audio: {e}");
-                            self.fx.audio = false;
+                            self.fx.audio = 0;
                             return [0.0; 6];
                         }
                     }
@@ -532,7 +537,7 @@ impl App {
                 Item::button("U", "HUE", 'u', f.hue),
                 Item::button("W", "WOBBLE", 'w', f.wobble),
                 Item::button("3", ["3D", "3D TILT", "3D TILT+DOF"][f.tilt as usize % 3], '3', f.tilt > 0),
-                Item::button("A", "AUDIO", 'a', f.audio),
+                Item::button("A", format!("AUDIO {}", ["OFF", "LOW", "MEDIUM", "HIGH"][f.audio as usize % 4]), 'a', f.audio > 0),
             ],
             vec![
                 Item::button("C", "CPU", 'c', self.r.use_cpu && self.r.workers() > 0),
@@ -773,7 +778,7 @@ impl App {
             'u' => self.fx.hue = !self.fx.hue,
             'w' => self.fx.wobble = !self.fx.wobble,
             '3' => self.fx.tilt = next(self.fx.tilt, 3),
-            'a' => self.fx.audio = !self.fx.audio,
+            'a' => self.fx.audio = next(self.fx.audio, 4),
             _ => {}
         }
         true

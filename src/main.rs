@@ -103,7 +103,7 @@ fn usage() -> ! {
     eprintln!("              [--es | --es-hd | --render WxH | --native | --scale F] [--quality N]");
     eprintln!("              [--load FILE.flam3]... [--fresh] [--cpu-only | --gpu-only] [--threads N]");
     eprintln!("              [--classic] [--glow 0-3] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
-    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--supersample 1-4] [--taste on|off]");
+    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--audio-strength 0-3] [--supersample 1-4] [--taste on|off]");
     eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
     eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
     eprintln!("       fleece --shot OUT.png [--quality Q] [--angle DEG] [--breed N] [size]   one still");
@@ -283,8 +283,14 @@ fn parse() -> Opts {
                 i += 1;
                 o.fx.tilt = (num(i) as u8).min(2);
             }
+            "--audio-strength" => {
+                i += 1;
+                o.fx.audio = (num(i) as u8).min(3);
+            }
             "--audio" => {
-                o.fx.audio = true;
+                if o.fx.audio == 0 {
+                    o.fx.audio = 2;
+                }
                 // a recording to make the video to (else: what the speakers play, live)
                 if let Some(f) = args.get(i + 1).filter(|f| !f.starts_with("--") && std::path::Path::new(f.as_str()).is_file()) {
                     o.soundtrack = Some(f.clone());

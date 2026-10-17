@@ -41,6 +41,8 @@ pub struct Look {
     pub tilt: u8,
     /// the music (all 0 without): loudness, bass, low mid, mid, high, beat
     pub audio: [f32; 6],
+    /// how strongly the music moves the picture (0 off, 1 medium)
+    pub react: f32,
     /// how far the music has run the camera drift and the hues ahead of the
     /// show's clock (seconds): loud passages drift faster, beats and highs
     /// turn the hues
@@ -422,7 +424,9 @@ impl Drop for Show {
 fn dress(g: &mut Genome, t: f64, look: &Look) {
     use std::f64::consts::TAU;
     let wave = |t: f64, period: f64, phase: f64| (TAU * t / period + phase).sin() as f32;
-    let [loud, bass, _lowmid, mid, high, beat] = look.audio;
+    // the music, scaled by how strongly it is to move the picture
+    let k = look.react;
+    let [loud, bass, _lowmid, mid, high, beat] = look.audio.map(|v| v * k);
     if look.drift {
         // zoom in by up to a third and back, pan by a tenth of the picture,
         // turn a few degrees: periods that never line up, slower than a loop;
@@ -444,12 +448,12 @@ fn dress(g: &mut Genome, t: f64, look: &Look) {
             *c = crate::genome::hsv2rgb(v);
         }
     }
-    if look.audio != [0.0; 6] {
+    if k > 0.0 {
         // the bass and the beats push the camera in; each band swells some xforms
         g.scale *= 1.0 + 0.05 * bass + 0.07 * beat;
-        let bands = [bass, look.audio[2], mid, high];
+        let bands = [bass, look.audio[2] * k, mid, high];
         for (i, x) in g.xforms.iter_mut().enumerate().filter(|(_, x)| x.animate) {
-            x.weight *= 1.0 + 0.6 * (bands[i % 4] - 0.4);
+            x.weight *= (1.0 + 0.6 * (bands[i % 4] - 0.4 * k)).max(0.05);
         }
         // (the brightness and the glow follow the music in app.rs, past auto-levels)
     }
