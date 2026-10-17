@@ -1,0 +1,183 @@
+# fleece
+
+A live fractal flame animator in the manner of [Electric Sheep](https://electricsheep.org). The flames are rendered in real time on the GPU and on every CPU core at once. It is written in Rust with no crates: the window and OpenGL 4.6 context come from libSDL2, and every GL call is looked up at run time.
+
+```
+cargo build --release
+target/release/fleece                 # Electric Sheep's 800x592 frame, scaled to the window, 30 fps
+target/release/fleece --fullscreen    # the same, filling the screen (or press F)
+target/release/fleece --quality 2000  # Electric Sheep's own quality every frame, at whatever frame rate that takes
+target/release/fleece 2k              # render at a size instead: 1080p, 2k (2560x1440), 4k (3840x2160), WxH
+```
+
+By default fleece renders Electric Sheep's standard frame, 800x592, and scales it to the window with black bars, as the Electric Sheep player shows its 800x592 videos. At that size this machine gets roughly 700–2,500 samples per pixel per frame at 30 fps; the server renders each frame at 2,000. `--quality N` holds every frame at N samples per pixel (2,000 runs at about 14–20 fps here). `--es-hd` renders the HD flock's 1280x720, `--render WxH` any fixed size, and `--native` the window's own size.
+
+## What Electric Sheep does, and what fleece does
+
+Electric Sheep's pictures are ordinary flam3 renders: the chaos game, log-density tone mapping and density estimation. What makes it Electric Sheep is everything around the renders. fleece follows flam3 and the Electric Sheep sources (scottdraves/flam3 and scottdraves/electricsheep, plus the 2005 server code) for each part.
+
+**Sheep and loops**
+- A sheep is a loop: every animated xform's linear part turns 360° over 128 frames at 23 fps, about 5.6 s (`flam3_rotate`, `sheep_loop`).
+- Each loop plays twice.
+
+**Edges**
+- An edge is a 128-frame morph into the next sheep (`sheep_edge`).
+- Both sheep are padded to the same xforms with flam3's padding rules. Spherical-like variations get a turned identity of weight -1; fan and rings get a swapped one.
+- Each affine column is interpolated in log-polar form, with flam3's wind angles when one side is a symmetry xform.
+- Palettes are blended in HSV with the hue taking the short way round.
+- Everything else is linear. The blend is eased with flam3's `3t² - 2t³` while both sheep keep turning, so loop, edge and loop join smoothly.
+
+**Motion blur**
+- Each frame is 64 time samples spread over one Electric Sheep frame. flam3 used 1,000 temporal samples.
+
+**The flock and evolution**
+- New sheep come from the flock as on the server:
+  - 70% are descendants: a third flam3 mutations (seven kinds, flam3's odds), the rest crossovers (union, blend or alternating xforms, and a palette splice 40% of the time);
+  - the rest are flam3-genome random genomes;
+  - 20% get a symmetry "singularity".
+- Parents are picked by rating.
+- Every candidate, mutations from the M key included, goes through:
+  - flam3-genome's 128×128 test render (mean channel ≥ 20, at least 1% black pixels, at most 5% white);
+  - its bounding-box framing;
+  - a check of the framed view at four turns of the loop. The mean channel must stay at 8 or more; that is fleece's own rule.
+- flam3's test looks at [-1, 1]² at one angle only. About one sheep in ten that passes it, and one untested mutation in five, goes nearly black on screen somewhere in its loop. With the view check, none did in 300 of each (`--mutcheck`).
+- Each candidate gets up to ten tries and keeps the best. Mutations are bred on the breeder thread too; the HUD says BREEDING A MUTATION until it morphs in.
+- Votes: Up likes the sheep on screen, Down dislikes it and moves on. The 32-sheep flock and its ratings are saved to `~/.local/share/fleece/flock.flam3` and carry over to the next run (`--fresh` starts over).
+
+**Real sheep (the genebank)**
+- Every `.flam3` file in `~/.local/share/fleece/genebank/` is a real sheep the show draws on, as the server drew on its genebank. Real sheep are shown as designed (their own framing and colours) or crossed with each other and with sheep you like. They are picked in proportion to the square root of their Electric Sheep rating.
+- The repository's `sheep/` directory holds 5,925 of them (with `sheep/README.md` on their licence); fleece uses it when `~/.local/share/fleece/genebank/` is empty. The genebank installed here holds 5,923 sheep. They come from generations 165–248 of the live server (v3d0.sheepserver.net still serves generations 247 and 248), the Wayback Machine, and GitHub copies, including Scott Draves' own genebank file. 4,945 of them have ratings.
+- fleece reads what real genomes use:
+  - per-sheep brightness, gamma, highlight power, vibrancy, density estimation and the linear palette mode;
+  - the older `symmetry` attribute (colour speed and a non-turning xform) and `<symmetry kind=N/>`;
+  - xaos (`chaos`) and opacity;
+  - `<motion>` elements: values that swing over each loop (sin, triangle or hill, applied before the turn, as flam3's sheep_loop does). A motion sheep checked against flam3-genome's loop frames lines up: PSNR 26.8 dB at the same phase, 18 dB a quarter loop apart.
+- Not done: the server's 4x supersampling. Each sheep's own `size` is not used either; the show renders every sheep into the same frame, framed by width.
+
+**Rendering**
+- All 99 of flam3's variations, numbered and named as in flam3, with flam3's random parameter ranges.
+- flam3's 701 palettes, hue-turned one time in eight.
+- flam3's tone curve: brightness, gamma 4 with the linear range, vibrancy, highlight power, background.
+- Density estimation: radius 9, curve 0.4, and each pixel's kernel narrowing with its hit count. It runs as a shared-memory gather on the GPU.
+
+**Checked against the real thing**
+- flam3 3.1.1 (built from the source) rendered six of fleece's genomes. fleece's frames match them in structure, colour and brightness; flam3's are grainier at equal quality.
+- `--varcheck` renders a flame made of each variation on the CPU alone and on the GPU alone and compares where the points land.
+  - Over three seeds, every variation agrees (L1 distance under 0.15, mostly under 0.03) except rings2 at a tiny ring width, where points sit on a `trunc()` boundary and the GPU's faster division rounds some the other way.
+  - The one exception is a "sin" flame that sends 99.99% of its points off to infinity, leaving a few thousand on screen.
+  - Flames with no points on screen on either side are skipped.
+
+Electric Sheep's client plays pre-rendered videos. fleece renders every frame live instead, and it has no server: breeding happens in a background thread.
+
+## CPU and GPU
+
+Both run the chaos game on the same frame and add into one picture.
+
+- **GPU:** an OpenGL compute shader runs 262,144 walkers, 64 iterations a dispatch.
+  - Each work group caches its time sample's xforms, palette and xform-choice table in shared memory.
+  - Points are added with 64-bit atomics: two per point instead of four (NVIDIA).
+  - For every sheep (and every edge) a shader with only the variations it uses is compiled in the background (KHR_parallel_shader_compile). It is up to about 2x faster than the general one. The HUD says SHADER TUNED once it is in use.
+  - The number of dispatches per frame adapts to keep the GPU busy for about 85% of the display's frame time.
+- **CPU:** one worker per core except one, at nice 5, so the desktop and the render thread come first.
+  - The workers use AVX2: eight walkers per vector, each picking its own xform. Per-xform values are looked up with vpermps, and sin, cos, atan2, ln, exp and pow are eight-lane polynomials accurate to about 1 ulp.
+  - They write into a persistent, coherent, client-storage GL buffer. That is cached system memory, which the GPU's merge pass reads directly, so nothing is copied per frame. Two such buffers alternate between frames.
+- **Merging:** at the next frame's start the workers move to the new frame's samples. The finished frame's GPU and CPU histograms are merged, density-estimated and tone-mapped while the GPU starts the next frame, so the picture is one frame behind.
+
+Measured here while another program kept the GPU at 100% and about 14 cores busy (load average 40-60):
+
+| | iterations / s |
+| --- | --- |
+| GPU (RTX 5080), specialised shader | about 5-10 G, depending on the flame and the other load |
+| CPU (Ultra 9 285K, 23 workers) | about 0.6-1.0 G |
+
+At 1280x720 and 30 Hz that is about 150-350 samples per pixel per frame. Electric Sheep used 500, with 2x oversampling; density estimation hides the difference.
+
+`C` and `G` turn either side off, so you can see what each one adds.
+
+## Keys
+
+| key | |
+| --- | --- |
+| Left / Right | previous / next sheep: a morph back through the sheep already shown (up to 500), or forward; past the newest, a new sheep |
+| Space | next sheep (as Right) |
+| Up | like this sheep (its rating +1: it breeds more often) |
+| Down | dislike it (rating -1, skip; at a negative rating it leaves the flock) |
+| M | morph into a (tested) mutation of the sheep the HUD names |
+| P | pause: the picture keeps refining until P again |
+| - / +, mouse wheel | animation speed, 1/16x to 4x |
+| B | motion blur on / off |
+| C / G | the CPU's / the GPU's share on / off |
+| E | render Electric Sheep's 800x592 frame, scaled to the window |
+| 1 / 2 / 4 | render 1080 / 1440 (2K) / 2160 (4K) lines, at the window's shape |
+| S | save the frame (PNG) and its genome (flam3 XML) to ~/Pictures/fleece |
+| R | start / stop recording the show to ~/Videos/fleece-TIME.mp4 (see below) |
+| K | the credit burned into recordings on / off (it is in the file's metadata either way) |
+| H | hide the text |
+| F, F11 | fullscreen |
+| Esc, Q | quit |
+
+A size given on the command line (`1080p`, `2k`, `4k`, `WxH`) is rendered at full resolution, and so is fullscreen started from it. With `--native`, the window and fullscreen are rendered at most 1080 lines tall: a 4K screen gets a 2x upscale and four times the samples per pixel. `--scale F` sets the render size relative to the window, for example `4k --fullscreen --scale 0.5`.
+
+## Other modes
+
+```
+target/release/fleece --load sheep.flam3            # show these flames first (flam3, Electric Sheep, Apophysis, Fractorium XML)
+target/release/fleece --shot out.png --seed 7 --quality 500 1080p   # one still (also writes out.flam3)
+target/release/fleece --frames 300 --out DIR --every 30 --keys "100: ,200:m"   # headless run, PNGs, key presses
+target/release/fleece --bench                       # chaos-game rate of each side alone
+target/release/fleece --varcheck                    # CPU against GPU for every variation
+target/release/fleece --mutcheck                    # how often mutations go dark, untested and tested
+target/release/fleece --video sheep.mp4 --seconds 60 --credit   # a video file (headless): ES frame and quality
+target/release/fleece --video sheep.webm 1080p --quality 500     # any size / quality; the format follows the extension
+target/release/fleece --video sheep.y4m --seconds 10             # .y4m: uncompressed, written without ffmpeg
+tools/video.sh -s 30 -l 1080                                     # the same through a script: ~/Videos/fleece-demo.mp4
+```
+
+**Recording the live show (R).**
+- The file is ~/Videos/fleece-TIME.mp4: H.264, at the render size (800x592 by default), at the display's frame rate.
+- Every frame goes into the file. While recording, the show steps exactly one display frame of animation per frame, and a busy encoder makes the display wait rather than drop a frame. The video plays at true speed with nothing skipped or repeated. If the machine cannot keep up live, the live view slows down instead of the video.
+- It holds the picture without the controls, with the sheep's credit burned into its first 10 seconds (K turns that on or off; `--credit off` starts with it off).
+- Changing the render size (E, 1, 2, 4, or fullscreen without a fixed size) ends the recording. So does quitting, which finishes the file.
+
+`--video FILE` renders frames at a fixed quality, `--quality` samples per pixel (default 2,000, Electric Sheep's), at `--fps` (30) for `--seconds` (60) or `--frames`, at Electric Sheep's 800x592 unless a size is given.
+- ffmpeg encodes the file, chosen by its extension: H.264 for .mp4/.mkv/.mov (`--crf`, default 17), VP9 for .webm. `.y4m` is written directly and `-` streams raw RGB24 to stdout.
+- Credits:
+  - The sheep's name and credit are burned into the bottom left of the first 10 seconds of each video and recording, wrapped to fit, then fade out over a second (`--credit-secs N` changes the 10). `--credit off` leaves the frames clean.
+  - Either way, every video and recording carries the credits for every sheep that appeared: in the file's metadata (title, artist, comment, description, copyright; a stream-copy remux after encoding) and in `FILE.credits.txt` next to it.
+  - Licences follow the sheep: designed sheep are CC BY, evolved ones CC BY-NC, and anything bred from an evolved sheep stays CC BY-NC.
+- The HUD's second line always shows the credit: "artwork by Scott Draves and the Electric Sheep", the licence (CC BY-NC for evolved sheep, CC BY for designed ones) and the designer. For fleece's own random sheep it credits flam3 instead.
+
+The headless modes use SDL's offscreen driver, so the context is made on the GPU through EGL and no display is needed. They never touch the saved flock.
+
+## Files
+
+| file | contents |
+| --- | --- |
+| `src/app.rs` | the window, frame loop, adaptive GPU budget, HUD, keys, headless and video modes |
+| `src/show.rs` | the playback: loops, edges, motion-blur samples, the breeder thread |
+| `src/breed.rs` | the flock, mutation, crossover, framing, the fitness test |
+| `src/genome.rs` | genomes, flam3_random, symmetry, rotation, the flattening for the chaos game, XML output |
+| `src/interp.rs` | edges: padding, log-polar affines, HSV palettes |
+| `src/var.rs` | the variation table, random parameters, precalcs |
+| `src/flam3.rs` | reading flam3 XML; the flock file |
+| `src/render.rs` | one frame on both sides: publish, merge, tone |
+| `src/gpu.rs`, `src/shaders/` | buffers, specialised shaders, the passes (iterate, merge, tone with density estimation, present) |
+| `src/cpu.rs`, `src/cpuvar.rs` | the AVX2 chaos game, the worker pool, the variations in eight lanes |
+| `src/fmath.rs`, `src/simd.rs` | eight-lane math (simd.rs from FRAKTAL256's Rust port) |
+| `src/gl.rs`, `src/sdl.rs` | the OpenGL loader and the SDL2 calls |
+| `src/hud.rs`, `src/png.rs` | the 5x7 text and a PNG writer |
+| `assets/flam3-palettes.bin` | flam3's 701 palettes (from flam3-palettes.xml) |
+
+## Requirements and licence
+
+- An x86-64 CPU with AVX2 and FMA.
+- An OpenGL 4.6 GPU. The 64-bit atomics and the parallel shader compiles are used when the driver has them (NVIDIA does).
+- libSDL2 (`SDLLIB=/path/to/libSDL2-2.0.so.0` at build time if it is elsewhere).
+
+The palettes and the algorithms (variations, tone mapping, density estimation, interpolation, mutation, crossover) come from flam3, which is GPL v3 or later (© Spotworks LLC / Scott Draves). Anything distributed from this tree therefore falls under the GPL v3 too. `src/simd.rs` and the HUD font come from FRAKTAL256's Rust port.
+
+The genomes in `sheep/` are not covered by the GPL. They are Electric Sheep artwork under Creative Commons (see `sheep/README.md`), and the Electric Sheep reuse policy applies to them and to anything rendered from them:
+- sheep evolved by the algorithm are CC Attribution-NonCommercial;
+- sheep designed by people are CC Attribution and carry the designer's name;
+- credit "artwork by Scott Draves and the Electric Sheep" (and the sheep's generation and number);
+- commercial use needs a licence from Spotworks.

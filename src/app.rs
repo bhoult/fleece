@@ -1,0 +1,738 @@
+//! The live show: a window (or the offscreen driver for tests and video),
+//! the frame loop that keeps the GPU's iteration budget filling the frame,
+//! the HUD and the keys.
+
+use crate::gpu::{self, Gpu};
+use crate::hud::Hud;
+use crate::render::{Renderer, Stats};
+use crate::sample::Sample;
+use crate::sdl::{self, Window};
+use crate::show::{self, Show};
+use crate::{Opts, png, tone_of};
+use std::time::Instant;
+
+/// Time samples per frame (motion blur) and the shutter in Electric Sheep frames.
+const BLUR_SAMPLES: usize = 64;
+const SHUTTER_FRAMES: f64 = 1.0;
+/// Animation speeds (Left / Right).
+const SPEEDS: [f64; 9] = [0.0625, 0.125, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
+
+pub struct App {
+    pub win: Window,
+    pub r: Renderer,
+    pub show: Show,
+    samples: Vec<Sample>,
+    /// GPU rounds per frame (adapted to the frame time)
+    dispatches: f32,
+    max_dispatches: u32,
+    speed: usize,
+    paused: bool,
+    blur: bool,
+    hud: bool,
+    hud_at: Instant,
+    /// the display's frame time, seconds
+    period: f64,
+    /// per-second rates for the HUD
+    rate_gpu: f64,
+    rate_cpu: f64,
+    fps: f64,
+    quality: f64,
+    scale: f32,
+    /// a fixed render size (Electric Sheep's), scaled to the window
+    fixed: Option<(u32, u32)>,
+    /// samples per pixel every frame (--quality), else as many as 30 fps allows
+    target_q: Option<f32>,
+    rw: u32,
+    rh: u32,
+    frame: u64,
+    headless: bool,
+    /// the sheep the window title names
+    titled: u32,
+    /// recording the show (R)
+    rec: Option<crate::video::Recorder>,
+    /// burn the credit into recorded frames (--credit off / K: metadata only)
+    burn_credit: bool,
+    /// seconds the burned-in credit shows at the start of a recording
+    credit_secs: f64,
+    /// milliseconds spent building the frame's samples (smoothed)
+    pub build_ms: f64,
+}
+
+impl App {
+    pub fn new(o: &Opts, headless: bool) -> App {
+        let win = Window::open("fleece", o.w, o.h, headless, o.fullscreen).unwrap_or_else(|e| {
+            eprintln!("fleece: {e}");
+            std::process::exit(1)
+        });
+        let g = crate::gl::Gl::load(Window::proc_address).unwrap_or_else(|e| {
+            eprintln!("fleece: {e}");
+            std::process::exit(1)
+        });
+        let (dw, dh) = if headless { (o.w, o.h) } else { win.drawable_size() };
+        let (rw, rh) = o.render.unwrap_or_else(|| render_size(dw, dh, o.scale));
+        let gpu = Gpu::new(g, rw, rh).unwrap_or_else(|e| {
+            eprintln!("fleece: shader: {e}");
+            std::process::exit(1)
+        });
+        let vsync = !headless && win.set_vsync(true);
+        let period = if headless { 1.0 / o.fps } else { 1.0 / win.refresh_hz().unwrap_or(60.0) };
+        let mut r = Renderer::new(gpu, o.workers);
+        r.use_gpu = o.gpu;
+        let t0 = Instant::now();
+        // the window keeps its flock between runs; tests and videos don't touch it
+        let saved = if headless || o.fresh {
+            Vec::new()
+        } else {
+            std::fs::read_to_string(crate::flock_path()).map(|x| crate::flam3::parse(&x).0).unwrap_or_default()
+        };
+        if !saved.is_empty() {
+            eprintln!("fleece: {} sheep in the flock from {}", saved.len(), crate::flock_path());
+        }
+        let genebank = crate::load_genebank();
+        if !genebank.0.is_empty() {
+            eprintln!("fleece: {} real sheep in the genebank ({})", genebank.0.len(), crate::genebank_source());
+        }
+        let show = Show::new(o.seed, saved, crate::load_files(&o.load), genebank);
+        // stderr: stdout carries the frames in --video
+        eprintln!(
+            "fleece: {} driver, {}x{} render ({:.0} Hz{}), {} MB video memory free, {} CPU workers, first sheep in {:.2} s: {}",
+            win.driver(),
+            rw,
+            rh,
+            1.0 / period,
+            if vsync { ", vsync" } else { "" },
+            r.gpu.free_vram_mb().map_or("?".into(), |m| m.to_string()),
+            r.workers(),
+            t0.elapsed().as_secs_f64(),
+            show.cur.genome.name
+        );
+        App {
+            win,
+            r,
+            show,
+            samples: Vec::new(),
+            dispatches: 2.0,
+            max_dispatches: 256,
+            speed: 4,
+            paused: false,
+            blur: true,
+            hud: o.hud,
+            hud_at: Instant::now(),
+            period,
+            rate_gpu: 0.0,
+            rate_cpu: 0.0,
+            fps: 0.0,
+            quality: 0.0,
+            scale: o.scale,
+            fixed: o.render,
+            target_q: o.live_quality,
+            rw,
+            rh,
+            frame: 0,
+            headless,
+            titled: 0,
+            rec: None,
+            burn_credit: o.credit,
+            credit_secs: o.credit_secs,
+            build_ms: 0.0,
+        }
+    }
+
+    /// One frame: advance the show by `dt` real seconds, start the GPU and the
+    /// CPU on it, finish (tone-map) the previous one. Fixed `dispatches`
+    /// overrides the adaptive budget (video).
+    pub fn frame(&mut self, dt: f64, fixed: Option<u32>) -> Option<Stats> {
+        if !self.paused {
+            self.show.advance(dt * SPEEDS[self.speed]);
+        }
+        let n = if self.blur { BLUR_SAMPLES } else { 1 };
+        let shutter = SHUTTER_FRAMES / show::ES_FPS;
+        let t_build = Instant::now();
+        let mid = self.show.samples(n, shutter, self.rw, self.rh, &mut self.samples);
+        self.build_ms += (t_build.elapsed().as_secs_f64() * 1000.0 - self.build_ms) * 0.1;
+        let tone = tone_of(&mid);
+        let ppu = mid.scale * self.rw as f32;
+        // a shader with just this frame's variations (once compiled), and
+        // the ones coming up compiling in the background
+        let ids = crate::sample::variation_ids(&self.samples);
+        self.r.gpu.use_variations(&ids, fixed.is_some());
+        if self.frame.is_multiple_of(15) {
+            for set in self.show.upcoming() {
+                self.r.gpu.prepare(&set);
+            }
+        }
+        let per_round = gpu::WALKERS as f32 * gpu::ITERS as f32;
+        let d = fixed
+            .or(self.target_q.map(|q| ((q * self.rw as f32 * self.rh as f32) / per_round).ceil().clamp(1.0, 4096.0) as u32))
+            .unwrap_or(self.dispatches.round().max(1.0) as u32);
+        let st = self.r.step(&self.samples, tone, ppu * ppu, d, self.paused, false);
+        if fixed.is_none() && self.target_q.is_none() {
+            self.adapt();
+        }
+        self.frame += 1;
+        if let Some(s) = st {
+            let k = 0.1;
+            let secs = s.secs.max(1e-4);
+            self.rate_gpu += (s.gpu_iters as f64 / secs - self.rate_gpu) * k;
+            self.rate_cpu += (s.cpu_iters as f64 / secs - self.rate_cpu) * k;
+            self.fps += (1.0 / secs - self.fps) * k;
+            self.quality = self.r.total_iters() / (self.rw as f64 * self.rh as f64);
+        }
+        st
+    }
+
+    /// Keeps the GPU's iterations at about 85 % of the display's frame time.
+    fn adapt(&mut self) {
+        if let Some((ms, d)) = self.r.gpu.last_ms {
+            if d > 0 && ms > 0.0 {
+                let per = ms / d as f32;
+                let target = (self.period * 1000.0 * 0.85) as f32 - 1.5;
+                let want = (target / per).clamp(1.0, self.max_dispatches as f32);
+                // move a third of the way: the measurement is a few frames old
+                self.dispatches += (want - self.dispatches) / 3.0;
+            }
+        }
+    }
+
+    pub fn present(&mut self) {
+        let (dw, dh) = self.screen();
+        if !self.headless && self.show.cur.id != self.titled {
+            self.titled = self.show.cur.id;
+            self.win.set_title(&format!("fleece: sheep {} ({})", self.show.cur.id, self.show.cur.genome.name));
+        }
+        if self.hud && self.hud_at.elapsed().as_secs_f64() > 0.25 {
+            // wrapped to the window, so nothing is cut off
+            let max = ((dw / (dh / 540).max(1)).saturating_sub(40) / 6) as usize;
+            let lines: Vec<String> = self
+                .hud_lines()
+                .into_iter()
+                .flat_map(|l| {
+                    let (mark, text) = match l.chars().next() {
+                        Some(c @ ('~' | '*')) => (c.to_string(), l[1..].to_string()),
+                        _ => (String::new(), l),
+                    };
+                    wrap(&text, max).into_iter().map(move |w| format!("{mark}{}", w.trim_start()))
+                })
+                .collect();
+            let h = Hud::new(&lines);
+            self.r.gpu.set_hud(h.w, h.h, &h.px);
+            self.hud_at = Instant::now();
+        }
+        self.record_frame();
+        let s = (dh / 540).max(1);
+        // the picture's shape kept, with black bars, as Electric Sheep's player shows its 800x592 videos
+        let (ar, aw) = (self.rw as f32 / self.rh as f32, dw as f32 / dh as f32);
+        let (w, h) = if ar > aw { (2.0, 2.0 * aw / ar) } else { (2.0 * ar / aw, 2.0) };
+        self.r.gpu.present(dw, dh, [-w / 2.0, -h / 2.0, w, h], self.hud.then_some(s));
+        if !self.headless {
+            self.win.swap();
+        }
+    }
+
+    fn hud_lines(&self) -> Vec<String> {
+        let st = self.show.status();
+        let phase = match st.edge {
+            Some(e) => format!("EDGE {:.0}%", e * 100.0),
+            None => format!("LOOP {}/{}", st.loop_no.min(show::LOOPS), show::LOOPS),
+        };
+        let rating = if st.rating != 0 { format!("  RATING {:+}", st.rating) } else { String::new() };
+        let g = |v: f64| if v >= 1e9 { format!("{:.2} G", v / 1e9) } else { format!("{:.0} M", v / 1e6) };
+        vec![
+            format!("SHEEP {}  {}  {}{}", st.id, st.name, phase, rating),
+            credit(&st.name, &st.nick, st.nc),
+            format!(
+                "GPU {}/S{}   CPU {}/S ({} THREADS{})   QUALITY {:.0}{}   {:.0} FPS   {}X{}{}",
+                g(self.rate_gpu),
+                if self.r.use_gpu { "" } else { " (OFF)" },
+                g(self.rate_cpu),
+                self.r.workers(),
+                if self.r.use_cpu { "" } else { ", OFF" },
+                self.quality,
+                if self.target_q.is_some() { " (FIXED)" } else { "" },
+                self.fps,
+                self.rw,
+                self.rh,
+                if self.fixed == Some(crate::ES_SIZE) { " (ELECTRIC SHEEP)" } else { "" }
+            ),
+            format!(
+                "HISTORY {}/{}   FLOCK {}   BRED {}  REJECTED {}   SHADER {}   SPEED {}X{}{}{}",
+                self.show.place().0,
+                self.show.place().1,
+                st.flock,
+                st.tested - st.rejected,
+                st.rejected,
+                if self.r.gpu.specialised() { "TUNED" } else { "GENERAL" },
+                SPEEDS[self.speed],
+                if self.blur { "" } else { "   NO BLUR" },
+                if self.show.mutating() { "   BREEDING A MUTATION" } else { "" },
+                if self.paused { "   PAUSED (REFINING)" } else { "" }
+            ),
+            match &self.rec {
+                Some(r) => format!(
+                    "*REC {}:{:02}  {}  CREDIT {}  (R TO STOP)",
+                    r.seconds() as u64 / 60,
+                    r.seconds() as u64 % 60,
+                    r.path,
+                    if self.burn_credit { "ON" } else { "OFF (METADATA ONLY)" }
+                ),
+                None => "~LEFT/RIGHT PREVIOUS/NEXT   UP LIKE   DOWN DISLIKE   M MUTATE   P PAUSE   R RECORD   -/+ SPEED".into(),
+            },
+            "~C CPU   G GPU   B BLUR   E/1/2/4 ES 800X592/1080P/2K/4K   S SAVE   K CREDIT IN RECORDINGS   F FULLSCREEN   H HIDE   ESC QUIT".into(),
+        ]
+    }
+
+    /// Handles the window's events; false to quit.
+    pub fn events(&mut self) -> bool {
+        while let Some(ev) = self.win.poll() {
+            match ev.kind {
+                sdl::SDL_QUIT => return false,
+                sdl::SDL_WINDOWEVENT if ev.window_event() == sdl::SDL_WINDOWEVENT_SIZE_CHANGED => self.fit(),
+                sdl::SDL_MOUSEWHEEL => {
+                    let y = ev.wheel_y();
+                    if y > 0 {
+                        self.speed = (self.speed + 1).min(SPEEDS.len() - 1);
+                    } else if y < 0 {
+                        self.speed = self.speed.saturating_sub(1);
+                    }
+                }
+                sdl::SDL_KEYDOWN => {
+                    let k = ev.key();
+                    if ev.repeat() && !matches!(k, sdl::K_KP_MINUS | sdl::K_KP_PLUS) && k != b'-' as i32 && k != b'=' as i32 {
+                        continue;
+                    }
+                    match k {
+                        sdl::K_ESCAPE => return false,
+                        k if k == b'q' as i32 => return false,
+                        sdl::K_SPACE => self.show.skip(),
+                        sdl::K_UP => {
+                            self.show.vote(1);
+                            self.save_flock();
+                        }
+                        sdl::K_DOWN => {
+                            self.show.vote(-1);
+                            self.save_flock();
+                        }
+                        sdl::K_LEFT => self.show.back(),
+                        sdl::K_RIGHT => self.show.skip(),
+                        k if k == b'-' as i32 || k == sdl::K_KP_MINUS => self.speed = self.speed.saturating_sub(1),
+                        k if k == b'=' as i32 || k == b'+' as i32 || k == sdl::K_KP_PLUS => {
+                            self.speed = (self.speed + 1).min(SPEEDS.len() - 1)
+                        }
+                        sdl::K_F11 => self.toggle_fullscreen(),
+                        k if k == b'f' as i32 => self.toggle_fullscreen(),
+                        k if k == b'm' as i32 => self.show.mutate_next(),
+                        k if k == b'p' as i32 => self.paused = !self.paused,
+                        k if k == b'b' as i32 => self.blur = !self.blur,
+                        k if k == b'h' as i32 => self.hud = !self.hud,
+                        k if k == b'c' as i32 => {
+                            if self.r.workers() > 0 {
+                                self.r.use_cpu = !self.r.use_cpu || !self.r.use_gpu;
+                            }
+                        }
+                        k if k == b'g' as i32 => self.r.use_gpu = !self.r.use_gpu || (!self.r.use_cpu || self.r.workers() == 0),
+                        k if k == b's' as i32 => self.save(),
+                        k if k == b'r' as i32 => self.toggle_recording(),
+                        k if k == b'k' as i32 => self.burn_credit = !self.burn_credit,
+                        k if k == b'1' as i32 => self.render_lines(1080),
+                        k if k == b'2' as i32 => self.render_lines(1440),
+                        k if k == b'4' as i32 => self.render_lines(2160),
+                        k if k == b'e' as i32 => {
+                            self.fixed = Some(crate::ES_SIZE);
+                            self.set_render(crate::ES_SIZE.0, crate::ES_SIZE.1);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.win.toggle_fullscreen();
+        self.fit();
+    }
+
+    /// Matches the render size to the window (unless it is fixed).
+    fn fit(&mut self) {
+        let (dw, dh) = self.win.drawable_size();
+        let (rw, rh) = self.fixed.unwrap_or_else(|| render_size(dw, dh, self.scale));
+        self.set_render(rw, rh);
+        if let Some(hz) = self.win.refresh_hz() {
+            self.period = 1.0 / hz;
+        }
+    }
+
+    /// The drawable's size (headless: the hidden window's, or the picture's).
+    fn screen(&self) -> (u32, u32) {
+        if self.headless {
+            let (w, h) = self.win.drawable_size();
+            if w > 1 && h > 1 { (w, h) } else { (self.rw, self.rh) }
+        } else {
+            self.win.drawable_size()
+        }
+    }
+
+    /// Renders `lines` tall at the window's shape (1080p, 2K, 4K), whatever the
+    /// window's own size: smaller windows get a sharper picture, larger
+    /// ones an upscaled one.
+    pub fn render_lines(&mut self, lines: u32) {
+        self.fixed = None;
+        let (dw, dh) = if self.headless { (self.rw, self.rh) } else { self.win.drawable_size() };
+        self.scale = lines as f32 / dh.max(1) as f32;
+        let (rw, rh) = render_size(dw, dh, self.scale);
+        self.set_render(rw, rh);
+    }
+
+    fn set_render(&mut self, rw: u32, rh: u32) {
+        if (rw, rh) != (self.rw, self.rh) {
+            // a video keeps one frame size: a new size ends the recording
+            if self.rec.is_some() {
+                self.stop_recording();
+            }
+            // no worker may still be writing into the histograms being freed
+            self.r.quiesce();
+            self.r.gpu.resize(rw, rh);
+            self.rw = rw;
+            self.rh = rh;
+        }
+    }
+
+    /// R: starts recording the show (the picture without the controls, with
+    /// the sheep's credit) to ~/Videos, or stops and finishes the file.
+    pub fn toggle_recording(&mut self) {
+        if self.rec.is_some() {
+            self.stop_recording();
+            return;
+        }
+        let dir = std::env::var("HOME").map(|h| format!("{h}/Videos")).unwrap_or_else(|_| ".".into());
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let path = format!("{dir}/fleece-{t}.mp4");
+        // the video runs at the display's rate, one frame per frame shown
+        let fps = (1.0 / self.period).round().max(1.0);
+        match crate::video::Recorder::start(&path, self.rw, self.rh, fps) {
+            Ok(r) => {
+                println!("recording to {path}");
+                self.rec = Some(r);
+            }
+            Err(e) => eprintln!("fleece: cannot record: {e}"),
+        }
+    }
+
+    pub fn stop_recording(&mut self) {
+        if let Some(r) = self.rec.take() {
+            let (path, frames, secs, fps) = (r.path.clone(), r.frames, r.seconds(), r.fps);
+            match r.stop() {
+                Ok(()) => println!("recorded {path}: {secs:.1} s, {frames} frames at {fps} fps (credits in its metadata and {path}.credits.txt)"),
+                Err(e) => eprintln!("fleece: the recording failed: {e}"),
+            }
+        }
+    }
+
+    /// Every frame while recording: the picture, the credit burned in
+    /// unless turned off, the sheep noted for the file's credits.
+    fn record_frame(&mut self) {
+        if self.rec.is_none() {
+            return;
+        }
+        let mut rgb = self.r.gpu.read_rgb();
+        let st = self.show.status();
+        if self.burn_credit {
+            let t = self.rec.as_ref().map_or(0.0, |r| r.seconds());
+            let fade = credit_fade(t, self.credit_secs);
+            stamp_credit(&mut rgb, self.rw as usize, self.rh as usize, &st.name, &st.nick, st.nc, fade);
+        }
+        if let Some(rec) = self.rec.as_mut() {
+            rec.credits.add(&st.name, &st.nick, st.nc);
+            rec.offer(rgb);
+        }
+    }
+
+    /// The animation time a frame advances: the wall clock, or exactly one
+    /// display frame while recording (so the video has every frame).
+    pub fn step_time(&self, wall: f64) -> f64 {
+        if self.rec.is_some() { self.period } else { wall }
+    }
+
+    /// The flock and its ratings, for next time (the window only).
+    pub fn save_flock(&self) {
+        if self.headless {
+            return;
+        }
+        let snap = self.show.flock.lock().unwrap().snapshot();
+        if let Err(e) = crate::flam3::write_flock(&crate::flock_path(), &snap) {
+            eprintln!("fleece: could not save the flock: {e}");
+        }
+    }
+
+    /// The frame on screen as a PNG and its genome as flam3 XML, in ~/Pictures/fleece.
+    pub fn save(&mut self) {
+        let dir = std::env::var("HOME").map(|h| format!("{h}/Pictures/fleece")).unwrap_or_else(|_| ".".into());
+        let _ = std::fs::create_dir_all(&dir);
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let base = format!("{dir}/sheep-{t}-{}", self.show.cur.id);
+        let rgb = self.r.gpu.read_rgb();
+        let ok = std::fs::write(format!("{base}.png"), png::encode(self.rw, self.rh, &rgb)).is_ok()
+            && std::fs::write(format!("{base}.flam3"), self.show.current().to_flam3(self.rw, self.rh)).is_ok();
+        println!("{} {base}.png / .flam3", if ok { "saved" } else { "could not save" });
+    }
+}
+
+/// The histogram size for a `dw` x `dh` drawable: `scale` times it, or with
+/// scale 0 the drawable capped at 1080 lines (a 4K screen gets a 2x upscale
+/// and four times the samples per pixel).
+/// The credit for a sheep, in parts. Electric Sheep's reuse policy: "artwork
+/// by Scott Draves and the Electric Sheep", the licence (evolved sheep CC
+/// BY-NC, designed ones CC BY) and the designer; fleece's own sheep credit flam3.
+pub fn credit_parts(name: &str, nick: &str, nc: bool) -> Vec<String> {
+    if name.contains("electricsheep.") {
+        let lic = if nc { "CC BY-NC" } else { "CC BY" };
+        let by = if nick.is_empty() { String::new() } else { format!("  DESIGN BY {nick}") };
+        vec!["ARTWORK BY SCOTT DRAVES AND THE ELECTRIC SHEEP".into(), format!("ELECTRICSHEEP.ORG  {lic}{by}")]
+    } else {
+        vec!["FRACTAL FLAMES: FLAM3 BY SCOTT DRAVES (GPL)".into(), "NEW SHEEP BRED BY FLEECE".into()]
+    }
+}
+
+pub fn credit(name: &str, nick: &str, nc: bool) -> String {
+    credit_parts(name, nick, nc).join("  ")
+}
+
+/// Word-wraps `text` to `max` characters a line (a word longer than a line is cut).
+fn wrap(text: &str, max: usize) -> Vec<String> {
+    let max = max.max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let word: String = word.chars().take(max).collect();
+        if !line.is_empty() && line.len() + 1 + word.len() > max {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() || word.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    if !line.trim().is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// The credit burned into a video frame: the sheep's name (its generation and
+/// number, which the policy asks for), then the credit, wrapped to the frame.
+/// How strongly the burned-in credit shows `t` seconds into a video: fully
+/// for the first `secs`, then fading out over one second.
+pub fn credit_fade(t: f64, secs: f64) -> f32 {
+    (1.0 - (t - secs)).clamp(0.0, 1.0) as f32
+}
+
+fn stamp_credit(rgb: &mut [u8], w: usize, h: usize, name: &str, nick: &str, nc: bool, fade: f32) {
+    if fade <= 0.0 {
+        return;
+    }
+    let s = if h >= 1000 { 2 } else { 1 };
+    let max = (w.saturating_sub(24) / (6 * s)).max(8);
+    let mut lines = Vec::new();
+    if name.contains("electricsheep.") {
+        lines.extend(wrap(name, max));
+    }
+    for p in credit_parts(name, nick, nc) {
+        lines.extend(wrap(&p, max));
+    }
+    stamp(rgb, w, h, &lines, fade);
+}
+
+/// Draws `lines` on a dim panel at the bottom left of an RGB8 frame (twice
+/// the size from 1080 lines up).
+fn stamp(rgb: &mut [u8], w: usize, h: usize, lines: &[String], fade: f32) {
+    let hud = Hud::new(lines);
+    let s = if h >= 1000 { 2 } else { 1 };
+    let (x0, y0) = (8usize, h.saturating_sub(hud.h as usize * s + 8));
+    for y in 0..hud.h as usize * s {
+        for x in 0..hud.w as usize * s {
+            let (px, py) = (x0 + x, y0 + y);
+            if px >= w || py >= h {
+                continue;
+            }
+            let src = &hud.px[((y / s) * hud.w as usize + x / s) * 4..][..4];
+            let a = (src[3] as f32 * fade) as u32;
+            let d = &mut rgb[(py * w + px) * 3..][..3];
+            for k in 0..3 {
+                d[k] = ((src[k] as u32 * a + d[k] as u32 * (255 - a)) / 255) as u8;
+            }
+        }
+    }
+}
+
+fn render_size(dw: u32, dh: u32, scale: f32) -> (u32, u32) {
+    let s = if scale > 0.0 { scale } else { (1080.0 / dh as f32).min(1.0) };
+    (((dw as f32 * s).round() as u32).max(64), ((dh as f32 * s).round() as u32).max(36))
+}
+
+/// The interactive window.
+pub fn window(o: &Opts) {
+    let mut app = App::new(o, false);
+    let mut last = Instant::now();
+    while app.events() {
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f64().min(0.25);
+        last = now;
+        app.frame(app.step_time(dt), None);
+        app.present();
+    }
+    app.stop_recording();
+    app.r.idle();
+    app.save_flock();
+}
+
+/// The same loop with no display: `frames` frames at `o.fps`, stats on
+/// stdout, every `o.every`-th frame saved as a PNG in `o.out`.
+pub fn headless(o: &Opts) {
+    let mut app = App::new(o, true);
+    app.hud = o.hud;
+    let dt = 1.0 / o.fps;
+    let t0 = Instant::now();
+    for f in 0..o.frames {
+        for k in &o.keys {
+            if k.0 == f {
+                match k.1 {
+                    ' ' | '>' => app.show.skip(),
+                    '<' => app.show.back(),
+                    'm' => app.show.mutate_next(),
+                    '+' => app.show.vote(1),
+                    '-' => app.show.vote(-1),
+                    // a resize mid-run, as the window's F key does
+                    'r' => {
+                        let (w, h) = (app.rw, app.rh);
+                        app.set_render(w * 3 / 4, h * 3 / 4);
+                    }
+                    '1' => app.render_lines(1080),
+                    '2' => app.render_lines(1440),
+                    '4' => app.render_lines(2160),
+                    'e' => {
+                        app.fixed = Some(crate::ES_SIZE);
+                        app.set_render(crate::ES_SIZE.0, crate::ES_SIZE.1);
+                    }
+                    'R' => app.toggle_recording(),
+                    _ => {}
+                }
+            }
+        }
+        let st = app.frame(dt, None);
+        app.present();
+        app.r.gpu.finish();
+        if let Some(s) = st {
+            if f % 10 == 0 || f + 1 == o.frames {
+                println!(
+                    "frame {f:4}: gpu {:5.0} M ({:4.1} ms, {:3.0} rounds) cpu {:4.0} M  quality {:4.0}  build {:.1} ms  {}",
+                    s.gpu_iters as f64 / 1e6,
+                    s.gpu_ms,
+                    app.dispatches,
+                    s.cpu_iters as f64 / 1e6,
+                    app.quality,
+                    app.build_ms,
+                    app.hud_lines()[0]
+                );
+            }
+        }
+        if o.every > 0 && f % o.every == 0 && !o.out.is_empty() {
+            let (sw, sh) = app.screen();
+            let (rgb, w, h) = if app.hud { (app.r.gpu.read_screen(sw, sh), sw, sh) } else { (app.r.gpu.read_rgb(), app.rw, app.rh) };
+            let _ = std::fs::write(format!("{}/f{f:05}.png", o.out), png::encode(w, h, &rgb));
+        }
+    }
+    app.stop_recording();
+    app.r.idle();
+    println!("{} frames in {:.1} s", o.frames, t0.elapsed().as_secs_f64());
+    if !o.out.is_empty() {
+        // the flock, as the window would keep it (never the user's file)
+        let snap = app.show.flock.lock().unwrap().snapshot();
+        let ratings: Vec<i32> = snap.iter().map(|s| s.1).collect();
+        let path = format!("{}/flock.flam3", o.out);
+        match crate::flam3::write_flock(&path, &snap) {
+            Ok(()) => println!("flock of {} written to {path}, ratings {ratings:?}", snap.len()),
+            Err(e) => eprintln!("fleece: {path}: {e}"),
+        }
+    }
+}
+
+/// A video: `frames` frames at `o.fps`, each iterated to `o.quality`
+/// samples per pixel, into `o.out` (any ffmpeg format by its extension,
+/// `.y4m` without ffmpeg, `-` for raw RGB24 on stdout).
+pub fn video(o: &Opts) {
+    let mut app = App::new(o, true);
+    app.hud = false;
+    let dt = 1.0 / o.fps;
+    let per_round = gpu::WALKERS as f64 * gpu::ITERS as f64;
+    let rounds = ((o.quality as f64 * app.rw as f64 * app.rh as f64) / per_round).ceil().max(1.0) as u32;
+    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow").unwrap_or_else(|e| {
+        eprintln!("fleece: {e}");
+        std::process::exit(1)
+    });
+    eprintln!(
+        "fleece: {} frames ({:.1} s at {} fps), {}x{}, {} samples per pixel, to {}",
+        o.frames,
+        o.frames as f64 / o.fps,
+        o.fps,
+        app.rw,
+        app.rh,
+        o.quality,
+        if o.out == "-" { "stdout" } else { &o.out }
+    );
+    let t0 = Instant::now();
+    let mut said = Instant::now();
+    let mut credits = crate::video::Credits::default();
+    // one frame of latency: frame f is on screen after step f + 1
+    for f in 0..=o.frames {
+        for k in &o.keys {
+            if k.0 == f {
+                match k.1 {
+                    ' ' | '>' => app.show.skip(),
+                    '<' => app.show.back(),
+                    'm' => app.show.mutate_next(),
+                    _ => {}
+                }
+            }
+        }
+        app.frame(if f == 0 { 0.0 } else { dt }, Some(rounds));
+        app.r.gpu.finish();
+        if f == 0 {
+            continue;
+        }
+        app.present();
+        let mut rgb = app.r.gpu.read_rgb();
+        let st = app.show.status();
+        credits.add(&st.name, &st.nick, st.nc);
+        if o.credit {
+            let fade = credit_fade((f - 1) as f64 / o.fps, o.credit_secs);
+            stamp_credit(&mut rgb, app.rw as usize, app.rh as usize, &st.name, &st.nick, st.nc, fade);
+        }
+        if let Err(e) = sink.write(&rgb) {
+            eprintln!("fleece: writing the video: {e}");
+            break;
+        }
+        if said.elapsed().as_secs_f64() > 2.0 || f == o.frames {
+            said = Instant::now();
+            let el = t0.elapsed().as_secs_f64();
+            let eta = el / f as f64 * (o.frames - f) as f64;
+            eprint!("\rframe {f}/{}  {:.0} s elapsed, about {:.0} s to go  {}          ", o.frames, el, eta, app.show.cur.genome.name);
+        }
+    }
+    eprintln!();
+    app.r.idle();
+    match sink.finish().and_then(|_| credits.embed(&o.out)) {
+        Ok(()) if o.out != "-" => eprintln!(
+            "fleece: wrote {} in {:.0} s (credits in its metadata and {}.credits.txt)",
+            o.out,
+            t0.elapsed().as_secs_f64(),
+            o.out
+        ),
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("fleece: {e}");
+            std::process::exit(1)
+        }
+    }
+}

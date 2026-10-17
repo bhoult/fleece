@@ -1,0 +1,7 @@
+<flame fleece_rating="0" time="0" palette="25" size="640 480" scale="240" oversample="3" filter="1" quality="800" batches="200" brightness="1" gamma="4" vibrancy="0" hue="1" parents="4775">
+   <xform weight="0.277" color="0" julia="0.51" waves="0.49" coefs="-0.359029 0.36941 -0.689181 -0.226741 -0.425856 0.250451"/>
+   <xform weight="0.21" color="0.25" symmetry="1" linear="1" coefs="0 -1 -1 0 0 0"/>
+   <xform weight="0.118" color="0.5" julia="0.51" waves="0.49" coefs="-0.150806 0.197566 -0.259797 -0.106029 -0.363761 0.150511"/>
+   <xform weight="0.277" color="0.75" julia="0.51" waves="0.49" coefs="0.535932 0.700819 0.46949 -0.672177 0.350935 0.340307"/>
+   <xform weight="0.118" color="1" julia="0.51" waves="0.49" coefs="0.233805 0.311653 0.194764 -0.294693 0.350721 0.326352"/>
+</flame>

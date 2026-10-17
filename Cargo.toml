@@ -1,0 +1,23 @@
+[package]
+name = "fleece"
+version = "0.1.0"
+edition = "2024"
+description = "A fractal flame animator in the manner of Electric Sheep: the chaos game runs on the GPU (OpenGL compute) and on every CPU core (AVX2) at once"
+publish = false
+
+[[bin]]
+name = "fleece"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+incremental = false
+
+[profile.dev]
+opt-level = 1

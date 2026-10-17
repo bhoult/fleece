@@ -1,0 +1,157 @@
+// The chaos game (flam3's flam3_iterate): every invocation is one walker
+// that keeps its point between dispatches and frames. Each step picks an
+// xform from the weight table (by the previous xform with xaos), applies the
+// affine, the variations and the post transform, blends the colour index,
+// and plots the point (through the final xform and the camera) into the
+// histogram with integer atomics: r, g, b (palette 0-255) and a count.
+
+layout(local_size_x = 256) in;
+
+struct Xf { vec4 c0; vec4 c1; vec4 p0; vec4 p1; int vid[NV]; float vw[NV]; vec4 vp[2 * NV]; };
+struct Sample { vec4 cam0; vec4 cam1; ivec4 info; Xf xf[MAXX + 1]; uint pick[MAXX * PICKN / 4]; uint pal[256]; };
+
+layout(std430, binding = 0) readonly restrict buffer Samples { Sample smp[]; };
+layout(std430, binding = 1) restrict buffer Walk { vec4 walk[]; };
+layout(std430, binding = 2) restrict buffer Aux { uint aux[]; };
+#ifdef HIST64
+// r | g << 32 and b | count << 32: two 64-bit atomics a point instead of four
+// (the same bytes as four uints r, g, b, count)
+layout(std430, binding = 3) restrict buffer Hist { uint64_t hist[]; };
+#else
+layout(std430, binding = 3) restrict buffer Hist { uint hist[]; };
+#endif
+
+// this work group's time sample, copied in once per dispatch
+shared Xf sxf[MAXX + 1];
+shared uint spal[256];
+shared uint spick[PICKN / 4];
+
+uniform int u_sample0;
+uniform int u_nsamples;
+uniform int u_iters;
+uniform ivec2 u_size;
+
+uint rng;
+uint rnd() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; }
+float rnd01() { return float(rnd() >> 8) * (1.0 / 16777216.0); }
+
+#include "variations.glsl"
+
+bool badv(float v) { return !(abs(v) <= 1e10); }
+
+// xform k applied to (x, y, colour); false if the result is bad
+bool apply(uint k, inout vec3 q) {
+    vec4 c0 = sxf[k].c0, c1 = sxf[k].c1;
+    float tx = c0.x * q.x + c0.z * q.y + c1.x;
+    float ty = c0.y * q.x + c0.w * q.y + c1.y;
+    // pre_blur (67) moves the point before everything else
+    for (int j = 0; j < NV; j++) {
+        if (sxf[k].vid[j] < 0) break;
+        if (sxf[k].vid[j] == 67) {
+            float g = sxf[k].vw[j] * (rnd01() + rnd01() + rnd01() + rnd01() - 2.0);
+            float a = rnd01() * 2.0 * PI;
+            tx += g * cos(a);
+            ty += g * sin(a);
+        }
+    }
+    float sumsq = tx * tx + ty * ty;
+    float sq = sqrt(sumsq);
+    vec2 o = vec2(0.0);
+    for (int j = 0; j < NV; j++) {
+        int id = sxf[k].vid[j];
+        if (id < 0) break;
+#ifdef EXP_LINEAR
+        o += sxf[k].vw[j] * vec2(tx, ty);
+#else
+        o += variation(id, sxf[k].vw[j], sxf[k].vp[2 * j], sxf[k].vp[2 * j + 1], tx, ty, sumsq, sq, c0, c1);
+#endif
+    }
+    vec4 p1 = sxf[k].p1;
+    if (p1.w != 0.0) {
+        vec4 p0 = sxf[k].p0;
+        o = vec2(p0.x * o.x + p0.z * o.y + p1.x, p0.y * o.x + p0.w * o.y + p1.y);
+    }
+    q = vec3(o, mix(q.z, c1.z, c1.w));
+    return !(badv(o.x) || badv(o.y));
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint s = uint(int(gl_WorkGroupID.x) + u_sample0) % uint(u_nsamples);
+    uint li = gl_LocalInvocationIndex;
+    if (li <= uint(MAXX)) sxf[li] = smp[s].xf[li];
+    spal[li] = smp[s].pal[li];
+    for (uint j = li; j < uint(PICKN / 4); j += 256u) spick[j] = smp[s].pick[j];
+    barrier();
+    vec4 wv = walk[gid];
+    uint a = aux[gid];
+    vec3 q = wv.xyz;
+    rng = floatBitsToUint(wv.w);
+    uint prev = a & 255u;
+    uint fuse = a >> 8;
+    int nx = smp[s].info.x;
+    bool fin = smp[s].info.y != 0;
+    uint xaos = smp[s].info.z != 0 ? 1u : 0u;
+    vec4 cam0 = smp[s].cam0, cam1 = smp[s].cam1;
+    uint w = uint(u_size.x);
+    for (int it = 0; it < u_iters; it++) {
+        uint r = rnd();
+        uint e = prev * xaos * PICKN + (r >> 22);
+        uint word = e < uint(PICKN) ? spick[e >> 2] : smp[s].pick[e >> 2];
+        uint k = (word >> ((e & 3u) * 8u)) & 255u;
+#ifdef EXP_WARPXF
+        k = subgroupBroadcastFirst(k);
+#endif
+        if (!apply(k, q)) {
+            // flam3 restarts from a random point
+            q = vec3(rnd01() * 2.0 - 1.0, rnd01() * 2.0 - 1.0, q.z);
+            fuse = FUSE;
+            continue;
+        }
+        prev = k;
+        if (fuse > 0u) { fuse--; continue; }
+        float op = sxf[k].p1.z;
+        vec3 f = q;
+        if (fin && !apply(MAXX, f)) continue;
+        if (op < 1.0 && rnd01() >= op) continue;
+        float px = cam0.x * f.x + cam0.y * f.y + cam0.z;
+        float py = cam1.x * f.x + cam1.y * f.y + cam1.z;
+        if (!(px >= 0.0 && py >= 0.0 && px < float(u_size.x) && py < float(u_size.y))) continue;
+#ifdef EXP_NOPLOT
+        if (f.z > 2.0) hist[0] += 1u;
+        continue;
+#endif
+        uint col;
+        if (smp[s].info.w != 0) {
+            // palette_mode linear: blend the two entries around the index
+            float x = f.z * 256.0;
+            int i0 = int(x);
+            float fr = x - float(i0);
+            if (i0 < 0) { i0 = 0; fr = 0.0; } else if (i0 >= 255) { i0 = 254; fr = 1.0; }
+            vec3 a = vec3(spal[i0] & 255u, (spal[i0] >> 8) & 255u, (spal[i0] >> 16) & 255u);
+            vec3 b = vec3(spal[i0 + 1] & 255u, (spal[i0 + 1] >> 8) & 255u, (spal[i0 + 1] >> 16) & 255u);
+            uvec3 c = uvec3(mix(a, b, fr) + 0.5);
+            col = c.r | (c.g << 8) | (c.b << 16);
+        } else {
+            col = spal[clamp(int(f.z * 256.0), 0, 255)];
+        }
+#ifdef HIST64
+        uint i = (uint(py) * w + uint(px)) * 2u;
+#ifdef EXP_RANDADDR
+        i = (rnd() % (w * uint(u_size.y))) * 2u;
+#endif
+        atomicAdd(hist[i], uint64_t(col & 255u) | (uint64_t((col >> 8) & 255u) << 32));
+#ifndef EXP_ONEATOMIC
+        atomicAdd(hist[i + 1u], uint64_t((col >> 16) & 255u) | (uint64_t(1u) << 32));
+#endif
+#else
+        uint i = (uint(py) * w + uint(px)) * 4u;
+        atomicAdd(hist[i], col & 255u);
+        atomicAdd(hist[i + 1u], (col >> 8) & 255u);
+        atomicAdd(hist[i + 2u], (col >> 16) & 255u);
+        atomicAdd(hist[i + 3u], 1u);
+#endif
+    }
+    walk[gid] = vec4(q, uintBitsToFloat(rng));
+    aux[gid] = prev | (fuse << 8);
+}

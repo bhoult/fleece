@@ -1,0 +1,6 @@
+<flame fleece_rating="0" time="0" palette="76" size="640 480" scale="240" oversample="3" filter="1" quality="800" batches="200" brightness="1" gamma="4" vibrancy="0" hue="0.0314061" parents="4754 5003">
+   <xform weight="0.317915" color="0" swirl="0.143765" polar="0.554157" spiral="0.171247" ex="0.130831" coefs="-0.350257 -0.0826449 0.210338 -0.605217 -0.0608823 0.835293"/>
+   <xform weight="0.327264" color="0.333333" spherical="0.958432" swirl="0.0141333" polar="0.0120549" spiral="0.0083137" coefs="-0.229938 0.41895 -0.409729 -0.254085 -0.828921 -0.453481"/>
+   <xform weight="0.243291" color="0.666667" symmetry="1" linear="1" coefs="0.845723 -0.307818 0.307818 0.845723 0 0"/>
+   <xform weight="0.11582" color="1" symmetry="1" linear="1" coefs="0.957197 -0.716936 -0.311383 0.0467371 -0.588697 0.584747"/>
+</flame>
