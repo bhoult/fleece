@@ -344,6 +344,35 @@ impl Analyser {
     }
 }
 
+/// The levels through a whole recording, one every hop (a video made to
+/// music): a WAV directly, anything else through ffmpeg. Returns them and
+/// the hop in seconds.
+pub fn timeline(path: &str) -> Result<(Vec<Levels>, f64), String> {
+    let wav = path.to_lowercase().ends_with(".wav");
+    let data = if wav {
+        std::fs::read(path).map_err(|e| format!("{path}: {e}"))?
+    } else {
+        let out = Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "wav", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("ffmpeg: {e} (or give a .wav file)"))?;
+        if !out.status.success() {
+            return Err(format!("{path}: ffmpeg could not read it: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        out.stdout
+    };
+    let (samples, rate, _) = parse_wav(&data, path)?;
+    let mut an = Analyser::new(rate);
+    let mut out = Vec::with_capacity(samples.len() / HOP + 1);
+    for &x in &samples {
+        if an.push(x) {
+            out.push(an.levels);
+        }
+    }
+    Ok((out, HOP as f64 / rate as f64))
+}
+
 /// A WAV file (`-`: on stdin) of 16-bit PCM, any rate and channel count:
 /// its samples mixed to mono, its rate and its channel count.
 fn read_wav(path: &str) -> Result<(Vec<f32>, u32, u16), String> {
@@ -354,6 +383,11 @@ fn read_wav(path: &str) -> Result<(Vec<f32>, u32, u16), String> {
         std::fs::read(path)
     }
     .map_err(|e| format!("{path}: {e}"))?;
+    parse_wav(&data, path)
+}
+
+/// A WAV file's bytes (see read_wav).
+fn parse_wav(data: &[u8], path: &str) -> Result<(Vec<f32>, u32, u16), String> {
     if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
         return Err(format!("{path}: not a WAV file"));
     }

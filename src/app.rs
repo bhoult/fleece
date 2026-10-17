@@ -99,6 +99,11 @@ pub struct App {
     supersample: u32,
     /// auto-exposure: ln of the brightness multiplier
     exposure: f64,
+    /// what the speakers play (while audio is on), or a soundtrack's levels
+    /// every hop (a video made to music) and the time in it
+    audio: Option<crate::audio::Audio>,
+    track: Option<(Vec<crate::audio::Levels>, f64)>,
+    track_t: f64,
 }
 
 impl App {
@@ -193,6 +198,9 @@ impl App {
             look: Look::default(),
             supersample,
             exposure: 0.0,
+            audio: None,
+            track: None,
+            track_t: 0.0,
         }
     }
 
@@ -200,11 +208,13 @@ impl App {
     /// CPU on it, finish (tone-map) the previous one. Fixed `dispatches`
     /// overrides the adaptive budget (video).
     pub fn frame(&mut self, dt: f64, fixed: Option<u32>) -> Option<Stats> {
-        let dt_show = if self.paused { 0.0 } else { dt * SPEEDS[self.speed] };
+        let audio = self.audio_levels();
+        // loud music turns the sheep faster
+        let dt_show = if self.paused { 0.0 } else { dt * SPEEDS[self.speed] * (1.0 + 0.6 * audio[0] as f64) };
         if !self.paused {
             self.show.advance(dt_show);
         }
-        self.look = Look { drift: self.fx.drift, hue: self.fx.hue, wobble: self.fx.wobble, tilt: self.fx.tilt, audio: self.audio_levels() };
+        self.look = Look { drift: self.fx.drift, hue: self.fx.hue, wobble: self.fx.wobble, tilt: self.fx.tilt, audio };
         let tau = TRAILS[self.fx.trails as usize % 3];
         self.r.decay = if tau > 0.0 { (-dt_show / tau).exp() as f32 } else { 0.0 };
         self.r.gpu.glow = GLOW[self.fx.glow as usize % 3];
@@ -271,9 +281,31 @@ impl App {
         self.exposure = (self.exposure + step).clamp(-(8f64.ln()), 16f64.ln());
     }
 
-    /// The music's levels for the look (zeros unless audio is on).
+    /// The music's levels for the look (zeros unless audio is on): the
+    /// soundtrack's at this point of the video, else what the speakers play
+    /// (parec runs only while audio is on).
     fn audio_levels(&mut self) -> [f32; 6] {
-        [0.0; 6]
+        if !self.fx.audio {
+            self.audio = None;
+            return [0.0; 6];
+        }
+        let l = match &self.track {
+            Some((tl, hop)) => tl.get((self.track_t / hop) as usize).copied().unwrap_or_default(),
+            None => {
+                if self.audio.is_none() {
+                    match crate::audio::Audio::start() {
+                        Ok(a) => self.audio = Some(a),
+                        Err(e) => {
+                            eprintln!("fleece: no audio: {e}");
+                            self.fx.audio = false;
+                            return [0.0; 6];
+                        }
+                    }
+                }
+                self.audio.as_ref().unwrap().levels()
+            }
+        };
+        [l.rms, l.bands[0], l.bands[1], l.bands[2], l.bands[3], l.beat]
     }
 
     /// Keeps the GPU's iterations at about 85 % of the display's frame time.
@@ -860,14 +892,30 @@ pub fn video(o: &Opts) {
     let dt = 1.0 / o.fps;
     let per_round = gpu::WALKERS as f64 * gpu::ITERS as f64;
     let rounds = ((o.quality as f64 * app.rw as f64 * app.rh as f64) / per_round).ceil().max(1.0) as u32;
-    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow").unwrap_or_else(|e| {
+    let mut frames = o.frames;
+    if let Some(f) = &o.soundtrack {
+        match crate::audio::timeline(f) {
+            Ok((tl, hop)) => {
+                if frames == 0 {
+                    frames = (tl.len() as f64 * hop * o.fps).round() as u64;
+                }
+                eprintln!("fleece: made to {f} ({:.1} s)", tl.len() as f64 * hop);
+                app.track = Some((tl, hop));
+            }
+            Err(e) => {
+                eprintln!("fleece: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
+    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow", o.soundtrack.as_deref()).unwrap_or_else(|e| {
         eprintln!("fleece: {e}");
         std::process::exit(1)
     });
     eprintln!(
         "fleece: {} frames ({:.1} s at {} fps), {}x{}, {} samples per pixel, to {}",
-        o.frames,
-        o.frames as f64 / o.fps,
+        frames,
+        frames as f64 / o.fps,
         o.fps,
         app.rw,
         app.rh,
@@ -878,7 +926,7 @@ pub fn video(o: &Opts) {
     let mut said = Instant::now();
     let mut credits = crate::video::Credits::default();
     // one frame of latency: frame f is on screen after step f + 1
-    for f in 0..=o.frames {
+    for f in 0..=frames {
         for k in &o.keys {
             if k.0 == f {
                 match k.1 {
@@ -893,6 +941,8 @@ pub fn video(o: &Opts) {
                 }
             }
         }
+        // the samples built now are the video's frame f, at f / fps
+        app.track_t = f as f64 / o.fps;
         app.frame(if f == 0 { 0.0 } else { dt }, Some(rounds));
         app.r.gpu.finish();
         if f == 0 {
@@ -910,11 +960,11 @@ pub fn video(o: &Opts) {
             eprintln!("fleece: writing the video: {e}");
             break;
         }
-        if said.elapsed().as_secs_f64() > 2.0 || f == o.frames {
+        if said.elapsed().as_secs_f64() > 2.0 || f == frames {
             said = Instant::now();
             let el = t0.elapsed().as_secs_f64();
-            let eta = el / f as f64 * (o.frames - f) as f64;
-            eprint!("\rframe {f}/{}  {:.0} s elapsed, about {:.0} s to go  {}          ", o.frames, el, eta, app.show.cur.genome.name);
+            let eta = el / f as f64 * (frames - f) as f64;
+            eprint!("\rframe {f}/{}  {:.0} s elapsed, about {:.0} s to go  {}          ", frames, el, eta, app.show.cur.genome.name);
         }
     }
     eprintln!();

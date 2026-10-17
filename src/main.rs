@@ -90,6 +90,8 @@ pub struct Opts {
     pub fx: app::Fx,
     /// new sheep are the taste's pick of a few candidates (--taste off: the first)
     pub taste: bool,
+    /// --audio FILE: a recording the video is made to (and carries)
+    pub soundtrack: Option<String>,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -101,7 +103,7 @@ fn usage() -> ! {
     eprintln!("              [--es | --es-hd | --render WxH | --native | --scale F] [--quality N]");
     eprintln!("              [--load FILE.flam3]... [--fresh] [--cpu-only | --gpu-only] [--threads N]");
     eprintln!("              [--classic] [--glow 0-2] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
-    eprintln!("              [--tilt 0-2] [--audio] [--supersample 1-4] [--taste on|off]");
+    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--supersample 1-4] [--taste on|off]");
     eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
     eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
     eprintln!("       fleece --shot OUT.png [--quality Q] [--angle DEG] [--breed N] [size]   one still");
@@ -148,6 +150,7 @@ fn parse() -> Opts {
         supersample: None,
         fx: app::Fx::V2,
         taste: true,
+        soundtrack: None,
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -280,7 +283,14 @@ fn parse() -> Opts {
                 i += 1;
                 o.fx.tilt = (num(i) as u8).min(2);
             }
-            "--audio" => o.fx.audio = true,
+            "--audio" => {
+                o.fx.audio = true;
+                // a recording to make the video to (else: what the speakers play, live)
+                if let Some(f) = args.get(i + 1).filter(|f| !f.starts_with("--") && std::path::Path::new(f.as_str()).is_file()) {
+                    o.soundtrack = Some(f.clone());
+                    i += 1;
+                }
+            }
             "--taste" => match args.get(i + 1).map(|s| s.as_str()) {
                 Some("off") => {
                     o.taste = false;
@@ -374,7 +384,8 @@ fn parse() -> Opts {
         if let Some(s) = seconds {
             o.frames = (s * o.fps).round() as u64;
         }
-        if o.frames == 0 {
+        // a minute, or as long as the soundtrack
+        if o.frames == 0 && o.soundtrack.is_none() {
             o.frames = (60.0 * o.fps) as u64;
         }
     }

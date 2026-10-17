@@ -16,7 +16,8 @@ impl Sink {
     /// Opens `path` for `w` x `h` frames at `fps`.
     /// `preset`: x264's speed / size trade ("slow" for --video, faster for
     /// recording the live show).
-    pub fn open(path: &str, w: u32, h: u32, fps: f64, crf: u32, preset: &str) -> Result<Sink, String> {
+    /// `audio`: a soundtrack to put in the file with the frames (ffmpeg only).
+    pub fn open(path: &str, w: u32, h: u32, fps: f64, crf: u32, preset: &str, audio: Option<&str>) -> Result<Sink, String> {
         if path == "-" {
             return Ok(Sink::Raw(BufWriter::with_capacity(1 << 22, std::io::stdout())));
         }
@@ -36,6 +37,11 @@ impl Sink {
         // everything else: ffmpeg, picked by the extension
         let mut args: Vec<String> = ["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24"].map(String::from).to_vec();
         args.extend(["-s".into(), format!("{w}x{h}"), "-r".into(), format!("{fps}"), "-i".into(), "-".into()]);
+        if let Some(a) = audio.filter(|_| ext != "gif") {
+            args.extend(["-i", a, "-map", "0:v", "-map", "1:a", "-shortest"].map(String::from));
+            let codec = if ext == "webm" { ["-c:a", "libopus", "-b:a", "160k"] } else { ["-c:a", "aac", "-b:a", "192k"] };
+            args.extend(codec.map(String::from));
+        }
         if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
             args.extend(["-vf".into(), "pad=ceil(iw/2)*2:ceil(ih/2)*2".into()]);
         }
@@ -240,7 +246,7 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn start(path: &str, w: u32, h: u32, fps: f64) -> Result<Recorder, String> {
-        let mut sink = Sink::open(path, w, h, fps, 18, "veryfast")?;
+        let mut sink = Sink::open(path, w, h, fps, 18, "veryfast", None)?;
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
         let thread = std::thread::Builder::new()
             .name("recorder".into())
