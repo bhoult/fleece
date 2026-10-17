@@ -157,9 +157,12 @@ At 1280x720 and 30 Hz that is about 150-350 samples per pixel per frame. Electri
 | L / D / U / W | auto levels / camera drift / palette (hue) drift / wobble (motion for every sheep) |
 | 3 | 3D camera: flat, tilted, tilted with depth of field |
 | A | audio: the music drives the show, off / low / medium / high |
-| H | hide the text and buttons / show them again |
+| Z | optimize: find settings that keep up with the display's refresh rate (below) |
+| H | hide the text and buttons / show them again (a recording's REC line stays) |
 | F, F11, double click | fullscreen |
 | Esc, Q | quit |
+
+**Optimize (Z).** The GPU's share of each frame adapts to the display's frame time, but the rest of the frame (density estimation, the spatial filter, glow, waiting for the CPU) comes on top, so a busy frame can miss the display's refresh. Z measures the frame rate for a second and a half and, while it is below the display's rate, tries cheaper settings one at a time, least visible first: fewer samples per frame (70 %, then 55 %, then 40 % of the frame time; trails hide the extra noise), no supersampling, at most 1080 lines, the GPU alone. Each is measured for a second and a half and kept only if the frame rate rose; the HUD shows what it is trying, and then what it kept. Z again stops it.
 
 **Mouse.** Under the text are three rows of buttons, one for each key above, each labelled with its key and lit when its setting is on: the show (previous, next, like, dislike, mutate, pause, speed, record, save, fullscreen, hide, quit), v2's effects, and the renderer (CPU, GPU, blur, render size, credit). Clicking one does what its key does. Once hidden (H or its button), only the H key brings them back. In fullscreen the pointer shows only while the mouse moves. In a headless run, a capital letter in `--keys` clicks that key's button (`--keys "30:O"` clicks GLOW), which tests the buttons without a display.
 

@@ -42,6 +42,38 @@ impl Fx {
     pub const V2: Fx = Fx { glow: 2, trails: 1, levels: true, drift: true, hue: false, wobble: true, tilt: 0, audio: 0 };
 }
 
+/// Z: steps through cheaper settings until the show keeps up with the
+/// display's rate, measuring each for OPT_SETTLE seconds and keeping it only
+/// if it helped.
+struct Optimize {
+    /// the step being measured (None: things as they were)
+    step: Option<usize>,
+    /// the settings before it, and the frame rate they gave
+    before: Settings,
+    fps_before: f64,
+    frame0: u64,
+    t0: Instant,
+    kept: Vec<&'static str>,
+}
+
+/// What the optimizer changes.
+#[derive(Clone, Copy)]
+struct Settings {
+    budget: f32,
+    supersample: u32,
+    use_cpu: bool,
+    fixed: Option<(u32, u32)>,
+    scale: f32,
+    rw: u32,
+    rh: u32,
+}
+
+const OPT_SETTLE: f64 = 1.5;
+/// The optimizer's steps, the least visible first: fewer samples per frame
+/// (trails hide the extra noise), no supersampling, fewer still, 1080 lines
+/// at most, the GPU alone (when waiting on the CPU costs more than its share).
+const OPT_STEPS: [&str; 6] = ["ITERATIONS 70%", "SUPERSAMPLE 1X", "ITERATIONS 55%", "1080P", "CPU OFF", "ITERATIONS 40%"];
+
 /// How strongly the music moves the picture (A: off, low, medium, high): a
 /// factor on every response to it.
 const AUDIO_STRENGTH: [f64; 4] = [0.0, 0.5, 1.0, 1.8];
@@ -69,6 +101,11 @@ pub struct App {
     /// GPU rounds per frame (adapted to the frame time)
     dispatches: f32,
     max_dispatches: u32,
+    /// the share of a display frame the GPU's iterations get (Z may lower it)
+    budget: f32,
+    /// Z: the optimizer at work, and what it last reported (and when)
+    opt: Option<Optimize>,
+    opt_note: Option<(String, Instant)>,
     speed: usize,
     paused: bool,
     blur: bool,
@@ -199,6 +236,9 @@ impl App {
             samples: Vec::new(),
             dispatches: 2.0,
             max_dispatches: 256,
+            budget: 0.85,
+            opt: None,
+            opt_note: None,
             speed: 4,
             paused: false,
             blur: true,
@@ -322,6 +362,7 @@ impl App {
         }
         self.levels(dt, mid.gamma);
         self.frame += 1;
+        self.optimize_tick();
         if let Some(s) = st {
             let k = 0.1;
             let secs = s.secs.max(1e-4);
@@ -395,7 +436,7 @@ impl App {
         if let Some((ms, d)) = self.r.gpu.last_ms {
             if d > 0 && ms > 0.0 {
                 let per = ms / d as f32;
-                let target = (self.period * 1000.0 * 0.85) as f32 - 1.5;
+                let target = (self.period * 1000.0) as f32 * self.budget - 1.5;
                 let want = (target / per).clamp(1.0, self.max_dispatches as f32);
                 // move a third of the way: the measurement is a few frames old
                 self.dispatches += (want - self.dispatches) / 3.0;
@@ -413,8 +454,15 @@ impl App {
             self.titled = self.show.cur.id;
             self.win.set_title(&format!("fleece: sheep {} ({})", self.show.cur.id, self.show.cur.genome.name));
         }
-        let shown = self.hud;
-        if shown && (self.hud_dirty || self.hud_at.elapsed().as_secs_f64() > 0.25) {
+        // hidden, the HUD still shows that a recording is on
+        let shown = self.hud || self.rec.is_some();
+        if !self.hud && shown && (self.hud_dirty || self.hud_at.elapsed().as_secs_f64() > 0.25) {
+            let h = Hud::new(&self.rec_line().into_iter().collect::<Vec<_>>());
+            self.r.gpu.set_hud(h.w, h.h, &h.px);
+            self.hud_at = Instant::now();
+            self.hud_dirty = false;
+        }
+        if self.hud && (self.hud_dirty || self.hud_at.elapsed().as_secs_f64() > 0.25) {
             // wrapped to the window, so nothing is cut off
             let max = ((dw / (dh / 540).max(1)).saturating_sub(40) / 6) as usize;
             let mut rows: Vec<Vec<Item>> = self
@@ -498,7 +546,21 @@ impl App {
             ),
         ]
         .into_iter()
-        .chain(self.rec.as_ref().map(|r| {
+        .chain(self.opt.as_ref().map(|o| {
+            let fps = (self.frame - o.frame0) as f64 / o.t0.elapsed().as_secs_f64().max(0.1);
+            match o.step {
+                Some(i) => format!("*OPTIMIZING FOR {:.0} FPS: TRYING {} ({fps:.0} FPS)", 1.0 / self.period, OPT_STEPS[i]),
+                None => format!("*OPTIMIZING FOR {:.0} FPS: MEASURING ({fps:.0} FPS)", 1.0 / self.period),
+            }
+        }))
+        .chain(self.opt_note.as_ref().filter(|n| n.1.elapsed().as_secs() < 10).map(|n| format!("*{}", n.0)))
+        .chain(self.rec_line())
+        .collect()
+    }
+
+    /// The HUD's line while recording.
+    fn rec_line(&self) -> Option<String> {
+        self.rec.as_ref().map(|r| {
             format!(
                 "*REC {}:{:02}  {}{}  CREDIT {}  (R TO STOP)",
                 r.seconds() as u64 / 60,
@@ -507,8 +569,7 @@ impl App {
                 if r.has_sound() { "  WITH SOUND" } else { "" },
                 if self.burn_credit { "ON" } else { "OFF (METADATA ONLY)" }
             )
-        }))
-        .collect()
+        })
     }
 
     /// The HUD's buttons, each labelled with its key and lit when its setting
@@ -555,6 +616,7 @@ impl App {
                 Item::button("2", "2K", '2', lines(1440)),
                 Item::button("4", "4K", '4', lines(2160)),
                 Item::button("K", "CREDIT IN RECORDINGS", 'k', self.burn_credit),
+                Item::button("Z", format!("OPTIMIZE FOR {:.0} FPS", 1.0 / self.period), 'z', self.opt.is_some()),
             ],
         ]
     }
@@ -722,6 +784,118 @@ impl App {
         }
     }
 
+    /// Z: starts the optimizer (or stops it).
+    fn optimize(&mut self) {
+        if self.opt.take().is_some() {
+            self.opt_note = Some(("OPTIMIZE STOPPED".into(), Instant::now()));
+            return;
+        }
+        let before = self.settings();
+        self.opt = Some(Optimize { step: None, before, fps_before: 0.0, frame0: self.frame, t0: Instant::now(), kept: Vec::new() });
+        self.opt_note = None;
+    }
+
+    /// The optimizer's frame rate goal: the display's (a little under, as
+    /// measured rates wobble).
+    fn opt_target(&self) -> f64 {
+        0.97 / self.period
+    }
+
+    fn settings(&self) -> Settings {
+        Settings {
+            budget: self.budget,
+            supersample: self.supersample,
+            use_cpu: self.r.use_cpu,
+            fixed: self.fixed,
+            scale: self.scale,
+            rw: self.rw,
+            rh: self.rh,
+        }
+    }
+
+    fn restore(&mut self, s: Settings) {
+        self.budget = s.budget;
+        self.r.use_cpu = s.use_cpu;
+        if (s.supersample, s.rw, s.rh) != (self.supersample, self.rw, self.rh) {
+            (self.fixed, self.scale, self.supersample) = (s.fixed, s.scale, s.supersample);
+            self.r.quiesce();
+            fit_histogram(&mut self.r.gpu, s.rw, s.rh, s.supersample);
+            (self.rw, self.rh) = (s.rw, s.rh);
+        }
+    }
+
+    /// Applies optimizer step `i` if it can change anything.
+    fn apply_step(&mut self, i: usize) -> bool {
+        let mut budget = |b: f32| {
+            let lower = self.budget > b + 0.01;
+            if lower {
+                self.budget = b;
+            }
+            lower
+        };
+        match i {
+            0 => budget(0.70),
+            1 if self.r.gpu.os > 1 => {
+                self.supersample = 1;
+                self.r.quiesce();
+                fit_histogram(&mut self.r.gpu, self.rw, self.rh, 1);
+                true
+            }
+            2 => budget(0.55),
+            // a new size would end a recording
+            3 if self.rec.is_none() && self.fixed.is_none() && self.rh > 1080 => {
+                self.render_lines(1080);
+                true
+            }
+            4 if self.r.use_cpu && self.r.use_gpu && self.r.workers() > 0 => {
+                self.r.use_cpu = false;
+                true
+            }
+            5 => budget(0.40),
+            _ => false,
+        }
+    }
+
+    /// Once a step has run OPT_SETTLE seconds: keeps it if the frame rate
+    /// rose (or reached the goal), else undoes it; then the next step, until
+    /// the goal or the last step.
+    fn optimize_tick(&mut self) {
+        let Some(o) = &self.opt else { return };
+        let secs = o.t0.elapsed().as_secs_f64();
+        if secs < OPT_SETTLE {
+            return;
+        }
+        let fps = (self.frame - o.frame0) as f64 / secs;
+        let target = self.opt_target();
+        let mut o = self.opt.take().unwrap();
+        match o.step {
+            Some(i) if fps >= o.fps_before + 1.0 || fps >= target => {
+                o.kept.push(OPT_STEPS[i]);
+                o.fps_before = fps;
+            }
+            Some(_) => self.restore(o.before),
+            None => o.fps_before = fps,
+        }
+        let mut next = o.step.map_or(0, |i| i + 1);
+        while o.fps_before < target && next < OPT_STEPS.len() {
+            o.before = self.settings();
+            if self.apply_step(next) {
+                (o.step, o.frame0, o.t0) = (Some(next), self.frame, Instant::now());
+                self.opt = Some(o);
+                return;
+            }
+            next += 1;
+        }
+        let what = if o.kept.is_empty() { "NOTHING CHANGED".to_string() } else { o.kept.join(", ") };
+        let note = if o.fps_before >= target {
+            format!("OPTIMIZED: {:.0} FPS ({what})", o.fps_before)
+        } else {
+            format!("OPTIMIZED AS FAR AS IT GOES: {:.0} FPS ({what})", o.fps_before)
+        };
+        println!("fleece: {}", note.to_lowercase());
+        self.opt_note = Some((note, Instant::now()));
+    }
+
     /// X: the next supersampling setting (automatic, 1x, 2x, 4x).
     fn cycle_supersample(&mut self) {
         let i = SUPERSAMPLES.iter().position(|&s| s == self.supersample).unwrap_or(0);
@@ -786,6 +960,7 @@ impl App {
             'w' => self.fx.wobble = !self.fx.wobble,
             '3' => self.fx.tilt = next(self.fx.tilt, 3),
             'a' => self.fx.audio = next(self.fx.audio, 4),
+            'z' => self.optimize(),
             _ => {}
         }
         true
