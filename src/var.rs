@@ -126,8 +126,10 @@ pub fn needs_3d(id: i32) -> bool {
 /// The flam3 variations that pass z on as w z in Fractorium (the rest give
 /// z = 0, Fractorium's DefaultZ for a regular variation; bubble, cylinder and
 /// flux have their own z, and waves2 is w z with its scalez of 0).
-const ZPASS: [i32; 36] =
-    [0, 1, 2, 3, 4, 5, 8, 9, 10, 24, 25, 26, 27, 31, 32, 33, 34, 35, 36, 38, 40, 43, 48, 55, 63, 64, 65, 66, 70, 73, 75, 77, 81, 83, 96, 98];
+const ZPASS: [i32; 36] = [
+    0, 1, 2, 3, 4, 5, 8, 9, 10, 24, 25, 26, 27, 31, 32, 33, 34, 35, 36, 38, 40, 43, 48, 55, 63, 64, 65, 66, 70, 73, 75,
+    77, 81, 83, 96, 98,
+];
 
 /// ZPASS as a 128-bit mask.
 pub const ZPASS_MASK: [u32; 4] = {
@@ -424,7 +426,8 @@ pub fn random_id_v2(r: &mut Rng) -> i32 {
         let k = r.below(n as u32) as i32;
         return if k == n - 1 { 130 } else { VARS_3D.start() + k };
     }
-    let flat = FLAM3_VARS as u32 + (VARS_2D.end() - VARS_2D.start() + 1) as u32 + (VARS_DC.end() - VARS_DC.start() + 1) as u32;
+    let flat =
+        FLAM3_VARS as u32 + (VARS_2D.end() - VARS_2D.start() + 1) as u32 + (VARS_DC.end() - VARS_DC.start() + 1) as u32;
     loop {
         let k = r.below(flat) as usize;
         // the plugins and the dc ones are numbered one after the other
