@@ -38,7 +38,7 @@ target/release/fleece --video dance.mp4 --audio song.mp3
 target/release/fleece --audiocheck song.wav      # the analysis as text meters (no file: live, for --seconds)
 ```
 
-**Faithfulness.** With supersampling, fleece's renders of real sheep match flam3-render's at 37–40 dB PSNR (v1: 20–28), and v2 still renders the same picture 60–110 times faster than flam3. The density estimation gathers up to 16 buckets away, the most the GPU's shared memory allows. flam3's kernels at 4x reach further, so the faintest haze is a little noisier than flam3's.
+**Faithfulness.** With supersampling, fleece's renders of real sheep match flam3-render's at 37–40 dB PSNR (v1: 20–28). At the server's own settings (4x, quality 2,000) a frame takes 0.8–0.9 s against flam3's 4.7–8.6 s. Both were timed while another program kept the GPU busy and the machine loaded. 4x is the slow case: its histogram no longer fits in the GPU's cache. The density estimation gathers up to 16 buckets away, the most the GPU's shared memory allows. flam3's kernels at 4x reach further, so the faintest haze is a little noisier than flam3's.
 
 ## What Electric Sheep does, and what fleece does
 
