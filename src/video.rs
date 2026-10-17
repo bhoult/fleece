@@ -242,7 +242,22 @@ pub struct Recorder {
     pub fps: f64,
     pub frames: u64,
     pub credits: Credits,
+    /// what the speakers play, captured from some frame on
+    sound: Option<Sound>,
+    sound_tried: bool,
 }
+
+/// The speakers' sound (the default output's monitor: other programs' sound
+/// and fleece's own music alike) going into a raw file while recording.
+struct Sound {
+    child: Child,
+    path: String,
+    /// the video frame it starts at, and when that was
+    frame: u64,
+    t0: std::time::Instant,
+}
+
+const SOUND_RATE: u32 = 48000;
 
 impl Recorder {
     pub fn start(path: &str, w: u32, h: u32, fps: f64) -> Result<Recorder, String> {
@@ -257,7 +272,54 @@ impl Recorder {
                 sink.finish()
             })
             .map_err(|e| e.to_string())?;
-        Ok(Recorder { tx: Some(tx), thread: Some(thread), path: path.to_string(), fps, frames: 0, credits: Credits::default() })
+        Ok(Recorder {
+            tx: Some(tx),
+            thread: Some(thread),
+            path: path.to_string(),
+            fps,
+            frames: 0,
+            credits: Credits::default(),
+            sound: None,
+            sound_tried: false,
+        })
+    }
+
+    /// Starts recording the sound too, from the next frame on (once: an error
+    /// is not retried). From then on the frames keep to the clock, so the
+    /// picture stays with the sound.
+    pub fn capture_sound(&mut self) -> Result<(), String> {
+        if self.sound_tried {
+            return Ok(());
+        }
+        self.sound_tried = true;
+        let dir = std::env::var("HOME").map(|h| format!("{h}/.cache/fleece")).unwrap_or_else(|_| ".".into());
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
+        let path = format!("{dir}/sound-{}-{}.raw", std::process::id(), self.frames);
+        let file = File::create(&path).map_err(|e| format!("{path}: {e}"))?;
+        let child = Command::new("parec")
+            .args(["-d", "@DEFAULT_MONITOR@", "--raw", "--format=s16le", "--channels=2", "--latency-msec=20"])
+            .arg(format!("--rate={SOUND_RATE}"))
+            .stdin(Stdio::null())
+            .stdout(file)
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("parec: {e}"))?;
+        self.sound = Some(Sound { child, path, frame: self.frames, t0: std::time::Instant::now() });
+        Ok(())
+    }
+
+    pub fn has_sound(&self) -> bool {
+        self.sound.is_some()
+    }
+
+    /// How many times to write the next frame: once, or with sound as many
+    /// times as keep the video with the clock (0 when ahead, more when the
+    /// rendering fell behind).
+    pub fn due(&self) -> u64 {
+        match &self.sound {
+            None => 1,
+            Some(s) => (s.frame + (s.t0.elapsed().as_secs_f64() * self.fps).round() as u64 + 1).saturating_sub(self.frames),
+        }
     }
 
     /// The next frame (waits while the encoder is busy; never drops).
@@ -277,10 +339,39 @@ impl Recorder {
     /// Ends the file (waits for the encoder) and tags it with the credits.
     pub fn stop(mut self) -> Result<(), String> {
         drop(self.tx.take());
-        match self.thread.take().map(|t| t.join()) {
-            Some(Ok(r)) => r?,
-            _ => return Err("the recorder thread failed".into()),
+        let video = match self.thread.take().map(|t| t.join()) {
+            Some(Ok(r)) => r,
+            _ => Err("the recorder thread failed".into()),
+        };
+        if let Some(mut s) = self.sound.take() {
+            let _ = s.child.kill();
+            let _ = s.child.wait();
+            let muxed = video.as_ref().map_err(|e| e.clone()).and_then(|_| self.add_sound(&s));
+            let _ = std::fs::remove_file(&s.path);
+            muxed?;
         }
+        video?;
         self.credits.embed(&self.path)
+    }
+
+    /// Puts the captured sound into the finished video, starting where it began.
+    fn add_sound(&self, s: &Sound) -> Result<(), String> {
+        let ext = std::path::Path::new(&self.path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let tmp = format!("{}.sound.{ext}", self.path);
+        let offset = format!("{:.4}", s.frame as f64 / self.fps);
+        let rate = SOUND_RATE.to_string();
+        let mut args: Vec<&str> = vec!["-loglevel", "error", "-y", "-i", &self.path, "-itsoffset", &offset];
+        args.extend(["-f", "s16le", "-ar", &rate, "-ac", "2", "-i", &s.path, "-map", "0:v", "-map", "1:a", "-c:v", "copy"]);
+        args.extend(if ext == "webm" { ["-c:a", "libopus", "-b:a", "160k"] } else { ["-c:a", "aac", "-b:a", "192k"] });
+        if matches!(ext.as_str(), "mp4" | "mov" | "m4v") {
+            args.extend(["-movflags", "+faststart"]);
+        }
+        args.push(&tmp);
+        let st = Command::new("ffmpeg").args(&args).stdin(Stdio::null()).status().map_err(|e| format!("ffmpeg: {e}"))?;
+        if !st.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("ffmpeg could not add the sound to {}", self.path));
+        }
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("{}: {e}", self.path))
     }
 }

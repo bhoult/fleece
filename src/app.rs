@@ -247,6 +247,12 @@ impl App {
     /// overrides the adaptive budget (video).
     pub fn frame(&mut self, dt: f64, fixed: Option<u32>) -> Option<Stats> {
         let audio = self.audio_levels();
+        // a recording takes the sound from when audio is on
+        if let Some(rec) = self.rec.as_mut().filter(|r| !r.has_sound() && self.fx.audio > 0 && self.track.is_none()) {
+            if let Err(e) = rec.capture_sound() {
+                eprintln!("fleece: recording without sound: {e}");
+            }
+        }
         let k = AUDIO_STRENGTH[self.fx.audio as usize % 4];
         let [loud, _, _, _, high, beat] = audio.map(|v| v as f64 * k);
         // loud music turns the sheep faster
@@ -494,10 +500,11 @@ impl App {
         .into_iter()
         .chain(self.rec.as_ref().map(|r| {
             format!(
-                "*REC {}:{:02}  {}  CREDIT {}  (R TO STOP)",
+                "*REC {}:{:02}  {}{}  CREDIT {}  (R TO STOP)",
                 r.seconds() as u64 / 60,
                 r.seconds() as u64 % 60,
                 r.path,
+                if r.has_sound() { "  WITH SOUND" } else { "" },
                 if self.burn_credit { "ON" } else { "OFF (METADATA ONLY)" }
             )
         }))
@@ -830,14 +837,22 @@ impl App {
         }
         if let Some(rec) = self.rec.as_mut() {
             rec.credits.add(&st.name, &st.nick, st.nc);
-            rec.offer(rgb);
+            // with sound, as many copies as keep the picture with it
+            let n = rec.due();
+            for _ in 1..n {
+                rec.offer(rgb.clone());
+            }
+            if n > 0 {
+                rec.offer(rgb);
+            }
         }
     }
 
     /// The animation time a frame advances: the wall clock, or exactly one
-    /// display frame while recording (so the video has every frame).
+    /// display frame while recording without sound (so the video has every
+    /// frame; with sound it keeps to the clock, as the sound does).
     pub fn step_time(&self, wall: f64) -> f64 {
-        if self.rec.is_some() { self.period } else { wall }
+        if self.rec.as_ref().is_some_and(|r| !r.has_sound()) { self.period } else { wall }
     }
 
     /// The flock and its ratings, for next time (the window only).

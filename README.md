@@ -184,7 +184,8 @@ tools/video.sh -s 30 -l 1080                                     # the same thro
 
 **Recording the live show (R).**
 - The file is ~/Videos/fleece-TIME.mp4: H.264, at the render size (800x592 by default), at the display's frame rate.
-- Every frame goes into the file. While recording, the show steps exactly one display frame of animation per frame, and a busy encoder makes the display wait rather than drop a frame. The video plays at true speed with nothing skipped or repeated. If the machine cannot keep up live, the live view slows down instead of the video.
+- Without sound, every frame goes into the file. While recording, the show steps exactly one display frame of animation per frame, and a busy encoder makes the display wait rather than drop a frame. The video plays at true speed with nothing skipped or repeated. If the machine cannot keep up live, the live view slows down instead of the video.
+- With audio on (A), the recording has sound: what the speakers play, which is any other program's sound and fleece's own music alike, captured from the default output's monitor with `parec` and added to the file when recording stops. Turning audio on during a recording starts the sound from that point. From then on the video keeps to the clock, as the sound does: a frame the renderer was late with is shown again rather than the video drifting off the sound. The HUD's REC line says WITH SOUND.
 - It holds the picture without the controls, with the sheep's credit burned into its first 10 seconds (K turns that on or off; `--credit off` starts with it off).
 - Changing the render size (E, 1, 2, 4, or fullscreen without a fixed size) ends the recording. So does quitting, which finishes the file.
 
