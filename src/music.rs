@@ -26,10 +26,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Genre names, shown on screen in capitals (the app's font has only A-Z, 0-9 and " -.:/!+()[],%").
-pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI"];
+pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN"];
 const AMBIENT: usize = 0;
 const TECHNO: usize = 1;
 const SYNTHWAVE: usize = 2;
+const LOFI: usize = 3;
+const POLKA: usize = 4;
+const TAVERN: usize = 5;
 
 const RATE: u32 = 48000;
 const SR: f32 = RATE as f32;
@@ -74,6 +77,9 @@ impl Rng {
     }
     fn chance(&mut self, p: f32) -> bool {
         self.f() < p
+    }
+    fn bit_chance(&mut self) -> bool {
+        self.u64() >> 63 == 1
     }
     fn pick<T: Copy>(&mut self, t: &[T]) -> T {
         t[self.below(t.len())]
@@ -287,7 +293,8 @@ impl Adsr {
             DECAY => self.level = self.sus + (self.level - self.sus) * self.dec,
             RELEASE => {
                 self.level *= self.rel;
-                if self.level < 1e-4 {
+                // -60 dB: inaudible under the music, and a voice the less
+                if self.level < 1e-3 {
                     self.level = 0.0;
                     self.stage = IDLE;
                 }
@@ -347,7 +354,27 @@ struct Patch {
     glide: f32,
     drive: f32,
     gain: f32,
+    /// Karplus-Strong (when > 0): a plucked string ringing for `ks` seconds,
+    /// `ks_tone` 0 (dull) .. 1 (bright)
+    ks: f32,
+    ks_tone: f32,
+    /// a vowel's formants (1 a, 2 e, 3 i, 4 o, 5 u; 0 none) on the oscillators
+    vowel: u8,
+    /// semitones the note starts away from itself, gliding in (`glide`)
+    bend: f32,
 }
+
+/// The vowels' first three formants, Hz.
+const VOWELS: [[f32; 3]; 5] = [
+    [730.0, 1090.0, 2440.0],
+    [530.0, 1840.0, 2480.0],
+    [300.0, 2200.0, 2950.0],
+    [570.0, 840.0, 2410.0],
+    [320.0, 800.0, 2240.0],
+];
+
+/// A string's delay line, a power of two (the lowest note: 48000 / 2048 Hz, 23 Hz).
+const KS_LEN: usize = 2048;
 
 const PATCH: Patch = Patch {
     wave: Wave::Saw,
@@ -383,6 +410,10 @@ const PATCH: Patch = Patch {
     glide: 0.0,
     drive: 0.0,
     gain: 1.0,
+    ks: 0.0,
+    ks_tone: 0.5,
+    vowel: 0,
+    bend: 0.0,
 };
 
 #[derive(Clone, Copy)]
@@ -412,6 +443,22 @@ struct Voice {
     /// the gain (velocity, tremolo, accent) as applied: it glides (4 ms), so
     /// a sounding voice retriggered softer or louder does not step
     g: f32,
+    /// the string: its delay line, where it writes, its length, its loop's
+    /// low-pass (coefficient, state) and its loss each time round
+    kb: [f32; KS_LEN],
+    ki: usize,
+    klen: f32,
+    kc: f32,
+    klp: f32,
+    kfb: f32,
+    /// a sounding voice restarted on another source (a string re-plucked, a
+    /// stolen voice of another kind): its output carried over the jump, the
+    /// last sample, an offset decaying from it, whether one is due
+    last: [f32; 2],
+    off: [f32; 2],
+    fix: bool,
+    /// the formants: three band-passes a side
+    ff: [Svf; 6],
 }
 
 /// The per-sample step of a voice's gain glide.
@@ -439,6 +486,16 @@ const VOICE: Voice = Voice {
     lfo: 0.0,
     noise: Noise(0x2545_F491),
     g: 0.0,
+    kb: [0.0; KS_LEN],
+    ki: 0,
+    klen: 100.0,
+    kc: 0.5,
+    klp: 0.0,
+    kfb: 0.0,
+    last: [0.0; 2],
+    off: [0.0; 2],
+    fix: false,
+    ff: [Svf { ic1: 0.0, ic2: 0.0, a1: 0.0, a2: 0.0, a3: 0.0, k: 2.0 }; 6],
 };
 
 impl Voice {
@@ -454,7 +511,8 @@ impl Voice {
             self.accent = accent;
             return;
         }
-        if !self.on {
+        let fresh = !self.on;
+        if fresh {
             // a fresh voice: oscillators at scattered phases (the attack
             // hides the start), filters empty
             self.noise = Noise(seed);
@@ -465,13 +523,60 @@ impl Voice {
             self.mph = 0.0;
             self.mph2 = 0.0;
             self.f = [Svf::default(); 2];
+            self.ff = [Svf::default(); 6];
             self.lfo = self.noise.next() * 0.5 + 0.5;
             self.amp.level = 0.0;
+            if p.ks > 0.0 {
+                self.kb.fill(0.0);
+                self.klp = 0.0;
+            }
+            self.last = [0.0; 2];
+            self.off = [0.0; 2];
+        } else {
+            let kind = |q: &Patch| {
+                if q.ks > 0.0 {
+                    2
+                } else if q.fm > 0.0 {
+                    1
+                } else {
+                    0
+                }
+            };
+            if p.ks > 0.0 {
+                // a string still ringing, plucked again: damped and restarted
+                self.kb.fill(0.0);
+                self.klp = 0.0;
+            }
+            // the output carried over the jump to the new source (no click)
+            self.fix = p.ks > 0.0 || kind(p) != kind(&self.p);
         }
         self.p = *p;
         self.on = true;
-        self.note = note;
+        self.note = note + p.bend;
         self.target = note;
+        if p.ks > 0.0 {
+            // the string: a delay a period long (less its loop filter's lag),
+            // losing -60 dB over `ks` seconds, plucked with a burst of noise
+            // as bright as its tone (added to what still rings: no click)
+            let f = mtof(note);
+            self.kc = 0.25 + 0.7 * p.ks_tone;
+            self.klen = (SR / f - (1.0 - self.kc) / self.kc).clamp(2.0, (KS_LEN - 2) as f32);
+            self.kfb = (-6.9 / (f * p.ks.max(0.01))).exp();
+            let n = self.klen.ceil() as usize;
+            let ce = 0.15 + 0.8 * p.ks_tone;
+            let amp = 1.4 / ce.sqrt();
+            let mut lp = 0.0;
+            for k in 0..n {
+                lp += (self.noise.next() - lp) * ce;
+                self.kb[(self.ki + KS_LEN - n + k) & (KS_LEN - 1)] += lp * amp;
+            }
+        }
+        if p.vowel > 0 {
+            let fs = VOWELS[(p.vowel as usize - 1) % VOWELS.len()];
+            for (k, f) in self.ff.iter_mut().enumerate() {
+                f.set(fs[k % 3], [0.9, 0.93, 0.93][k % 3]);
+            }
+        }
         self.vel = vel;
         self.accent = accent;
         self.hold = len;
@@ -484,6 +589,21 @@ impl Voice {
         self.fme2 = self.fme;
         self.fmc = t60(p.fm_dec);
         self.fmc2 = t60(p.fm2_dec);
+    }
+
+    /// One sample out, carried over a restart's jump when one is due.
+    #[inline]
+    fn out(&mut self, o: &mut [f32; 2], l: f32, r: f32) {
+        if self.fix {
+            self.off = [self.last[0] - l, self.last[1] - r];
+            self.fix = false;
+        }
+        let (l, r) = (l + self.off[0], r + self.off[1]);
+        self.off[0] *= 0.995;
+        self.off[1] *= 0.995;
+        self.last = [l, r];
+        o[0] += l;
+        o[1] += r;
     }
 
     /// Adds the voice into `buf`; `cut` scales the cutoff (the channel's drift).
@@ -531,7 +651,28 @@ impl Voice {
             }
             self.fenv *= (-6.9 * nf / (p.fdec * SR)).exp();
         }
-        if p.fm > 0.0 {
+        if p.ks > 0.0 {
+            for o in buf.iter_mut() {
+                let rp = self.ki as f32 + KS_LEN as f32 - self.klen;
+                let i0 = rp as usize;
+                let fr = rp - i0 as f32;
+                let a0 = self.kb[i0 & (KS_LEN - 1)];
+                let y = a0 + (self.kb[(i0 + 1) & (KS_LEN - 1)] - a0) * fr;
+                self.klp += (y - self.klp) * self.kc;
+                self.kb[self.ki] = self.klp * self.kfb;
+                self.ki = (self.ki + 1) & (KS_LEN - 1);
+                let mut x = y;
+                if p.filter {
+                    x = self.f[0].lp(x);
+                }
+                if p.drive > 0.0 {
+                    x = soft(x * (1.0 + p.drive));
+                }
+                self.g += (gain - self.g) * GLIDE_G;
+                let a = self.amp.next() * self.g;
+                self.out(o, x * a, x * a);
+            }
+        } else if p.fm > 0.0 {
             let (r1, r2) = (dt0 * p.ratio, dt0 * p.ratio2);
             // the second modulator (a tine's ping, high above) eases off up the keyboard
             let fm2 = p.fm2 * (400.0 / f).min(1.0);
@@ -555,8 +696,7 @@ impl Voice {
                 }
                 self.g += (gain - self.g) * GLIDE_G;
                 let a = self.amp.next() * self.g;
-                o[0] += x * a;
-                o[1] += x * a;
+                self.out(o, x * a, x * a);
             }
         } else {
             let u = (p.unison as usize).clamp(1, 3);
@@ -593,6 +733,18 @@ impl Voice {
                 }
                 l += c;
                 r += c;
+                if p.vowel > 0 {
+                    let ff = &mut self.ff;
+                    let form = |f: &mut [Svf], x: f32| 1.6 * (f[0].bp(x) + 0.6 * f[1].bp(x) + 0.35 * f[2].bp(x));
+                    if stereo {
+                        l = form(&mut ff[..3], l);
+                        r = form(&mut ff[3..], r);
+                    } else {
+                        let m = form(&mut ff[..3], (l + r) * 0.5);
+                        l = m;
+                        r = m;
+                    }
+                }
                 if p.filter {
                     if stereo {
                         l = self.f[0].lp(l);
@@ -612,8 +764,7 @@ impl Voice {
                 }
                 self.g += (gain - self.g) * GLIDE_G;
                 let a = self.amp.next() * self.g;
-                o[0] += l * a;
-                o[1] += r * a;
+                self.out(o, l * a, r * a);
             }
         }
         self.age = self.age.saturating_add(n as u32);
@@ -1120,6 +1271,12 @@ struct Fx {
     wwalk: f32,
     crackle: f32,
     crackle_rate: f32,
+    /// rain: a soft noise bed and drops (a ping through a resonant band-pass)
+    rain: f32,
+    rain_to: f32,
+    rz: [f32; 2],
+    drop: Svf,
+    dpan: f32,
     pop: f32,
     pan: f32,
     hiss: f32,
@@ -1142,6 +1299,11 @@ impl Fx {
             wwalk: 0.0,
             crackle: 0.0,
             crackle_rate: 0.0,
+            rain: 0.0,
+            rain_to: 0.0,
+            rz: [0.0; 2],
+            drop: Svf::default(),
+            dpan: 0.0,
             pop: 0.0,
             pan: 0.0,
             hiss: 0.0,
@@ -1190,6 +1352,23 @@ impl Fx {
                 self.wz[1] += (self.n2.next() - self.wz[1]) * 0.15;
                 o[0] += self.wf[0].bp(self.wz[0]) * self.wind * 2.0;
                 o[1] += self.wf[1].bp(self.wz[1]) * self.wind * 2.0;
+            }
+        }
+        self.rain += (self.rain_to - self.rain) * (n as f32 / (3.0 * SR));
+        if self.rain > 1e-4 {
+            any = true;
+            for o in buf.iter_mut() {
+                self.rz[0] += (self.n.next() - self.rz[0]) * 0.3;
+                self.rz[1] += (self.n2.next() - self.rz[1]) * 0.3;
+                let mut imp = 0.0;
+                if self.n.next() * 0.5 + 0.5 < 30.0 / SR {
+                    self.drop.set(1500.0 * (self.n2.next() * 1.5 + 1.6).exp2(), 0.96);
+                    self.dpan = self.n2.next() * 0.8;
+                    imp = self.n.next().abs() * 6.0;
+                }
+                let d = self.drop.bp(imp);
+                o[0] += (self.rz[0] * 0.5 + d * (1.0 - self.dpan)) * self.rain;
+                o[1] += (self.rz[1] * 0.5 + d * (1.0 + self.dpan)) * self.rain;
             }
         }
         if self.crackle > 0.0 {
@@ -1287,6 +1466,11 @@ struct Channel {
     lp_s: f32,
     filt: [Svf; 2],
     filtering: bool,
+    /// a slow swell of the level (an accordion's bellows): depth, rate (Hz), phase
+    swell: f32,
+    swell_s: f32,
+    swell_rate: f32,
+    swell_ph: f32,
     buf: [[f32; 2]; BLOCK],
 }
 
@@ -1312,12 +1496,19 @@ impl Channel {
             lp_s: 20000.0,
             filt: [Svf::default(); 2],
             filtering: false,
+            swell: 0.0,
+            swell_s: 0.0,
+            swell_rate: 0.5,
+            swell_ph: 0.0,
             buf: [[0.0; 2]; BLOCK],
         }
     }
 
-    /// Renders the block into `buf`; whether anything sounded.
+    /// Renders the block into `buf`; whether anything sounded. (The swell
+    /// keeps time whether or not the channel sounds.)
     fn render(&mut self, n: usize) -> bool {
+        self.swell_s += (self.swell - self.swell_s) * 0.02;
+        self.swell_ph = wrap(self.swell_ph + self.swell_rate * n as f32 / SR);
         let Channel { voices, dv, buf, .. } = self;
         let buf = &mut buf[..n];
         buf.fill([0.0; 2]);
@@ -1357,8 +1548,12 @@ impl Channel {
             }
         }
         self.gain_s += (self.gain - self.gain_s) * 0.05;
-        let gl = self.gain_s * (1.0 - self.pan).min(1.0);
-        let gr = self.gain_s * (1.0 + self.pan).min(1.0);
+        let mut g = self.gain_s;
+        if self.swell_s > 1e-4 {
+            g *= 1.0 - self.swell_s * (0.5 - 0.5 * sin01(self.swell_ph));
+        }
+        let gl = g * (1.0 - self.pan).min(1.0);
+        let gr = g * (1.0 + self.pan).min(1.0);
         for i in 0..n {
             let d = 1.0 - self.duck * sc[i];
             let l = self.buf[i][0] * gl * d;
@@ -1416,7 +1611,9 @@ impl Synth {
             AMBIENT => 1.35,
             TECHNO => 1.0,
             SYNTHWAVE => 1.1,
-            _ => 0.8,
+            LOFI => 0.8,
+            TAVERN => 0.65,
+            _ => 0.9,
         };
         let mut r2lp = [Svf::default(); 2];
         for f in r2lp.iter_mut() {
@@ -1574,8 +1771,6 @@ const MODES: [[i32; 7]; 7] = [
     [0, 2, 3, 5, 7, 8, 11], // harmonic minor
 ];
 const IONIAN: usize = 0;
-const DORIAN: usize = 1;
-const PHRYGIAN: usize = 2;
 const LYDIAN: usize = 3;
 const MIXOLYDIAN: usize = 4;
 const AEOLIAN: usize = 5;
@@ -1585,47 +1780,314 @@ fn deg_semi(mode: usize, deg: i32) -> i32 {
     deg.div_euclid(7) * 12 + MODES[mode][deg.rem_euclid(7) as usize]
 }
 
-/// Chord progressions (scale degrees from 0) that stay on the mode's major
-/// and minor chords.
-fn progressions(mode: usize) -> &'static [&'static [i32]] {
-    match mode {
-        IONIAN => {
-            &[&[0, 4, 5, 3], &[5, 3, 0, 4], &[0, 5, 3, 4], &[1, 4, 0, 0], &[0, 5, 1, 4], &[3, 2, 1, 0], &[0, 3, 0, 4]]
-        }
-        DORIAN => &[&[0, 3], &[0, 3, 0, 6], &[0, 6, 3, 0], &[0, 4, 3, 0], &[0, 2, 3, 0], &[0, 6, 2, 3]],
-        PHRYGIAN => &[&[0, 1], &[0, 1, 0, 6], &[0, 6, 1, 0], &[0, 3, 1, 0]],
-        LYDIAN => &[&[0, 1], &[0, 1, 0, 4], &[0, 6, 1, 0], &[5, 1, 0, 0], &[0, 2, 1, 0]],
-        MIXOLYDIAN => &[&[0, 6], &[0, 6, 3, 0], &[0, 3, 6, 0], &[4, 3, 0, 0], &[0, 6, 4, 3]],
-        AEOLIAN => {
-            &[&[0, 5, 2, 6], &[0, 6, 5, 6], &[5, 6, 0, 0], &[0, 3, 5, 6], &[0, 5, 3, 6], &[0, 2, 5, 6], &[0, 3, 6, 2]]
-        }
-        _ => &[&[0, 5, 3, 4], &[0, 3, 4, 0], &[5, 3, 4, 0], &[0, 4, 0, 5]],
+/// Chord progressions, eight bars each (a numeral a bar; A+B: two chords in
+/// the bar), by genre and by the mode's colour (major: ionian, lydian,
+/// mixolydian; minor: the rest). Borrowed chords, secondary dominants,
+/// suspensions, sevenths and ninths; inversions (^1, ^2) for bass lines that move.
+const AMB_MAJ: &[&str] = &[
+    "Imaj7 Imaj7^1 IVmaj7 IVmaj7 vi9 V^1 IVmaj9 Vsus4",
+    "Iadd9 V^1 vi7 iii7 IVmaj7 Iadd9^1 ii9 Vsus4",
+    "I69 II vi9 IVmaj7 I69 II IVmaj9 Vsus4",
+    "IVmaj7 V^1 vi9 Iadd9^1 IVmaj9 iii7 ii9 Vsus4",
+    "Isus2 bVIImaj7 IVadd9 Isus2 vi9 IVmaj7 bVIImaj7 Vsus4",
+    "Imaj7 vi9 IVmaj9 iv6 Iadd9 iii7 vi7 V7sus4",
+    "vi9 IVmaj7 Imaj7 V^1 vi9 IVmaj7 bVIImaj7 Vsus4",
+    "Imaj9 iii7 IVmaj7 V7/vi vi9 V^1 IVmaj7 iv6",
+];
+const AMB_MIN: &[&str] = &[
+    "i9 IV9 i9 IV9 bVImaj7 bVIImaj7 i9 V7sus4",
+    "i7 bVImaj7 bIIImaj7 bVII i7 iv9 bVImaj7 V7sus4",
+    "i9 bVIImaj7 bVImaj7 bVIImaj7 i9 iv9 bIIImaj7 bVII",
+    "iv9 bVII bIIImaj7 bVImaj7 iim7b5 V7sus4 i9 i9",
+    "i9 i9^2 bVImaj7 bVImaj7 iv9 bVII bIIImaj7 V7sus4",
+    "bVImaj7 bVII i9 v7 bVImaj7 bVII bIIImaj7 bVIIsus4",
+];
+const TECH_MIN: &[&str] = &[
+    "i7 i7 i7 i7 bVI bVI bVII bVII",
+    "i9 i9 iv9 iv9 i9 i9 bVIImaj7 bVIImaj7",
+    "i7 i7 bIIImaj7 bIIImaj7 i7 i7 v7 v7",
+    "i7 i7 i7 i7 i7 i7 i7 i7",
+    "i7 bII i7 bII i7 bII bVII bVII",
+    "i9 i9 i9 i9 bVImaj7 bVImaj7 iv7 iv7",
+    "i11 i11 bVII bVII i11 i11 bVI bVII",
+    "i7 i7 iv7 iv7 bVImaj7 bVImaj7 V7sus4 V7sus4",
+];
+const SW_MAJ: &[&str] = &[
+    "I V vi IV I V^1 vi IV",
+    "vi IV I V vi IV bVII V",
+    "I iii IV V I iii bVII IV",
+    "IV V iii vi ii V I I",
+    "I V^1 vi I^2 IV I^1 ii V7",
+    "vi V IV V vi V bVI bVII",
+];
+const SW_MIN: &[&str] = &[
+    "i bVI bIII bVII i bVI iv V7",
+    "bVI bVII i i bVI bVII bIII V7sus4+V7",
+    "i v bVI bIII iv i^2 bVI+bVII i",
+    "i bVII bVI bVII i bVII bVI+bVII V7",
+    "iv bVII bIIImaj7 bVImaj7 iim7b5 V7 i i",
+    "i bIII bVII iv bVI bIII iv+V7 i",
+    "i bVII^1 bVI bVII i bVII bVI V7sus4",
+    "bVI bIII bVII i bVI bIII V7/V V7",
+];
+const LOFI_MAJ: &[&str] = &[
+    "ii9 V9 Imaj9 Imaj9 ii9 V9 Imaj9 V7/ii",
+    "IVmaj7 iii7 vi9 V7/V ii9 V7 Imaj9 vi9",
+    "Imaj7 V7/vi vi9 ii9+V7 IVmaj7 iv6 iii7 ii7+bII7",
+    "Imaj9 I7 IVmaj7 iv6 iii7 VI7 ii9 V9",
+    "IVmaj9 V9 iii7 vi9 ii7 V7 Imaj7 Imaj7",
+    "ii9+V9 Imaj9+vi9 ii9+V9 Imaj9 IVmaj7+iv6 iii7+VI7 ii9+V9 Imaj9",
+    "Imaj7 IVmaj7 iii7 vi7 ii7 V7 Imaj7 bVIImaj7",
+];
+const LOFI_MIN: &[&str] = &[
+    "i9 iv9 bVIImaj7 bIIImaj7 bVImaj7 iim7b5 V7 i9",
+    "i9 IV9 i9 IV9 bVImaj7 bVII9 i9 i9",
+    "i9 bVImaj7 iim7b5+V7 i9 iv9 bVII9 bIIImaj7 V7",
+    "i7 iv7 bVIImaj7 bIIImaj7 iv7 V7 i7 bVI7",
+    "iv9 v7 i9 i9 bVImaj7 bVII7 i9 V7sus4+V7",
+];
+
+/// The genre's pool for the mode.
+fn pool(genre: usize, mode: usize) -> &'static [&'static str] {
+    let major = matches!(mode, IONIAN | LYDIAN | MIXOLYDIAN);
+    match (genre, major) {
+        (AMBIENT, true) => AMB_MAJ,
+        (AMBIENT, false) => AMB_MIN,
+        (TECHNO, _) => TECH_MIN,
+        (SYNTHWAVE, true) => SW_MAJ,
+        (SYNTHWAVE, false) => SW_MIN,
+        (_, true) => LOFI_MAJ,
+        (_, false) => LOFI_MIN,
     }
 }
 
-const TRIAD: u8 = 0;
-const SEV: u8 = 1;
-const NINE: u8 = 2;
-const SUS2: u8 = 3;
-const SUS4: u8 = 4;
-const ADD9: u8 = 5;
-
-#[derive(Clone, Copy, PartialEq)]
-struct Chord {
-    deg: i32,
-    kind: u8,
+/// A progression from the pools, a chord per half bar.
+fn halves(plan: &str) -> Vec<Harm> {
+    plan.split_whitespace()
+        .flat_map(|t| {
+            let v = harms(&t.replace('+', " "));
+            match v.len() {
+                1 => [v[0], v[0]],
+                _ => [v[0], v[1]],
+            }
+        })
+        .collect()
 }
 
-/// The chord's tones, as scale degrees above its root.
-fn chord_offsets(kind: u8) -> &'static [i32] {
-    match kind {
-        SEV => &[0, 2, 4, 6],
-        NINE => &[0, 2, 4, 6, 8],
-        SUS2 => &[0, 1, 4],
-        SUS4 => &[0, 3, 4],
-        ADD9 => &[0, 2, 4, 8],
-        _ => &[0, 2, 4],
+/// A voicing of the pitch classes `pcs` (absolute) within [lo, hi], moving as
+/// little as it can from `prev` (close position, or drop-2 when `open`).
+fn voicing_pcs(pcs: &[i32], lo: i32, hi: i32, prev: &[i32], open: bool) -> Vec<i32> {
+    let k = pcs.len();
+    let mean = |v: &[i32]| v.iter().sum::<i32>() as f32 / v.len().max(1) as f32;
+    let centre = if prev.is_empty() { (lo + hi) as f32 / 2.0 } else { mean(prev) };
+    let mut best: Option<(f32, Vec<i32>)> = None;
+    for inv in 0..k {
+        let mut v = Vec::with_capacity(k);
+        let mut last = lo - 1;
+        for j in 0..k {
+            let pc = pcs[(inv + j) % k];
+            let n = last + 1 + (pc - (last + 1)).rem_euclid(12);
+            v.push(n);
+            last = n;
+        }
+        if open && k >= 4 {
+            v[k - 2] -= 12;
+            v.sort();
+            if v[0] < lo - 5 {
+                v.iter_mut().for_each(|x| *x += 12);
+            }
+        }
+        for shift in [0, 12, -12] {
+            let w: Vec<i32> = v.iter().map(|x| x + shift).collect();
+            if w[0] < lo - 5 || w[k - 1] > hi {
+                continue;
+            }
+            let cost = if prev.len() == k {
+                w.iter().zip(prev).map(|(a, b)| (a - b).abs() as f32).sum::<f32>()
+            } else {
+                (mean(&w) - centre).abs() * k as f32
+            };
+            if best.as_ref().is_none_or(|(c0, _)| cost < *c0) {
+                best = Some((cost, w));
+            }
+        }
     }
+    best.map(|b| b.1).unwrap_or_else(|| pcs.iter().map(|&pc| lo + (pc - lo).rem_euclid(12)).collect())
+}
+
+// -- chords anywhere in the chromatic scale
+
+/// A chord: its root (semitones above the tonic), its quality, and the chord
+/// tone its bass plays (0 the root, 1 the third, 2 the fifth, 3 the seventh).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Harm {
+    root: i32,
+    q: u8,
+    inv: u8,
+}
+
+const Q_MAJ: u8 = 0;
+const Q_MIN: u8 = 1;
+const Q_DIM: u8 = 2;
+const Q_AUG: u8 = 3;
+const Q_MAJ7: u8 = 4;
+const Q_MIN7: u8 = 5;
+const Q_DOM7: u8 = 6;
+const Q_HDIM7: u8 = 7;
+const Q_DIM7: u8 = 8;
+const Q_SUS2: u8 = 9;
+const Q_SUS4: u8 = 10;
+const Q_ADD9: u8 = 11;
+const Q_MADD9: u8 = 12;
+const Q_MAJ9: u8 = 13;
+const Q_MIN9: u8 = 14;
+const Q_DOM9: u8 = 15;
+const Q_7SUS4: u8 = 16;
+const Q_SIX: u8 = 17;
+const Q_MIN6: u8 = 18;
+const Q_SIX9: u8 = 19;
+const Q_MIN11: u8 = 20;
+
+/// A quality's intervals above the root.
+fn q_iv(q: u8) -> &'static [i32] {
+    match q {
+        Q_MIN => &[0, 3, 7],
+        Q_DIM => &[0, 3, 6],
+        Q_AUG => &[0, 4, 8],
+        Q_MAJ7 => &[0, 4, 7, 11],
+        Q_MIN7 => &[0, 3, 7, 10],
+        Q_DOM7 => &[0, 4, 7, 10],
+        Q_HDIM7 => &[0, 3, 6, 10],
+        Q_DIM7 => &[0, 3, 6, 9],
+        Q_SUS2 => &[0, 2, 7],
+        Q_SUS4 => &[0, 5, 7],
+        Q_ADD9 => &[0, 4, 7, 14],
+        Q_MADD9 => &[0, 3, 7, 14],
+        Q_MAJ9 => &[0, 4, 7, 11, 14],
+        Q_MIN9 => &[0, 3, 7, 10, 14],
+        Q_DOM9 => &[0, 4, 7, 10, 14],
+        Q_7SUS4 => &[0, 5, 7, 10],
+        Q_SIX => &[0, 4, 7, 9],
+        Q_MIN6 => &[0, 3, 7, 9],
+        Q_SIX9 => &[0, 4, 7, 9, 14],
+        Q_MIN11 => &[0, 3, 7, 10, 14, 17],
+        _ => &[0, 4, 7],
+    }
+}
+
+/// A Roman numeral, relative to the tonic's major scale: semitones, whether
+/// it is lower case (minor), and what follows it.
+fn numeral(s: &str) -> Option<(i32, bool, &str)> {
+    let (acc, s) = match s.as_bytes().first() {
+        Some(b'b') => (-1, &s[1..]),
+        Some(b'#') => (1, &s[1..]),
+        _ => (0, s),
+    };
+    let n = s.chars().take_while(|c| matches!(c, 'I' | 'V' | 'i' | 'v')).count();
+    let (num, rest) = s.split_at(n);
+    let semi = match num.to_ascii_uppercase().as_str() {
+        "I" => 0,
+        "II" => 2,
+        "III" => 4,
+        "IV" => 5,
+        "V" => 7,
+        "VI" => 9,
+        "VII" => 11,
+        _ => return None,
+    };
+    Some((semi + acc, num.starts_with(['i', 'v']), rest))
+}
+
+/// A chord from its Roman numeral: upper case major, lower case minor; b or #
+/// before; after it o, +, 7, maj7, m7b5, o7, 9, maj9, add9, sus2, sus4, 7sus4,
+/// 6, 69, 11; /X for a secondary chord (V7/V); ^1 ^2 ^3 for the bass on the
+/// third, fifth or seventh. None if it does not parse.
+fn parse_harm(tok: &str) -> Option<Harm> {
+    let (tok, inv) = match tok.split_once('^') {
+        Some((a, b)) => (a, b.parse().ok()?),
+        None => (tok, 0),
+    };
+    let (main, of) = match tok.split_once('/') {
+        Some((a, b)) => (a, Some(numeral(b)?.0)),
+        None => (tok, None),
+    };
+    let (root, minor, rest) = numeral(main)?;
+    let q = match (minor, rest) {
+        (false, "") => Q_MAJ,
+        (true, "") => Q_MIN,
+        (_, "o") => Q_DIM,
+        (_, "+") => Q_AUG,
+        (false, "7") => Q_DOM7,
+        (true, "7") => Q_MIN7,
+        (_, "maj7") => Q_MAJ7,
+        (_, "m7b5") => Q_HDIM7,
+        (_, "o7") => Q_DIM7,
+        (false, "9") => Q_DOM9,
+        (true, "9") => Q_MIN9,
+        (_, "maj9") => Q_MAJ9,
+        (false, "add9") => Q_ADD9,
+        (true, "add9") => Q_MADD9,
+        (_, "sus2") => Q_SUS2,
+        (_, "sus4") => Q_SUS4,
+        (_, "7sus4") => Q_7SUS4,
+        (false, "6") => Q_SIX,
+        (true, "6") => Q_MIN6,
+        (_, "69") => Q_SIX9,
+        (_, "11") => Q_MIN11,
+        _ => return None,
+    };
+    if inv as usize >= q_iv(q).len().min(4) {
+        return None;
+    }
+    Some(Harm { root: (root + of.unwrap_or(0)).rem_euclid(12), q, inv })
+}
+
+/// A progression from its numerals (the pools are tested to parse).
+fn harms(s: &str) -> Vec<Harm> {
+    s.split_whitespace().map(|t| parse_harm(t).unwrap_or(Harm { root: 0, q: Q_MAJ, inv: 0 })).collect()
+}
+
+impl Harm {
+    /// Its pitch classes, above the tonic.
+    fn pcs(&self) -> Vec<i32> {
+        q_iv(self.q).iter().map(|i| (self.root + i).rem_euclid(12)).collect()
+    }
+    /// The pitch class its bass plays.
+    fn bass(&self) -> i32 {
+        let iv = q_iv(self.q);
+        (self.root + iv[(self.inv as usize).min(iv.len() - 1)]).rem_euclid(12)
+    }
+    fn mask(&self, tonic: i32) -> u16 {
+        self.pcs().iter().fold(0, |m, &p| m | 1 << (p + tonic).rem_euclid(12))
+    }
+}
+
+/// The scale a line runs through over chord `h`: the mode's, each chord tone
+/// it lacks put in place of the nearest scale tone that is not a chord tone.
+fn chord_scale(mode: usize, h: Harm) -> Vec<i32> {
+    let ct = h.pcs();
+    let mut sc = MODES[mode].to_vec();
+    let dist = |a: i32, b: i32| (a - b).rem_euclid(12).min((b - a).rem_euclid(12));
+    for &t in &ct {
+        if !sc.contains(&t)
+            && let Some(i) = (0..sc.len()).filter(|&i| !ct.contains(&sc[i])).min_by_key(|&i| dist(sc[i], t))
+        {
+            sc[i] = t;
+        }
+    }
+    sc.sort();
+    sc.dedup();
+    sc
+}
+
+/// The pitches in [lo, hi] (semitones above a tonic) of the pitch classes `pcs`.
+fn in_range(pcs: &[i32], lo: i32, hi: i32) -> Vec<i32> {
+    (lo..=hi).filter(|p| pcs.contains(&p.rem_euclid(12))).collect()
+}
+
+/// The index of the entry of `v` nearest `p`.
+fn nearest(v: &[i32], p: i32) -> usize {
+    (0..v.len()).min_by_key(|&i| (v[i] - p).abs()).unwrap_or(0)
 }
 
 /// Euclidean rhythm: `k` hits spread over `n` steps, rotated.
@@ -1709,39 +2171,39 @@ fn make_cell(r: &mut Rng, steps: u16, density: f32, lo: i32, hi: i32, cadence: b
     notes
 }
 
-/// A four-bar phrase: call, the call with a new ending, the call again, and a
-/// cadence (one-bar cells); or a two-bar call and its answer, which keeps the
-/// rhythm, moves the line and comes home.
-fn make_phrase(r: &mut Rng, density: f32, lo: i32, hi: i32) -> Vec<MNote> {
-    let shift = |v: &[MNote], by: u16| v.iter().map(|n| MNote { step: n.step + by, ..*n }).collect::<Vec<_>>();
-    if r.chance(0.5) {
-        let a = make_cell(r, 16, density, lo, hi, false);
-        let mut a2 = a.clone();
-        let k = a2.len();
-        for n in a2[k.saturating_sub(2)..].iter_mut() {
-            n.deg = (n.deg + r.pick(&[-2, -1, 1, 2, 3])).clamp(lo, hi);
-        }
-        let cad = make_cell(r, 16, density * 0.8, lo, hi, true);
-        let mut v = a.clone();
-        v.extend(shift(&a2, 16));
-        v.extend(shift(&a, 32));
-        v.extend(shift(&cad, 48));
-        v
-    } else {
-        let a = make_cell(r, 32, density, lo, hi, false);
-        let home = make_cell(r, 32, density, lo, hi, true);
-        // the answer: the call's rhythm (until its cadence), its pitches moved
-        let by = r.pick(&[-2, 2, -1, 1, 3]);
-        let mut b: Vec<MNote> =
-            a.iter().filter(|n| n.step < 24).map(|n| MNote { deg: (n.deg + by).clamp(lo, hi), ..*n }).collect();
-        b.extend(home.iter().filter(|n| n.step >= 24).copied());
-        if b.last().is_none_or(|n| n.step < 24) {
-            b.push(MNote { step: 24, len: 8, deg: 0, vel: 0.8 });
-        }
-        let mut v = a;
-        v.extend(shift(&b, 32));
-        v
+/// A cell moved by `by` scale degrees.
+fn moved(v: &[MNote], by: i32, lo: i32, hi: i32) -> Vec<MNote> {
+    v.iter().map(|n| MNote { deg: (n.deg + by).clamp(lo, hi), ..*n }).collect()
+}
+
+/// A sixteen-bar melody, developed from a two-bar motif: the motif (a), its
+/// sequence a step or a third away with a new ending (a'), a contrasting
+/// cell (b), a half cadence (c); then the motif inverted (a''), the
+/// contrast moved (b'), a new cell (d) and the cadence home (e).
+fn make_melody(r: &mut Rng, density: f32, lo: i32, hi: i32) -> Vec<MNote> {
+    let a = make_cell(r, 32, density, lo, hi, false);
+    let mut a2 = moved(&a, r.pick(&[1, -1, 2, -2, 3]), lo, hi);
+    let k = a2.len();
+    for n in a2[k.saturating_sub(2)..].iter_mut() {
+        n.deg = (n.deg + r.pick(&[-2, -1, 1, 2])).clamp(lo, hi);
     }
+    let db = (density * r.range(0.7, 1.4)).min(0.95);
+    let b = make_cell(r, 32, db, lo, hi, false);
+    let mut c = make_cell(r, 32, density * 0.8, lo, hi, true);
+    if let Some(n) = c.last_mut() {
+        // half way: rest on the fifth or the second, not home
+        n.deg = (n.deg + r.pick(&[4, 1, -3])).clamp(lo, hi);
+    }
+    let first = a.first().map_or(0, |n| n.deg);
+    let a3: Vec<MNote> = a.iter().map(|n| MNote { deg: (2 * first - n.deg).clamp(lo, hi), ..*n }).collect();
+    let b2 = moved(&b, r.pick(&[2, -2, 1]), lo, hi);
+    let d = make_cell(r, 32, density, lo, hi, false);
+    let e = make_cell(r, 32, density * 0.7, lo, hi, true);
+    let mut v = Vec::new();
+    for (k, cell) in [&a, &a2, &b, &c, &a3, &b2, &d, &e].iter().enumerate() {
+        v.extend(cell.iter().map(|n| MNote { step: n.step + 32 * k as u16, ..*n }));
+    }
+    v
 }
 
 /// An arpeggio's order: indices into the chord's tones over two octaves.
@@ -1772,6 +2234,8 @@ const L_KEYS: u32 = 1 << 10;
 const L_DRONE: u32 = 1 << 11;
 const L_TEX: u32 = 1 << 12;
 const L_RUMBLE: u32 = 1 << 13;
+/// a second voice: answering the melody, or walking the chords' guide tones
+const L_CTR: u32 = 1 << 14;
 
 const INTRO: u8 = 0;
 const BUILD: u8 = 1;
@@ -1801,6 +2265,8 @@ struct Bar<'a> {
     t0: f64,
     step: f64,
     swing: f32,
+    /// in 6/8 and 9/8, how late a beat's second and third eighths come (16ths)
+    lilt: f32,
     /// semitones added to every note
     lift: i32,
     ev: &'a mut Vec<(u64, Ev)>,
@@ -1808,8 +2274,14 @@ struct Bar<'a> {
 
 impl Bar<'_> {
     fn at(&self, step: f32, late: f32) -> u64 {
-        let odd = step.fract() == 0.0 && (step as i32) % 2 == 1;
-        let st = step + if odd { self.swing } else { 0.0 };
+        let whole = step.fract() == 0.0;
+        let odd = whole && (step as i32) % 2 == 1;
+        let lilt = match (whole, (step as i32).rem_euclid(6)) {
+            (true, 2) => self.lilt,
+            (true, 4) => self.lilt * 0.5,
+            _ => 0.0,
+        };
+        let st = step + if odd { self.swing } else { 0.0 } + lilt;
         (self.t0 + st as f64 * self.step + late as f64 * SR as f64).round().max(0.0) as u64
     }
     fn hit(&mut self, step: f32, late: f32, ch: usize, kind: u8, vel: f32) {
@@ -1840,8 +2312,16 @@ struct Song {
     root: i32,
     mode: usize,
     /// a chord per half bar, looping: the section's, drawn from the piece's two
-    prog: Vec<Chord>,
-    progs: [Vec<Chord>; 2],
+    prog: Vec<Harm>,
+    progs: Vec<Vec<Harm>>,
+    /// each section's key (semitones from the piece's tonic), and a pivot
+    /// chord (a half bar's index, the new key's dominant) leading into a change
+    lifts: Vec<i32>,
+    pivot: Option<(u32, Harm)>,
+    /// the melody's bar (of sixteen) this bar, and the counter-melody's last note
+    mel_bar: u32,
+    mel_pb: u32,
+    guide: i32,
     /// semitones the whole piece is lifted (synthwave's last chorus)
     lift: i32,
     /// the melody's range, scale degrees about the tonic
@@ -1869,13 +2349,32 @@ struct Song {
     walk: [f32; 4],
     phase: f32,
     period: f32,
+    /// the patterns' B variants, which 4-bar groups of the section play
+    /// them (bit k: group k), and the ambient pad's pulse (a beat's divisions)
+    kick2: [f32; 16],
+    snare2: [f32; 16],
+    hat2: [f32; 16],
+    perc2: [f32; 16],
+    bass2: [Step; 16],
+    arp2: Vec<u8>,
+    scheme: u8,
+    pulse: f32,
+    bass_style2: u8,
+    stab_shift: usize,
+    /// techno's hook: a bar of melody
+    hook: Vec<MNote>,
+    /// the piece's instruments, and whether ambient's texture is rain (or wind)
+    band: Band,
+    rain: bool,
     /// an optional layer sitting out this phrase
     mute: u32,
     anticipated: bool,
     bell_motif: bool,
     snare_kind: u8,
     /// each piece's tempo, tonic and mode, for --musicwav's summary
-    log: Vec<(f64, i32, usize)>,
+    log: Vec<(f64, i32, usize, &'static str)>,
+    pk: Polka,
+    tv: Tavern,
 }
 
 impl Song {
@@ -1889,8 +2388,13 @@ impl Song {
             human: 0.0,
             root: 0,
             mode: AEOLIAN,
-            prog: vec![Chord { deg: 0, kind: TRIAD }],
-            progs: [vec![Chord { deg: 0, kind: TRIAD }], vec![Chord { deg: 0, kind: TRIAD }]],
+            prog: vec![Harm { root: 0, q: Q_MAJ, inv: 0 }],
+            progs: vec![vec![Harm { root: 0, q: Q_MAJ, inv: 0 }]],
+            lifts: Vec::new(),
+            pivot: None,
+            mel_bar: 0,
+            mel_pb: 0,
+            guide: 0,
             lift: 0,
             prange: (-2, 9),
             plan: Vec::new(),
@@ -1915,20 +2419,49 @@ impl Song {
             walk: [0.0; 4],
             phase: 0.0,
             period: 32.0,
+            kick2: [0.0; 16],
+            snare2: [0.0; 16],
+            hat2: [0.0; 16],
+            perc2: [0.0; 16],
+            bass2: [Step::default(); 16],
+            arp2: vec![0],
+            scheme: 0,
+            pulse: 1.0,
+            bass_style2: 0,
+            stab_shift: 0,
+            hook: Vec::new(),
+            band: Band::default(),
+            rain: false,
             mute: 0,
             anticipated: false,
             bell_motif: false,
             snare_kind: 0,
             log: Vec::new(),
+            pk: Polka::default(),
+            tv: Tavern::default(),
         };
         song.new_piece(s);
         song.section_start(s);
         song
     }
 
+    /// 16ths a bar: 2/4 for polka, 4/4 for the rest.
+    fn bar_steps(&self) -> u32 {
+        match self.genre {
+            POLKA => 8,
+            TAVERN => self.tv.bar_steps.max(1),
+            _ => 16,
+        }
+    }
+
+    /// 16ths a beat: 6 in 6/8 and 9/8 (the beat a dotted quarter), else 4.
+    fn beat_steps(&self) -> u32 {
+        if self.genre == TAVERN { self.tv.beat_steps.max(1) } else { 4 }
+    }
+
     /// A 16th, in samples.
     fn step_len(&self) -> f64 {
-        60.0 / self.bpm * SR as f64 / 4.0
+        60.0 / self.bpm * SR as f64 / self.beat_steps() as f64
     }
 
     /// The tonic nearest `center` (MIDI), in [center - 6, center + 6).
@@ -1940,77 +2473,64 @@ impl Song {
         deg_semi(self.mode, deg)
     }
 
-    fn chord(&self, half: u32) -> Chord {
-        self.prog[half as usize % self.prog.len()]
-    }
-
-    /// The chord's root in [lo, lo + 12).
-    fn bass_note(&self, c: Chord, lo: i32) -> i32 {
-        let pc = self.root + self.semi(c.deg);
-        lo + (pc - lo).rem_euclid(12)
-    }
-
-    /// Scale degree `deg` moved to the nearest tone of chord `c`.
-    fn snap(&self, deg: i32, c: Chord) -> i32 {
-        let offs = chord_offsets(c.kind);
-        let is_tone = |d: i32| offs.iter().any(|&o| (d - c.deg - o).rem_euclid(7) == 0);
-        for k in [0, -1, 1, -2, 2, -3, 3] {
-            if is_tone(deg + k) {
-                return deg + k;
-            }
+    fn chord(&self, half: u32) -> Harm {
+        match self.pivot {
+            Some((h, c)) if h == half => c,
+            _ => self.prog[half as usize % self.prog.len()],
         }
-        deg
+    }
+
+    /// The chords of the bar just written, as pitch-class sets (bit k: pitch class k).
+    fn bar_chords(&self) -> Vec<u16> {
+        if self.genre == POLKA {
+            return vec![self.pk.mask];
+        }
+        if self.genre == TAVERN {
+            return vec![self.tv.mask];
+        }
+        let bar = self.sec_bar.saturating_sub(1);
+        (0..2).map(|h| self.chord(bar * 2 + h).mask(self.root + self.lift)).collect()
+    }
+
+    /// The chord's bass (its root, or the chord tone an inversion puts there) in [lo, lo + 12).
+    fn bass_note(&self, c: Harm, lo: i32) -> i32 {
+        lo + (self.root + c.bass() - lo).rem_euclid(12)
+    }
+
+    /// The chord's pitch classes (absolute).
+    fn pcs(&self, c: Harm) -> Vec<i32> {
+        let mut v: Vec<i32> = c.pcs().iter().map(|p| (self.root + p).rem_euclid(12)).collect();
+        v.dedup();
+        v
+    }
+
+    /// A melody note: scale degree `deg` (of the mode), on a strong beat or
+    /// long moved to the nearest tone of chord `c`, otherwise to the nearest
+    /// tone of its chord-scale. Semitones above the tonic.
+    fn mel_pitch(&self, deg: i32, c: Harm, strong: bool) -> i32 {
+        let p = self.semi(deg);
+        let set = if strong { c.pcs() } else { chord_scale(self.mode, c) };
+        (0..7).flat_map(|k| [p - k, p + k]).find(|q| set.contains(&q.rem_euclid(12))).unwrap_or(p)
     }
 
     /// A voicing of `c` within [lo, hi], moving as little as it can from
-    /// `prev` (close position, or drop-2 when `open`).
-    fn voicing(&self, c: Chord, lo: i32, hi: i32, prev: &[i32], open: bool) -> Vec<i32> {
-        let pcs: Vec<i32> =
-            chord_offsets(c.kind).iter().map(|&o| (self.root + self.semi(c.deg + o)).rem_euclid(12)).collect();
-        let k = pcs.len();
-        let mean = |v: &[i32]| v.iter().sum::<i32>() as f32 / v.len().max(1) as f32;
-        let centre = if prev.is_empty() { (lo + hi) as f32 / 2.0 } else { mean(prev) };
-        let mut best: Option<(f32, Vec<i32>)> = None;
-        for inv in 0..k {
-            let mut v = Vec::with_capacity(k);
-            let mut last = lo - 1;
-            for j in 0..k {
-                let pc = pcs[(inv + j) % k];
-                let n = last + 1 + (pc - (last + 1)).rem_euclid(12);
-                v.push(n);
-                last = n;
-            }
-            if open && k >= 4 {
-                v[k - 2] -= 12;
-                v.sort();
-                if v[0] < lo - 5 {
-                    v.iter_mut().for_each(|x| *x += 12);
-                }
-            }
-            for shift in [0, 12, -12] {
-                let w: Vec<i32> = v.iter().map(|x| x + shift).collect();
-                if w[0] < lo - 5 || w[k - 1] > hi {
-                    continue;
-                }
-                let cost = if prev.len() == k {
-                    w.iter().zip(prev).map(|(a, b)| (a - b).abs() as f32).sum::<f32>()
-                } else {
-                    (mean(&w) - centre).abs() * k as f32
-                };
-                if best.as_ref().is_none_or(|(c0, _)| cost < *c0) {
-                    best = Some((cost, w));
-                }
-            }
+    /// `prev` (close position, or drop-2 when `open`); an eleventh chord
+    /// leaves its fifth out.
+    fn voicing(&self, c: Harm, lo: i32, hi: i32, prev: &[i32], open: bool) -> Vec<i32> {
+        let mut pcs = self.pcs(c);
+        if pcs.len() > 5 {
+            pcs.remove(2);
         }
-        best.map(|b| b.1).unwrap_or_else(|| pcs.iter().map(|&pc| lo + (pc - lo).rem_euclid(12)).collect())
+        voicing_pcs(&pcs, lo, hi, prev, open)
     }
 
     /// Chord tones from `lo` upward over two octaves.
-    fn arp_tones(&self, c: Chord, lo: i32) -> Vec<i32> {
-        let mut v: Vec<i32> = chord_offsets(c.kind)
+    fn arp_tones(&self, c: Harm, lo: i32) -> Vec<i32> {
+        let mut v: Vec<i32> = self
+            .pcs(c)
             .iter()
-            .flat_map(|&o| {
-                let n = lo + (self.root + self.semi(c.deg + o) - lo).rem_euclid(12);
+            .flat_map(|&pc| {
+                let n = lo + (pc - lo).rem_euclid(12);
                 [n, n + 12]
             })
             .collect();
@@ -2019,58 +2539,61 @@ impl Song {
         v
     }
 
-    /// A progression for the genre: degrees from the mode's pool, chord
-    /// colours and lengths (in half bars) the genre likes.
-    fn draw_prog(&mut self) -> Vec<Chord> {
+    /// A progression from the genre's pool: eight bars, or sixteen with each
+    /// chord held two (ambient, sometimes).
+    fn draw_prog(&mut self) -> Vec<Harm> {
         let r = &mut self.rng;
-        let pool = progressions(self.mode);
-        let (degs, halves, kinds): (Vec<i32>, usize, Vec<u8>) = match self.genre {
-            AMBIENT => {
-                let mut d = r.pick(pool).to_vec();
-                if r.chance(0.3) {
-                    d.truncate(2);
-                }
-                (d, r.pick(&[4, 4, 8]), (0..4).map(|_| r.pick(&[ADD9, ADD9, SUS2, SEV, NINE, TRIAD])).collect())
-            }
-            TECHNO => {
-                let d = if r.chance(0.45) {
-                    vec![0]
-                } else {
-                    let p = r.pick(pool);
-                    p[..r.pick(&[2, p.len()]).min(p.len())].to_vec()
-                };
-                let h = if d.len() == 1 { 8 } else { r.pick(&[4, 8]) };
-                (d, h, vec![r.pick(&[SEV, SEV, NINE, SUS4])])
-            }
-            SYNTHWAVE => (
-                r.pick(pool).to_vec(),
-                r.pick(&[2, 2, 4]),
-                (0..4).map(|_| r.pick(&[TRIAD, TRIAD, TRIAD, ADD9, SUS2, SEV])).collect(),
-            ),
-            _ => {
-                let d = r.pick(pool).to_vec();
-                let h = if d.len() == 2 { 4 } else { r.pick(&[2, 2, 4]) };
-                (d, h, (0..4).map(|_| r.pick(&[SEV, SEV, NINE])).collect())
-            }
-        };
-        degs.iter()
-            .enumerate()
-            .flat_map(|(i, &d)| std::iter::repeat_n(Chord { deg: d, kind: kinds[i % kinds.len()] }, halves))
-            .collect()
+        let v = halves(r.pick(pool(self.genre, self.mode)));
+        if self.genre == AMBIENT && r.chance(0.35) {
+            v.chunks(2).flat_map(|c| [c[0], c[1], c[0], c[1]]).collect()
+        } else {
+            v
+        }
     }
 
-    /// The piece's two progressions (B another than A, when the pool allows).
+    /// The piece's progressions: A (verses), B (choruses), C (bridges and
+    /// breaks), each another than the last when the pool allows.
     fn draw_progs(&mut self) {
-        let a = self.draw_prog();
-        let mut b = self.draw_prog();
-        for _ in 0..6 {
-            if b.iter().map(|c| c.deg).ne(a.iter().map(|c| c.deg)) {
-                break;
+        let mut v: Vec<Vec<Harm>> = Vec::new();
+        for _ in 0..3 {
+            let mut p = self.draw_prog();
+            for _ in 0..6 {
+                if !v.contains(&p) {
+                    break;
+                }
+                p = self.draw_prog();
             }
-            b = self.draw_prog();
+            v.push(p);
         }
-        self.prog = a.clone();
-        self.progs = [a, b];
+        self.prog = v[0].clone();
+        self.progs = v;
+        self.plan_keys();
+    }
+
+    /// Each section's key: home, but two pieces in five move a step, a third
+    /// or a fourth away from a main section on (home again after two sections
+    /// half the time); synthwave's last chorus may lift too.
+    fn plan_keys(&mut self) {
+        let n = self.plan.len();
+        self.lifts = vec![0; n];
+        let r = &mut self.rng;
+        let mains: Vec<usize> = (2..n.saturating_sub(1)).filter(|&k| self.plan[k].kind == MAIN).collect();
+        if !mains.is_empty() && r.chance(0.4) {
+            let k = mains[r.below(mains.len())];
+            let m = r.pick(&[2, -2, 5, -5, 3, -3]);
+            let end = if r.chance(0.5) { (k + 2).min(n - 1) } else { n };
+            for l in self.lifts[k..end].iter_mut() {
+                *l = m;
+            }
+        }
+        if self.genre == SYNTHWAVE && r.chance(0.5) {
+            if let Some(k) = self.plan.iter().rposition(|x| x.kind == MAIN) {
+                let up = r.pick(&[1, 2, 2]);
+                for l in self.lifts[k..].iter_mut() {
+                    *l += up;
+                }
+            }
+        }
     }
 
     /// The next bar: its events into `ev`, starting at sample `t0`; its length in samples.
@@ -2083,18 +2606,28 @@ impl Song {
             }
             self.section_start(s);
         }
-        let len = 16.0 * self.step_len();
-        let mut b = Bar { t0, step: len / 16.0, swing: self.swing, lift: self.lift, ev };
         let sec = self.plan[self.sec];
+        // the last bar before a key change ends on the new key's dominant
+        if self.genre != POLKA && self.sec_bar + 1 == sec.bars {
+            let next = self.lifts.get(self.sec + 1).copied();
+            if let Some(l) = next.filter(|&l| l != self.lift) {
+                let root = (l - self.lift + 7).rem_euclid(12);
+                self.pivot = Some((self.sec_bar * 2 + 1, Harm { root, q: Q_DOM7, inv: 0 }));
+            }
+        }
+        let len = self.bar_steps() as f64 * self.step_len();
+        let lilt = if self.beat_steps() == 6 { 0.18 } else { 0.0 };
+        let mut b = Bar { t0, step: self.step_len(), swing: self.swing, lilt, lift: self.lift, ev };
         if self.sec_bar.is_multiple_of(8) && self.sec_bar > 0 && sec.kind == MAIN {
             // now and then an optional layer sits out a phrase
             let opt: &[u32] = match self.genre {
-                AMBIENT => &[L_BELL, L_DRONE, L_TEX, L_ARP],
-                TECHNO => &[L_OHAT, L_PERC, L_KEYS, L_HAT, L_SNARE],
-                SYNTHWAVE => &[L_ARP, L_OHAT, L_PAD, L_LEAD],
-                _ => &[L_LEAD, L_PERC],
+                AMBIENT => &[L_BELL, L_DRONE, L_TEX, L_HAT, L_KICK],
+                TECHNO => &[L_OHAT, L_PERC, L_KEYS, L_SNARE],
+                SYNTHWAVE => &[L_ARP, L_OHAT, L_PAD, L_PERC],
+                LOFI => &[L_LEAD, L_PERC, L_HAT],
+                _ => &[L_HAT],
             };
-            self.mute = if self.rng.chance(0.3) { self.rng.pick(opt) } else { 0 };
+            self.mute = if self.rng.chance(0.5) { self.rng.pick(opt) } else { 0 };
         }
         let m = sec.mask & !self.mute;
         for w in self.walk.iter_mut() {
@@ -2104,11 +2637,14 @@ impl Song {
             AMBIENT => self.ambient(s, &mut b, sec, m),
             TECHNO => self.techno(s, &mut b, sec, m),
             SYNTHWAVE => self.synthwave(s, &mut b, sec, m),
-            _ => self.lofi(s, &mut b, sec, m),
+            LOFI => self.lofi(s, &mut b, sec, m),
+            TAVERN => self.tavern(s, &mut b, sec, m),
+            _ => self.polka(&mut b, sec),
         }
         // the arc: an intro opens the melodic parts' filters, an outro closes them
         let x = (self.sec_bar as f32 + 1.0) / sec.bars as f32;
         let sweep = match sec.kind {
+            _ if self.genre >= POLKA => 20000.0,
             INTRO => 600.0 * (x * 5.05).exp2(),
             OUTRO => 600.0 * ((1.0 - x) * 3.5 + 1.5).exp2(),
             _ => 20000.0,
@@ -2133,7 +2669,10 @@ impl Song {
             AMBIENT => [2.0, 2.0, 0.0, 3.0, 1.0, 2.0, 0.0],
             TECHNO => [0.0, 2.0, 2.0, 0.0, 0.0, 3.0, 0.5],
             SYNTHWAVE => [1.5, 2.0, 0.0, 0.0, 0.0, 5.0, 1.5],
-            _ => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
+            LOFI => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
+            TAVERN => [2.0, 3.0, 0.0, 0.0, 3.0, 2.0, 0.0],
+            // polka: major mostly, now and then a minor one
+            _ => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         };
         self.mode = r.weighted(&w);
         self.sec = 0;
@@ -2146,36 +2685,77 @@ impl Song {
             AMBIENT => self.piece_ambient(s),
             TECHNO => self.piece_techno(s),
             SYNTHWAVE => self.piece_synthwave(s),
-            _ => self.piece_lofi(s),
+            LOFI => self.piece_lofi(s),
+            TAVERN => self.piece_tavern(s),
+            _ => self.piece_polka(s),
         }
-        self.log.push((self.bpm, self.root, self.mode));
+        let meter = match (self.genre, self.tv.kind) {
+            (POLKA, _) => "2/4",
+            (TAVERN, T_JIG) => "6/8 jig",
+            (TAVERN, T_SLIP) => "9/8 slip jig",
+            (TAVERN, T_REEL) => "4/4 reel",
+            (TAVERN, T_WALTZ) => "3/4",
+            (TAVERN, _) if self.tv.bar_steps == 12 => "3/4 ballad",
+            (TAVERN, _) => "4/4 ballad",
+            _ => "4/4",
+        };
+        self.log.push((self.bpm, self.root, self.mode, meter));
     }
 
     fn section_start(&mut self, s: &mut Synth) {
         let sec = self.plan[self.sec];
         self.mute = 0;
-        // which progression: B for later main sections, choruses, some breaks
+        // which 4-bar groups play the B patterns: they alternate, never all A
+        self.scheme = if sec.kind == MAIN {
+            self.rng.pick(&[0b0110, 0b1010, 0b0100, 0b1110, 0b0101, 0b1001, 0b0010])
+        } else {
+            self.rng.pick(&[0, 0b10])
+        };
+        // which progression: A for verses, B for choruses and later mains,
+        // C for bridges and breaks
         let mains_before = self.plan[..self.sec].iter().filter(|x| x.kind == MAIN).count();
         let r = &mut self.rng;
-        let use_b = match self.genre {
-            AMBIENT => sec.kind != INTRO && self.sec % 2 == 0,
-            TECHNO => (sec.kind == MAIN && mains_before >= 1) || (sec.kind == BREAK && r.chance(0.5)),
-            SYNTHWAVE => sec.mask & L_LEAD != 0 && self.piece % 2 == 0,
-            _ => sec.mask & L_LEAD != 0 && r.chance(0.6),
+        let which = match (self.genre, sec.kind) {
+            (POLKA | TAVERN, _) => 0,
+            (_, BREAK) => 2,
+            (AMBIENT, MAIN) => self.sec % 2,
+            (TECHNO, MAIN) => (mains_before >= 1) as usize,
+            (SYNTHWAVE, MAIN) => (sec.mask & L_LEAD != 0) as usize,
+            (LOFI, MAIN) => (sec.mask & L_LEAD != 0 || r.chance(0.3)) as usize,
+            _ => 0,
         };
-        self.prog = self.progs[use_b as usize].clone();
-        // synthwave's last chorus, up a step or a half (half the time)
-        let last_main = self.plan.iter().rposition(|x| x.kind == MAIN) == Some(self.sec);
-        if self.genre == SYNTHWAVE && last_main && sec.energy >= 1.0 && r.chance(0.5) {
-            self.lift = r.pick(&[1, 2, 2]);
+        self.prog = self.progs[which.min(self.progs.len() - 1)].clone();
+        self.pivot = None;
+        let dress = if self.genre == TAVERN {
+            self.tv.map.get(self.sec).map_or(0, |m| (m.1 / 2 % 2) as usize)
+        } else if self.genre == POLKA {
+            match self.pk.map.get(self.sec).map_or(0, |m| m.0) {
+                0 => 0,
+                1 => 1,
+                _ => r.below(3),
+            }
+        } else {
+            which
+        };
+        let lift = self.lifts.get(self.sec).copied().unwrap_or(0);
+        if lift != self.lift {
+            self.lift = lift;
+            self.pad_v.clear();
+            self.keys_v.clear();
         }
         match self.genre {
             AMBIENT => {
-                s.fx.wind_to = if sec.mask & L_TEX != 0 { r.range(0.06, 0.12) } else { 0.0 };
+                let tex = sec.mask & L_TEX != 0;
+                s.fx.wind_to = if tex && !self.rain { r.range(0.06, 0.12) } else { 0.0 };
+                s.fx.rain_to = if tex && self.rain { r.range(0.05, 0.1) } else { 0.0 };
                 if sec.kind == MAIN && r.chance(0.4) {
-                    self.phrase = make_phrase(r, 0.3, 0, 11);
+                    self.phrase = make_melody(r, 0.3, 0, 11);
                 }
-                self.arp = make_arp(r);
+                if r.chance(0.5) {
+                    self.arp = make_arp(r);
+                } else {
+                    self.arp2 = make_arp(r);
+                }
             }
             TECHNO => {
                 s.ch[CH_KICK].rev2 = if sec.mask & L_RUMBLE != 0 { 0.7 } else { 0.0 };
@@ -2183,6 +2763,7 @@ impl Song {
                 if sec.kind == MAIN && r.chance(0.5) {
                     self.bass = new_bass(r, self.mode, self.bass_style);
                 }
+                self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
                 if r.chance(0.4) {
                     let k = r.pick(&[3, 5, 7]);
                     let e = euclid(k, 16, r.below(16));
@@ -2194,19 +2775,58 @@ impl Song {
             }
             SYNTHWAVE => {
                 self.arp = make_arp(r);
+                self.arp2 = make_arp(r);
                 if sec.kind == MAIN && r.chance(0.3) {
-                    self.phrase = make_phrase(r, 0.55, -2, 9);
+                    self.phrase = make_melody(r, 0.55, -2, 9);
                 }
             }
-            _ => {
+            LOFI => {
                 if sec.kind == MAIN && r.chance(0.35) {
-                    self.phrase = make_phrase(r, 0.35, -2, 8);
+                    self.phrase = make_melody(r, 0.35, -2, 8);
                 }
             }
+            TAVERN => self.tavern_section(),
+            _ => self.polka_section(),
         }
+        self.dress(s, dress);
     }
 
     // -- the parts all genres share
+
+    /// The section's instruments: the B ones for choruses and bridges (`which`
+    /// 1 and 2), the A ones for verses, a fifth of the time the other way
+    /// round; the bass and drone keep theirs more often; the drum kits swap
+    /// together a third of the time.
+    fn dress(&mut self, s: &mut Synth, which: usize) {
+        let kit_b = self.rng.chance(0.35);
+        for k in 0..self.band.tones.len() {
+            let (ch, pair) = self.band.tones[k];
+            let melodic = matches!(ch, CH_PAD | CH_ARP | CH_LEAD | CH_BELL | CH_KEYS);
+            let b = if melodic { (which >= 1) != self.rng.chance(0.2) } else { which == 2 || self.rng.chance(0.25) };
+            s.ch[ch].patch = pair[b as usize];
+        }
+        for (ch, kits) in &self.band.kits {
+            s.ch[*ch].drums = kits[kit_b as usize].clone();
+        }
+    }
+
+    /// Whether this 4-bar group plays the B patterns.
+    fn var_b(&self) -> bool {
+        (self.scheme >> (self.sec_bar / 4 % 8)) & 1 == 1
+    }
+
+    /// The fill this bar ends with: 0 none, 1 a small one (closing a 4-bar
+    /// group), 2 a big one (closing an 8-bar group or the section).
+    fn fill(&self, sec: Sec) -> u8 {
+        let i = self.sec_bar;
+        if i + 1 == sec.bars || i % 8 == 7 {
+            2
+        } else if i % 4 == 3 {
+            1
+        } else {
+            0
+        }
+    }
 
     /// The pad: a chord at each change, voice-led, held until the next.
     fn pads(&mut self, b: &mut Bar, ch: usize, lo: i32, hi: i32, vel: f32, open: bool, tail: f32) {
@@ -2229,49 +2849,121 @@ impl Song {
         }
     }
 
-    /// The melody's bar: the phrase (varied each time round) against the chords.
+    /// The melody's bar: the sixteen-bar melody (varied each time round)
+    /// against the chords.
     fn melody(&mut self, b: &mut Bar, ch: usize, vel: f32, late: f32, legato: f32) {
-        let pb = (self.sec_bar % 4) as u16;
-        if pb == 0 && self.sec_bar > 0 {
+        let pb = self.mel_bar % 16;
+        if pb == 0 && self.mel_bar > 0 {
             self.vary_phrase();
         }
+        self.mel_pb = pb;
+        self.mel_bar += 1;
         let tonic = self.tonic_near(self.lead_center);
         for k in 0..self.phrase.len() {
             let n = self.phrase[k];
-            if n.step / 16 != pb {
+            if n.step as u32 / 16 != pb {
                 continue;
             }
             let st = n.step % 16;
             let c = self.chord(self.sec_bar * 2 + (st >= 8) as u32);
-            let mut d = n.deg + self.ptrans;
-            if st.is_multiple_of(8) || n.len >= 4 {
-                d = self.snap(d, c);
-            }
+            let p = self.mel_pitch(n.deg + self.ptrans, c, st.is_multiple_of(8) || n.len >= 4);
             let j = self.rng.range(0.0, late);
-            b.note(st as f32, j, ch, tonic + self.semi(d), n.vel * vel, n.len as f32 * legato, false);
+            b.note(st as f32, j, ch, tonic + p, n.vel * vel, n.len as f32 * legato, false);
         }
     }
 
-    /// A new turn of the phrase: as it was, moved, rephrased or re-ended.
+    /// A second voice answering the melody: in its rests of a quarter note
+    /// or more, a short figure of chord tones in its own register leading to
+    /// the melody's next note; where no melody plays, a slow line through
+    /// the chords' thirds and sevenths, each a step or so from the last.
+    fn counter(&mut self, b: &mut Bar, ch: usize, center: i32, vel: f32, answering: bool) {
+        let i = self.sec_bar;
+        let base = self.tonic_near(center);
+        if answering {
+            let pb = self.mel_pb;
+            let mut busy = [false; 16];
+            let mut next_pitch = Vec::new();
+            for n in self.phrase.iter().filter(|n| n.step as u32 / 16 == pb) {
+                let st = (n.step % 16) as usize;
+                for x in busy[st..(st + n.len as usize).min(16)].iter_mut() {
+                    *x = true;
+                }
+                next_pitch.push((st, n.deg));
+            }
+            let mut st = 0;
+            let mut figures = 0;
+            while st < 16 && figures < 2 {
+                let run = (st..16).take_while(|&k| !busy[k]).count();
+                if run >= 4 && st % 2 == 0 {
+                    let c = self.chord(i * 2 + (st >= 8) as u32);
+                    let tones: Vec<i32> = self.arp_tones(c, base - 7).into_iter().filter(|&p| p <= base + 7).collect();
+                    let k0 = nearest(&tones, self.guide.clamp(base - 7, base + 7)) as isize;
+                    let up = self.rng.bit_chance();
+                    let sixteenths = run >= 6 && self.rng.chance(0.3);
+                    let (count, gap) = if sixteenths { (4, 1) } else { ((run / 2).min(3), 2) };
+                    for j in 0..count {
+                        let k = (k0 + if up { j as isize } else { -(j as isize) }).clamp(0, tones.len() as isize - 1);
+                        let p = tones[k as usize];
+                        let at = st + j * gap;
+                        let v = vel * if j == 0 { 1.0 } else { 0.85 };
+                        b.note(at as f32, self.rng.range(0.0, self.human), ch, p, v, gap as f32 * 0.9, false);
+                        self.guide = p;
+                    }
+                    figures += 1;
+                    st += run;
+                } else {
+                    st += run.max(1);
+                }
+            }
+        } else {
+            for h in 0..2u32 {
+                let half = i * 2 + h;
+                let c = self.chord(half);
+                if !(half == 0 || self.chord(half - 1) != c || (h == 0 && i % 2 == 0)) {
+                    continue;
+                }
+                let iv = q_iv(c.q);
+                let guides: Vec<i32> = [iv[1], *iv.get(3).unwrap_or(&iv[2])]
+                    .iter()
+                    .map(|x| (self.root + c.root + x).rem_euclid(12))
+                    .collect();
+                let cands = in_range(&guides, base - 5, base + 9);
+                if cands.is_empty() {
+                    continue;
+                }
+                let p = cands[nearest(&cands, if self.guide == 0 { base } else { self.guide })];
+                let mut n = 1;
+                while n < 4 && self.chord(half + n) == c {
+                    n += 1;
+                }
+                b.note(h as f32 * 8.0, 0.0, ch, p, vel * 0.8, n as f32 * 8.0, false);
+                self.guide = p;
+            }
+        }
+    }
+
+    /// A new turn of the melody: as it was, moved, rephrased or re-ended.
     fn vary_phrase(&mut self) {
         let r = &mut self.rng;
-        match r.weighted(&[0.3, 0.25, 0.2, 0.15, 0.1]) {
+        match r.weighted(&[0.25, 0.25, 0.2, 0.15, 0.15]) {
             0 => self.ptrans = 0,
             1 => self.ptrans = r.pick(&[-2, 2, 1, -1, 3]),
             2 => {
-                // a note nudged a 16th
-                let k = r.below(self.phrase.len().max(1));
-                if let Some(n) = self.phrase.get_mut(k)
-                    && n.step % 16 != 0
-                    && n.step % 16 < 15
-                {
-                    n.step += 1;
-                    n.len = n.len.saturating_sub(1).max(1);
+                // a few notes nudged a 16th
+                for _ in 0..3 {
+                    let k = r.below(self.phrase.len().max(1));
+                    if let Some(n) = self.phrase.get_mut(k)
+                        && n.step % 16 != 0
+                        && n.step % 16 < 15
+                    {
+                        n.step += 1;
+                        n.len = n.len.saturating_sub(1).max(1);
+                    }
                 }
             }
             3 => {
-                // a couple of notes moved
-                for _ in 0..2 {
+                // a few notes moved
+                for _ in 0..4 {
                     let k = r.below(self.phrase.len().max(1));
                     if let Some(n) = self.phrase.get_mut(k) {
                         n.deg += r.pick(&[-2, -1, 1, 2]);
@@ -2279,10 +2971,10 @@ impl Song {
                 }
             }
             _ => {
-                // a new last bar, home again
-                let cad = make_cell(r, 16, 0.4, self.prange.0, self.prange.1, true);
-                self.phrase.retain(|n| n.step < 48);
-                self.phrase.extend(cad.iter().map(|n| MNote { step: n.step + 48, ..*n }));
+                // new last two bars, home again
+                let cad = make_cell(r, 32, 0.45, self.prange.0, self.prange.1, true);
+                self.phrase.retain(|n| n.step < 224);
+                self.phrase.extend(cad.iter().map(|n| MNote { step: n.step + 224, ..*n }));
             }
         }
     }
@@ -2299,52 +2991,90 @@ impl Song {
 
     fn piece_ambient(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
-        self.bpm = r.range(60.0, 76.0) as f64;
+        self.bpm = r.range(88.0, 100.0) as f64;
         self.swing = 0.0;
-        self.human = 0.01;
+        self.human = 0.006;
+        // a pulse throughout: the arpeggiated sequence from the first bar,
+        // soft percussion, and in fuller sections a bass pulse and a pad
+        // that swells with the beat
+        let core = L_PAD | L_ARP;
         self.plan = vec![
-            Sec { kind: INTRO, bars: 8, mask: L_DRONE | L_PAD, energy: 0.3 },
-            Sec { kind: MAIN, bars: 16, mask: L_DRONE | L_PAD | L_BELL, energy: 0.5 },
-            Sec {
-                kind: MAIN,
-                bars: 16,
-                mask: L_PAD | L_BELL | L_TEX | if r.chance(0.5) { L_ARP } else { 0 },
-                energy: 0.6,
-            },
+            Sec { kind: INTRO, bars: 4, mask: core | L_DRONE, energy: 0.35 },
+            Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_PERC, energy: 0.5 },
+            Sec { kind: MAIN, bars: 8, mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_CTR, energy: 0.65 },
         ];
+        if r.chance(0.5) {
+            self.plan.push(Sec { kind: BREAK, bars: 4, mask: L_PAD | L_BELL | L_TEX | L_DRONE, energy: 0.4 });
+        } else {
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_TEX, energy: 0.55 });
+        }
+        self.plan.push(Sec {
+            kind: MAIN,
+            bars: 8,
+            mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_KICK | L_TEX,
+            energy: 0.75,
+        });
+        self.plan.push(Sec {
+            kind: MAIN,
+            bars: 8,
+            mask: core | L_DRONE | L_BELL | L_PERC | L_TEX | L_CTR,
+            energy: 0.6,
+        });
         if r.chance(0.5) {
             self.plan.push(Sec {
                 kind: MAIN,
-                bars: 16,
-                mask: L_PAD | L_BASS | L_ARP | L_KICK | L_HAT | L_DRONE,
+                bars: 8,
+                mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_KICK,
                 energy: 0.7,
             });
-        } else {
-            self.plan.push(Sec { kind: BREAK, bars: 8, mask: L_PAD | L_TEX, energy: 0.35 });
         }
-        self.plan.push(Sec { kind: MAIN, bars: 16, mask: L_PAD | L_DRONE | L_BELL | L_TEX, energy: 0.5 });
-        self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_DRONE | L_PAD | L_TEX, energy: 0.3 });
-        self.phrase = make_phrase(r, 0.3, 0, 11);
+        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: core | L_DRONE | L_TEX, energy: 0.35 });
+        self.phrase = make_melody(r, 0.3, 0, 11);
         self.arp = make_arp(r);
-        self.arp_rate = r.pick(&[2, 2, 4]);
+        self.arp2 = make_arp(r);
+        self.arp_rate = r.pick(&[2, 2, 1]);
+        self.pulse = r.pick(&[1.0, 2.0]);
         self.lead_center = 78;
+        // a shaker in 8ths (A) or 16ths (B); a soft kick on the one (and three);
+        // a rim on two and four (A) or the off-beats (B)
+        self.perc = std::array::from_fn(|i| match i % 4 {
+            0 => 0.4,
+            2 => 0.28,
+            _ => 0.0,
+        });
+        self.perc2 = std::array::from_fn(|i| [0.42, 0.18, 0.3, 0.2][i % 4]);
         self.kick = [0.0; 16];
-        self.kick[0] = 0.6;
-        self.kick[8] = if r.chance(0.5) { 0.4 } else { 0.0 };
-        for i in 0..16 {
-            self.hat[i] = if i % 2 == 0 { if i % 4 == 0 { 0.5 } else { 0.35 } } else { 0.0 };
+        self.kick[0] = 0.55;
+        self.kick2 = self.kick;
+        self.kick2[8] = 0.4;
+        if r.chance(0.5) {
+            self.kick2[10] = 0.3;
         }
+        self.hat = [0.0; 16];
+        self.hat[4] = 0.35;
+        self.hat[12] = 0.35;
+        self.hat2 = std::array::from_fn(|i| if i % 4 == 2 { 0.25 } else { 0.0 });
+        self.hat2[12] = 0.35;
         self.prange = (0, 11);
         sounds_ambient(r, s);
+        self.band = band_ambient(r, s);
+        self.rain = r.chance(0.4);
         self.draw_progs();
     }
 
     fn ambient(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let e = sec.energy;
         let i = self.sec_bar;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
         s.ch[CH_PAD].cut = (0.9 * self.walk[0] + 1.2 * (e - 0.5)).exp2();
         s.ch[CH_BELL].cut = 1.0;
-        s.rev_wet = 0.5 + 0.12 * self.walk[1];
+        s.rev_wet = 0.45 + 0.1 * self.walk[1];
+        // the pad pulses with the beat where the bass does, its peaks on the beats
+        let pad = &mut s.ch[CH_PAD];
+        pad.swell = if m & L_BASS != 0 { 0.35 } else { 0.0 };
+        pad.swell_rate = (self.bpm / 60.0) as f32 * self.pulse;
+        pad.swell_ph = 0.25;
         if m & L_PAD != 0 {
             self.pads(b, CH_PAD, 48, 76, 0.55 + 0.25 * e, true, 6.0);
         }
@@ -2357,80 +3087,107 @@ impl Song {
             }
         }
         if m & L_BASS != 0 {
-            for h in 0..2 {
-                let half = i * 2 + h;
-                let c = self.chord(half);
-                if half == 0 || self.chord(half - 1) != c {
-                    let n = self.bass_note(c, 36);
-                    b.note(h as f32 * 8.0, 0.0, CH_BASS, n, 0.8, 15.0, false);
-                }
+            // a soft pulse on the chord's root: quarters (A) or 8ths (B)
+            let every = if vb { 2 } else { 4 };
+            for st in (0..16).step_by(every) {
+                let c = self.chord(i * 2 + (st >= 8) as u32);
+                let n = self.bass_note(c, 36);
+                let v = if st % 8 == 0 { 0.8 } else { 0.55 };
+                b.note(st as f32, 0.0, CH_BASS, n, v, every as f32 * 0.8, false);
             }
         }
         if m & L_BELL != 0 {
-            if i.is_multiple_of(2) {
-                self.bell_motif = self.rng.chance(0.55);
-            }
+            // the motif in the B groups, loose notes in the A ones
+            self.bell_motif = vb;
             if self.bell_motif {
-                let pb = (i % 4) as u16;
-                if pb == 0 && i > 0 {
+                let pb = self.mel_bar % 16;
+                if pb == 0 && self.mel_bar > 0 {
                     self.vary_phrase();
                 }
+                self.mel_pb = pb;
+                self.mel_bar += 1;
                 let tonic = self.tonic_near(self.lead_center);
                 for k in 0..self.phrase.len() {
                     let n = self.phrase[k];
-                    if n.step / 16 != pb || self.rng.chance(0.15) {
+                    if n.step as u32 / 16 != pb || self.rng.chance(0.1) {
                         continue;
                     }
                     let st = n.step % 16;
                     let c = self.chord(i * 2 + (st >= 8) as u32);
-                    let mut d = self.penta(n.deg + self.ptrans);
-                    if st.is_multiple_of(8) {
-                        d = self.snap(d, c);
-                    }
+                    let p = self.mel_pitch(self.penta(n.deg + self.ptrans), c, st.is_multiple_of(8));
                     let j = self.rng.range(0.0, self.human);
-                    b.note(st as f32, j, CH_BELL, tonic + self.semi(d), 0.35 + 0.35 * n.vel, 4.0, false);
+                    b.note(st as f32, j, CH_BELL, tonic + p, 0.35 + 0.35 * n.vel, 4.0, false);
                 }
             } else {
                 for beat in 0..4 {
-                    if !self.rng.chance(0.16 + 0.22 * e) {
+                    if !self.rng.chance(0.25 + 0.25 * e) || (fill > 0 && beat == 3) {
                         continue;
                     }
                     let st = beat * 4 + self.rng.pick(&[0, 0, 2]);
                     let c = self.chord(i * 2 + (st >= 8) as u32);
-                    let offs = chord_offsets(c.kind);
-                    let d = c.deg + self.rng.pick(offs) + 7 * self.rng.below(2) as i32;
-                    let d = self.penta(d);
-                    let note = self.tonic_near(72) + self.semi(d);
+                    let pc = self.rng.pick(&self.pcs(c));
+                    let base = self.tonic_near(72);
+                    let note = base + (pc - base).rem_euclid(12) + 12 * self.rng.below(2) as i32;
                     let j = self.rng.range(0.0, self.human);
                     b.note(st as f32, j, CH_BELL, note, self.rng.range(0.3, 0.65), 4.0, false);
                 }
             }
+            if m & L_CTR != 0 {
+                // the ocarina answers the bells' motif, or walks the chords' guide tones
+                let answering = self.bell_motif;
+                self.counter(b, CH_LEAD, 66, 0.55, answering);
+            }
         }
         if m & L_ARP != 0 {
+            // the sequence: thin at first in the intro, an order per variant,
+            // and a rising flourish to close an 8-bar group
             let rate = self.arp_rate;
+            let thin = sec.kind == INTRO && i < 2;
             for st in (0..16).step_by(rate) {
-                if !self.rng.chance(0.55 + 0.4 * e) {
+                if fill == 2 && st >= 12 {
+                    continue;
+                }
+                if !self.rng.chance(if thin { 0.5 } else { 0.9 }) {
                     continue;
                 }
                 let c = self.chord(i * 2 + (st >= 8) as u32);
                 let tones = self.arp_tones(c, self.tonic_near(72) - 5);
-                let k = self.arp[(st / rate) % self.arp.len()] as usize;
-                let vel = if st % 8 == 0 { 0.6 } else { 0.42 };
+                let order = if vb { &self.arp2 } else { &self.arp };
+                let k = order[(st / rate) % order.len()] as usize;
+                let vel = if st % 4 == 0 { 0.6 } else { 0.42 };
                 b.note(st as f32, 0.0, CH_ARP, tones[k % tones.len()], vel, rate as f32 * 2.0, false);
             }
+            if fill == 2 {
+                let c = self.chord(i * 2 + 1);
+                let tones = self.arp_tones(c, self.tonic_near(72) - 5);
+                for (k, st) in (12..16).enumerate() {
+                    let n = tones[(k + 2).min(tones.len() - 1)];
+                    b.note(st as f32, 0.0, CH_ARP, n, 0.4 + 0.08 * k as f32, 2.0, false);
+                }
+            }
         }
-        if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_KICK, 0, self.kick[st]);
+        if m & L_PERC != 0 {
+            let p = if vb { self.perc2 } else { self.perc };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    let j = self.rng.range(0.0, self.human);
+                    b.hit(st as f32, j, CH_HAT, HAT_C, v * self.rng.range(0.7, 1.0));
                 }
             }
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                if self.hat[st] > 0.0 {
-                    let j = self.rng.range(0.0, self.human);
-                    b.hit(st as f32, j, CH_HAT, HAT_C, self.hat[st] * self.rng.range(0.7, 1.0));
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    b.hit(st as f32, self.rng.range(0.0, self.human), CH_PERC, RIM, v);
+                }
+            }
+        }
+        if m & L_KICK != 0 {
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(fill == 2 && st >= 8) {
+                    b.hit(st as f32, 0.0, CH_KICK, 0, v);
                 }
             }
         }
@@ -2441,51 +3198,60 @@ impl Song {
     fn piece_techno(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
         self.bpm = if self.piece == 1 {
-            r.range(124.0, 132.0) as f64
+            r.range(128.0, 136.0) as f64
         } else {
-            (self.bpm + r.range(-2.0, 2.0) as f64).clamp(122.0, 134.0)
+            (self.bpm + r.range(-3.0, 3.0) as f64).clamp(128.0, 138.0)
         };
         self.swing = r.pick(&[0.0, 0.0, 0.0, 0.08, 0.15]);
         self.human = 0.0;
         let rumble = if r.chance(0.6) { L_RUMBLE } else { 0 };
         let stabs = if r.chance(0.6) { L_KEYS } else { 0 };
         let drums = L_KICK | L_HAT | L_OHAT | L_SNARE | L_PERC;
+        let brk =
+            L_PAD | L_TEX | L_KEYS | if r.chance(0.6) { L_BASS } else { 0 } | if r.chance(0.5) { L_HAT } else { 0 };
         self.plan = vec![
-            Sec { kind: INTRO, bars: 16, mask: L_KICK | L_HAT | if r.chance(0.5) { L_PERC } else { 0 }, energy: 0.35 },
-            Sec { kind: BUILD, bars: r.pick(&[8, 16]), mask: L_KICK | L_HAT | L_OHAT | L_SNARE | L_BASS, energy: 0.55 },
-            Sec { kind: MAIN, bars: 32, mask: drums | L_BASS | rumble | stabs, energy: 0.8 },
-            Sec {
-                kind: BREAK,
-                bars: 16,
-                mask: L_PAD | L_TEX | if r.chance(0.6) { L_BASS } else { 0 } | if r.chance(0.4) { L_HAT } else { 0 },
-                energy: 0.3,
-            },
-            Sec { kind: MAIN, bars: 32, mask: drums | L_BASS | L_RUMBLE | L_KEYS, energy: 0.95 },
+            Sec { kind: INTRO, bars: 8, mask: L_KICK | L_HAT | L_PERC, energy: 0.4 },
+            Sec { kind: BUILD, bars: 8, mask: L_KICK | L_HAT | L_OHAT | L_SNARE | L_BASS, energy: 0.6 },
+            Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | rumble | stabs, energy: 0.8 },
+            Sec { kind: BREAK, bars: 8, mask: brk, energy: 0.35 },
+            Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | L_RUMBLE | L_KEYS | L_LEAD, energy: 0.95 },
         ];
-        if r.chance(0.4) {
-            self.plan.push(Sec { kind: BREAK, bars: 8, mask: L_PAD | L_KEYS | L_HAT, energy: 0.4 });
-            self.plan.push(Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | rumble, energy: 0.9 });
+        if r.chance(0.5) {
+            self.plan.push(Sec { kind: BREAK, bars: 4, mask: L_PAD | L_KEYS | L_HAT | L_BASS, energy: 0.45 });
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_BASS | rumble | L_KEYS | L_LEAD, energy: 0.9 });
         }
-        self.plan.push(Sec { kind: OUTRO, bars: 16, mask: L_KICK | L_HAT | L_PERC | L_BASS, energy: 0.45 });
+        self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_KICK | L_HAT | L_PERC | L_BASS, energy: 0.5 });
+        // A: four on the floor, claps on two and four, 8ths of hats with 16ths
+        // among them; B: a ghost kick before the bar, an extra clap and a
+        // ghost, 16ths of hats throughout
         self.kick = std::array::from_fn(|i| if i % 4 == 0 { 1.0 } else { 0.0 });
+        self.kick2 = self.kick;
+        self.kick2[r.pick(&[15, 14, 11])] = 0.5;
         self.snare = [0.0; 16];
         self.snare[4] = 0.9;
         self.snare[12] = 0.9;
-        if r.chance(0.3) {
-            self.snare[r.pick(&[7, 15, 14])] = 0.45;
-        }
+        self.snare2 = self.snare;
+        self.snare2[r.pick(&[7, 15, 14])] = 0.45;
+        self.snare2[r.pick(&[10, 3, 9])] = 0.22;
         let acc = r.range(0.7, 0.9);
         self.hat = std::array::from_fn(|i| [0.3, 0.2, acc, 0.22][i % 4]);
+        self.hat2 = std::array::from_fn(|i| [0.32, 0.26, acc, 0.28][i % 4]);
         self.ohat = std::array::from_fn(|i| if i % 4 == 2 { 0.55 } else { 0.0 });
         let e = euclid(r.pick(&[3, 5, 7]), 16, r.below(16));
         self.perc = std::array::from_fn(|i| if e[i] { 0.6 } else { 0.0 });
+        let e2 = euclid(r.pick(&[4, 5, 6, 9]), 16, r.below(16));
+        self.perc2 = std::array::from_fn(|i| if e2[i] { 0.55 } else { 0.0 });
         self.perc_kind = r.pick(&[RIM, RIM, TOM_MID, SHAKER]);
         let st = euclid(r.pick(&[3, 3, 5]), r.pick(&[8, 16]), r.below(8));
         self.stab = std::array::from_fn(|i| if st[i % st.len()] { 0.8 } else { 0.0 });
         self.bass_style = if r.chance(0.65) { 0 } else { 1 };
         self.bass = new_bass(r, self.mode, self.bass_style);
-        self.period = r.pick(&[16.0, 24.0, 32.0, 48.0]);
+        self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
+        self.period = r.pick(&[8.0, 16.0, 24.0, 32.0]);
+        self.hook = make_cell(r, 16, 0.45, 0, 9, false);
+        self.lead_center = r.pick(&[67, 69, 72]);
         sounds_techno(r, s, self.bass_style);
+        self.band = band_techno(r, s, self.bass_style == 0);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
     }
@@ -2494,6 +3260,8 @@ impl Song {
         let e = sec.energy;
         let i = self.sec_bar;
         let left = sec.bars - i;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
         let next_main = self.plan.get(self.sec + 1).is_some_and(|x| x.kind == MAIN);
         // the acid filter: a slow sweep over `period` bars, a walk, the energy
         self.phase = (self.phase + 1.0 / self.period).fract();
@@ -2503,22 +3271,38 @@ impl Song {
         s.ch[CH_PAD].cut = (0.7 * self.walk[1] + (left as f32 / sec.bars as f32 - 0.5) * -1.5).exp2();
         s.ch[CH_KEYS].cut = (0.8 * self.walk[2] + 0.5 * sweep).exp2();
         let pre_drop = next_main && left == 1 && sec.kind != OUTRO;
+        let rolling = next_main && ((sec.kind == BREAK && left <= 4) || (sec.kind == BUILD && left <= 2));
+        // in a main section, an 8-bar group ends with the kick out for a beat
+        // now and then, and a snare run; a 4-bar group with a short flourish
+        let big = fill == 2 && sec.kind == MAIN && !pre_drop;
+        let drop = big && self.rng.chance(0.4);
         if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 && !(pre_drop && st >= 8) {
-                    b.hit(st as f32, 0.0, CH_KICK, 0, self.kick[st]);
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(pre_drop && st >= 8) && !(drop && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_KICK, 0, v);
                 }
-            }
-            if i % 8 == 7 && self.rng.chance(0.25) {
-                b.hit(self.rng.pick(&[14.0, 15.0]), 0.0, CH_KICK, 0, 0.55);
             }
         }
-        let rolling = next_main && ((sec.kind == BREAK && left <= 4) || (sec.kind == BUILD && left <= 2));
         if m & L_SNARE != 0 && !rolling {
-            for st in 0..16 {
-                if self.snare[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_SNARE, 0, self.snare[st]);
+            let p = if vb { self.snare2 } else { self.snare };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(big && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_SNARE, 0, v);
                 }
+            }
+        }
+        if big {
+            for st in 12..16 {
+                b.hit(st as f32, 0.0, CH_SNARE, 1, 0.3 + 0.12 * (st - 12) as f32);
+            }
+        } else if fill == 1 && sec.kind == MAIN {
+            if self.rng.chance(0.5) {
+                for (k, st) in [13.0, 14.0, 15.0].iter().enumerate() {
+                    b.hit(*st, 0.0, CH_SNARE, 1, 0.25 + 0.1 * k as f32);
+                }
+            } else {
+                b.hit(15.0, 0.0, CH_HAT, HAT_O, 0.5);
             }
         }
         if rolling {
@@ -2536,41 +3320,43 @@ impl Song {
             b.ev.push((b.at(0.0, 0.0), Ev::Riser { secs: b.secs(16.0 * left as f32), vel: 0.5 }));
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                let v = self.hat[st];
-                if v > 0.0 && (st % 4 == 2 || self.rng.chance(0.2 + 0.75 * e)) {
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && (st % 4 == 2 || vb || self.rng.chance(0.2 + 0.75 * e)) {
                     b.hit(st as f32, 0.0, CH_HAT, HAT_C, v * self.rng.range(0.8, 1.0));
                 }
             }
         }
         if m & L_OHAT != 0 {
             for st in 0..16 {
-                if self.ohat[st] > 0.0 {
+                if self.ohat[st] > 0.0 && !(fill == 1 && st == 14) {
                     b.hit(st as f32, 0.0, CH_HAT, HAT_O, self.ohat[st]);
                 }
             }
         }
         if m & L_PERC != 0 {
-            for st in 0..16 {
-                if self.perc[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_PERC, self.perc_kind, self.perc[st] * self.rng.range(0.8, 1.0));
+            let p = if vb { self.perc2 } else { self.perc };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    b.hit(st as f32, 0.0, CH_PERC, self.perc_kind, v * self.rng.range(0.8, 1.0));
                 }
             }
         }
-        if i == 0 && sec.kind == MAIN {
-            b.hit(0.0, 0.0, CH_CYM, 0, 0.8);
+        if sec.kind == MAIN && i.is_multiple_of(8) {
+            b.hit(0.0, 0.0, CH_CYM, 0, if i == 0 { 0.8 } else { 0.55 });
         }
         if m & L_BASS != 0 {
             let c = self.chord(i * 2);
             let root = self.bass_note(c, self.tonic_near(36) - 3);
-            let prev_slide = self.bass[15].on && self.bass[15].slide;
+            let line = if vb { self.bass2 } else { self.bass };
+            let prev_slide = line[15].on && line[15].slide;
             for st in 0..16 {
-                let x = self.bass[st];
-                if !x.on {
+                let x = line[st];
+                if !x.on || (drop && st >= 12) {
                     continue;
                 }
-                let slide_in = if st == 0 { prev_slide } else { self.bass[st - 1].on && self.bass[st - 1].slide };
-                let next_on = self.bass[(st + 1) % 16].on;
+                let slide_in = if st == 0 { prev_slide } else { line[st - 1].on && line[st - 1].slide };
+                let next_on = line[(st + 1) % 16].on;
                 let len = if x.slide && next_on { 1.15 } else { 0.55 };
                 let vel = if x.accent { 1.0 } else { 0.72 };
                 b.note(st as f32, 0.0, CH_BASS, root + x.note, vel, len, slide_in && self.bass_style == 0);
@@ -2579,10 +3365,20 @@ impl Song {
         if m & L_KEYS != 0 {
             let c = self.chord(i * 2);
             let v = self.voicing(c, 55, 74, &self.keys_v, false);
+            // the stab pattern, shifted a 16th in the B groups
+            let shift = if vb { self.stab_shift } else { 0 };
             for st in 0..16 {
-                if self.stab[st] > 0.0 {
+                if self.stab[(st + 16 - shift) % 16] > 0.0 {
                     for &n in &v {
-                        b.note(st as f32, 0.0, CH_KEYS, n, self.stab[st] * self.rng.range(0.85, 1.0), 1.0, false);
+                        b.note(
+                            st as f32,
+                            0.0,
+                            CH_KEYS,
+                            n,
+                            self.stab[(st + 16 - shift) % 16] * self.rng.range(0.85, 1.0),
+                            1.0,
+                            false,
+                        );
                     }
                 }
             }
@@ -2591,22 +3387,36 @@ impl Song {
         if m & L_PAD != 0 {
             self.pads(b, CH_PAD, 50, 72, 0.6, false, 4.0);
         }
-        if i % 8 == 7 {
-            // phrase end: the line mutates a little
-            let r = &mut self.rng;
-            for _ in 0..r.pick(&[1, 1, 2, 3]) {
-                let k = r.below(16);
-                let x = &mut self.bass[k];
-                match r.below(4) {
-                    0 => x.on = !x.on || k == 0,
-                    1 => x.note = deg_semi(self.mode, r.pick(&[0, 0, 0, 7, 7, 2, 4, 6, -1])),
-                    2 => x.accent = !x.accent,
-                    _ => x.slide = !x.slide,
-                }
+        if m & L_LEAD != 0 {
+            // the hook: a bar of plucks, moved up in the B groups, the stabs answering
+            let tonic = self.tonic_near(self.lead_center);
+            let by = if vb { 2 } else { 0 };
+            for k in 0..self.hook.len() {
+                let n = self.hook[k];
+                let c = self.chord(i * 2 + (n.step >= 8) as u32);
+                let p = self.mel_pitch(n.deg + by, c, n.step % 8 == 0);
+                b.note(n.step as f32, 0.0, CH_LEAD, tonic + p, n.vel * 0.85, (n.len as f32).min(3.0) * 0.8, false);
             }
-            if r.chance(0.3) {
+        }
+        if i % 8 == 7 {
+            // the 8-bar group's end: the line mutates, and its variant with it
+            let r = &mut self.rng;
+            let n = r.pick(&[1, 2, 2, 3]);
+            self.bass = mutate_bass(r, &self.bass, self.mode, n);
+            self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
+            if r.chance(0.4) {
                 let k = r.pick(&[1, 3, 5, 7, 9, 11, 13, 15]);
                 self.hat[k] = if self.hat[k] > 0.0 { 0.0 } else { 0.22 };
+            }
+            self.stab_shift = r.pick(&[1, 2, 3, 6]);
+            if r.chance(0.4) {
+                // the hook changes a note or two
+                for _ in 0..2 {
+                    let k = r.below(self.hook.len().max(1));
+                    if let Some(n) = self.hook.get_mut(k) {
+                        n.deg += r.pick(&[-2, -1, 1, 2]);
+                    }
+                }
             }
         }
     }
@@ -2615,50 +3425,46 @@ impl Song {
 
     fn piece_synthwave(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
-        self.bpm = r.range(92.0, 112.0) as f64;
+        self.bpm = r.range(105.0, 120.0) as f64;
         self.swing = 0.0;
         self.human = 0.002;
-        let lead = L_LEAD | L_OHAT;
-        let beat = L_KICK | L_SNARE | L_HAT | L_BASS | L_PAD | L_ARP;
+        let verse = L_KICK | L_SNARE | L_HAT | L_BASS | L_PAD | L_ARP;
+        let chorus = verse | L_LEAD | L_OHAT | L_CTR;
+        let bridge = L_PAD | L_ARP | L_BASS | L_CTR | if r.chance(0.5) { L_LEAD } else { L_PERC } | L_HAT;
         self.plan = vec![
-            Sec { kind: INTRO, bars: 8, mask: L_PAD | L_ARP | if r.chance(0.5) { L_BASS } else { 0 }, energy: 0.3 },
-            Sec { kind: MAIN, bars: 16, mask: beat, energy: 0.6 },
-            Sec { kind: MAIN, bars: 16, mask: beat | lead, energy: 0.9 },
-            Sec {
-                kind: BREAK,
-                bars: 8,
-                mask: L_PAD | if r.chance(0.5) { L_LEAD } else { L_ARP } | if r.chance(0.5) { L_BASS } else { 0 },
-                energy: 0.4,
-            },
-            Sec { kind: MAIN, bars: 16, mask: beat | lead | L_PERC, energy: 1.0 },
+            Sec { kind: INTRO, bars: 4, mask: L_PAD | L_ARP | if r.chance(0.5) { L_BASS } else { 0 }, energy: 0.35 },
+            Sec { kind: MAIN, bars: 8, mask: verse, energy: 0.6 },
+            Sec { kind: MAIN, bars: 8, mask: chorus, energy: 0.9 },
+            Sec { kind: MAIN, bars: 8, mask: verse | L_PERC, energy: 0.65 },
+            Sec { kind: MAIN, bars: 8, mask: chorus, energy: 0.95 },
+            Sec { kind: BREAK, bars: 8, mask: bridge, energy: 0.5 },
+            Sec { kind: MAIN, bars: 8, mask: chorus | L_PERC, energy: 1.0 },
         ];
         if r.chance(0.4) {
-            self.plan.push(Sec { kind: MAIN, bars: 8, mask: beat & !L_ARP | L_LEAD, energy: 0.7 });
-            self.plan.push(Sec { kind: MAIN, bars: 16, mask: beat | lead, energy: 1.0 });
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: chorus, energy: 1.0 });
         }
-        self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_PAD | L_ARP | L_KICK, energy: 0.3 });
+        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: L_PAD | L_ARP | L_KICK, energy: 0.35 });
+        // A: the kick on one and three (or four on the floor), B: an extra
+        // kick, ghost snares; hats in 8ths (A) or 16ths (B)
         self.kick = [0.0; 16];
-        if r.chance(0.4) {
-            for i in (0..16).step_by(4) {
-                self.kick[i] = 0.95;
-            }
-        } else {
-            self.kick[0] = 1.0;
-            self.kick[8] = 0.95;
-            if r.chance(0.5) {
-                self.kick[r.pick(&[10, 7, 11])] = 0.75;
-            }
+        let four = r.chance(0.4);
+        for i in (0..16).step_by(if four { 4 } else { 8 }) {
+            self.kick[i] = 1.0;
         }
+        self.kick2 = self.kick;
+        self.kick2[r.pick(&[10, 7, 11, 14])] = 0.75;
         self.snare = [0.0; 16];
         self.snare[4] = 0.95;
         self.snare[12] = 0.95;
-        let sixteenths = r.chance(0.4);
-        self.hat = std::array::from_fn(|i| match (i % 4, sixteenths) {
-            (0, _) => 0.5,
-            (2, _) => 0.42,
-            (_, true) => 0.25,
+        self.snare2 = self.snare;
+        self.snare2[r.pick(&[15, 7])] = 0.25;
+        self.snare2[r.pick(&[10, 14, 3])] = 0.2;
+        self.hat = std::array::from_fn(|i| match i % 4 {
+            0 => 0.5,
+            2 => 0.42,
             _ => 0.0,
         });
+        self.hat2 = std::array::from_fn(|i| [0.45, 0.25, 0.4, 0.25][i % 4]);
         self.ohat = [0.0; 16];
         self.ohat[14] = 0.45;
         if r.chance(0.5) {
@@ -2666,12 +3472,15 @@ impl Song {
         }
         self.perc = [0.0; 16];
         self.bass_style = r.pick(&[0, 0, 1, 2]) as u8;
+        self.bass_style2 = r.pick(&[0, 1, 2, 2]) as u8;
         self.arp = make_arp(r);
+        self.arp2 = make_arp(r);
         self.arp_rate = r.pick(&[1, 1, 2]);
         self.lead_center = r.pick(&[72, 74, 76]);
-        self.phrase = make_phrase(r, 0.55, -2, 9);
+        self.phrase = make_melody(r, 0.55, -2, 9);
         self.prange = (-2, 9);
         sounds_synthwave(r, s);
+        self.band = band_synthwave(r, s);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
     }
@@ -2679,24 +3488,29 @@ impl Song {
     fn synthwave(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let e = sec.energy;
         let i = self.sec_bar;
-        let fill = i % 8 == 7 && m & L_SNARE != 0;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        let big = fill == 2 && m & L_SNARE != 0;
+        let small = fill == 1 && m & L_SNARE != 0;
         s.ch[CH_PAD].cut = (0.6 * self.walk[0] + (e - 0.7)).exp2();
         s.ch[CH_ARP].cut = (0.8 * self.walk[1] + 1.2 * (e - 0.6)).exp2();
         if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 && !(fill && st >= 12) {
-                    b.hit(st as f32, 0.0, CH_KICK, 0, self.kick[st]);
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(big && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_KICK, 0, v);
                 }
             }
         }
         if m & L_SNARE != 0 {
-            for st in 0..16 {
-                if self.snare[st] > 0.0 && !(fill && st >= 12) {
-                    b.hit(st as f32, 0.0, CH_SNARE, 0, self.snare[st]);
+            let p = if vb { self.snare2 } else { self.snare };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(big && st >= 12) {
+                    b.hit(st as f32, 0.0, CH_SNARE, if v < 0.5 { 1 } else { 0 }, v);
                 }
             }
         }
-        if fill {
+        if big {
             if self.rng.chance(0.6) {
                 let toms: &[(f32, u8)] = if self.rng.chance(0.5) {
                     &[(12.0, TOM_HI), (13.0, TOM_HI), (14.0, TOM_MID), (15.0, TOM_LO)]
@@ -2711,38 +3525,50 @@ impl Song {
                     b.hit(st as f32, 0.0, CH_SNARE, 1, 0.5 + 0.12 * (st - 12) as f32);
                 }
             }
+        } else if small {
+            // a flam into the next group: a ghost and the hat opened
+            b.hit(15.0, 0.0, CH_SNARE, 1, 0.35);
+            b.hit(14.0, 0.0, CH_HAT, HAT_O, 0.4);
         }
-        if i == 0 && sec.kind == MAIN && m & L_KICK != 0 {
-            b.hit(0.0, 0.0, CH_CYM, 0, 0.75);
+        if i.is_multiple_of(8) && sec.kind == MAIN && m & L_KICK != 0 {
+            b.hit(0.0, 0.0, CH_CYM, 0, if i == 0 { 0.75 } else { 0.5 });
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                if self.hat[st] > 0.0 {
-                    b.hit(st as f32, 0.0, CH_HAT, HAT_C, self.hat[st] * self.rng.range(0.85, 1.0));
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 {
+                    b.hit(st as f32, 0.0, CH_HAT, HAT_C, v * self.rng.range(0.85, 1.0));
                 }
             }
         }
         if m & L_OHAT != 0 {
             for st in 0..16 {
-                if self.ohat[st] > 0.0 {
+                if self.ohat[st] > 0.0 && !(small && st == 14) {
                     b.hit(st as f32, 0.0, CH_HAT, HAT_O, self.ohat[st]);
                 }
             }
         }
-        if m & L_PERC != 0 && i % 2 == 1 {
+        if m & L_PERC != 0 {
+            // a rim on the off-beat of four, a clap layering two and four in B
             b.hit(14.0, 0.0, CH_PERC, RIM, 0.5);
+            if vb {
+                b.hit(7.0, 0.0, CH_PERC, RIM, 0.35);
+            }
         }
         if m & L_BASS != 0 {
             let lo = self.tonic_near(36) - 4;
-            for st in (0..16).step_by(if self.bass_style == 2 { 1 } else { 2 }) {
+            // the verse's bass, or in a chorus the B groups' other one
+            let style = if e >= 0.9 && vb { self.bass_style2 } else { self.bass_style };
+            for st in (0..16).step_by(if style == 2 { 1 } else { 2 }) {
                 let c = self.chord(i * 2 + (st >= 8) as u32);
                 let root = self.bass_note(c, lo);
-                let (note, len, vel) = match self.bass_style {
+                let next = self.chord(i * 2 + (st >= 8) as u32 + 1);
+                let (note, len, vel) = match style {
                     0 => (root + if st % 4 == 2 { 12 } else { 0 }, 1.6, 0.85),
                     1 => {
-                        let next = self.chord(i * 2 + (st >= 8) as u32 + 1);
                         let n = if st % 8 == 6 && next != c {
-                            root + self.semi(c.deg + 4) - self.semi(c.deg)
+                            let fifth = (self.root + c.root + q_iv(c.q)[2]).rem_euclid(12);
+                            root + (fifth - root).rem_euclid(12)
                         } else {
                             root
                         };
@@ -2762,17 +3588,23 @@ impl Song {
             self.pads(b, CH_PAD, 52, 76, 0.6, false, 2.0);
         }
         if m & L_ARP != 0 {
+            // the arpeggio's order per variant; the B groups an octave up in a chorus
             let rate = self.arp_rate;
+            let up = if vb && e >= 0.9 { 12 } else { 0 };
             for st in (0..16).step_by(rate) {
                 let c = self.chord(i * 2 + (st >= 8) as u32);
                 let tones = self.arp_tones(c, self.tonic_near(64) - 4);
-                let k = self.arp[(st / rate) % self.arp.len()] as usize;
+                let order = if vb { &self.arp2 } else { &self.arp };
+                let k = order[(st / rate) % order.len()] as usize;
                 let vel = if st % 4 == 0 { 0.85 } else { 0.65 };
-                b.note(st as f32, 0.0, CH_ARP, tones[k % tones.len()], vel, rate as f32 * 0.8, false);
+                b.note(st as f32, 0.0, CH_ARP, tones[k % tones.len()] + up, vel, rate as f32 * 0.8, false);
             }
         }
         if m & L_LEAD != 0 {
             self.melody(b, CH_LEAD, 0.9, 0.0, 0.95);
+        }
+        if m & L_CTR != 0 {
+            self.counter(b, CH_BELL, self.lead_center - 9, 0.7, m & L_LEAD != 0);
         }
     }
 
@@ -2780,45 +3612,60 @@ impl Song {
 
     fn piece_lofi(&mut self, s: &mut Synth) {
         let r = &mut self.rng;
-        self.bpm = r.range(72.0, 90.0) as f64;
-        self.swing = r.range(0.12, 0.3);
-        self.human = 0.012;
+        self.bpm = r.range(85.0, 95.0) as f64;
+        self.swing = r.range(0.12, 0.28);
+        self.human = 0.01;
         let drums = L_KICK | L_SNARE | L_HAT | L_BASS | L_KEYS | L_TEX;
         self.plan = vec![
-            Sec { kind: INTRO, bars: 4, mask: L_KEYS | L_TEX | if r.chance(0.4) { L_BASS } else { 0 }, energy: 0.3 },
-            Sec { kind: MAIN, bars: 16, mask: drums, energy: 0.6 },
-            Sec { kind: MAIN, bars: 16, mask: drums | L_LEAD | L_PERC, energy: 0.75 },
+            Sec { kind: INTRO, bars: 4, mask: L_KEYS | L_TEX | if r.chance(0.6) { L_BASS } else { 0 }, energy: 0.35 },
+            Sec { kind: MAIN, bars: 8, mask: drums, energy: 0.6 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD | L_CTR, energy: 0.75 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_PERC | L_CTR, energy: 0.7 },
             Sec {
                 kind: BREAK,
-                bars: r.pick(&[4, 8]),
+                bars: 4,
                 mask: L_KEYS | L_TEX | if r.chance(0.5) { L_LEAD } else { L_BASS | L_HAT },
                 energy: 0.4,
             },
-            Sec { kind: MAIN, bars: 16, mask: drums | L_LEAD, energy: 0.8 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD | L_PERC | L_CTR, energy: 0.8 },
         ];
-        if r.chance(0.4) {
-            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums, energy: 0.65 });
+        if r.chance(0.5) {
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD, energy: 0.75 });
         }
-        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: L_KEYS | L_TEX, energy: 0.3 });
-        let kick: &[usize] = r.pick(&[&[0, 7, 10][..], &[0, 10, 11], &[0, 6, 9], &[0, 3, 10], &[0, 7, 9, 10]]);
+        self.plan.push(Sec { kind: OUTRO, bars: 4, mask: L_KEYS | L_TEX | L_BASS, energy: 0.35 });
+        // two boom-bap kicks (A and B), snares on two and four with more
+        // ghosts in B; hats in 8ths with a few 16ths (A) or swung 16ths (B)
+        let kicks: [&[usize]; 6] =
+            [&[0, 7, 10], &[0, 10, 11], &[0, 6, 9], &[0, 3, 10], &[0, 7, 9, 10], &[0, 8, 11, 14]];
+        let ka = r.below(kicks.len());
+        let kb = (ka + 1 + r.below(kicks.len() - 1)) % kicks.len();
         self.kick = [0.0; 16];
-        for &k in kick {
-            self.kick[k] = if k == 0 { 1.0 } else { 0.8 };
+        self.kick2 = [0.0; 16];
+        for (p, k) in [(&mut self.kick, ka), (&mut self.kick2, kb)] {
+            for &st in kicks[k] {
+                p[st] = if st == 0 { 1.0 } else { 0.8 };
+            }
         }
         self.snare = [0.0; 16];
         self.snare[4] = 0.85;
         self.snare[12] = 0.9;
+        self.snare2 = self.snare;
+        self.snare2[7] = 0.18;
+        self.snare2[15] = 0.2;
         self.snare_kind = if r.chance(0.3) { 1 } else { 0 };
         self.hat = std::array::from_fn(|i| match i % 4 {
             0 => 0.55,
             2 => 0.4,
-            _ => 0.18,
+            _ => 0.0,
         });
+        self.hat2 = std::array::from_fn(|i| [0.5, 0.22, 0.38, 0.26][i % 4]);
         self.perc = std::array::from_fn(|i| if i % 2 == 1 { 0.35 } else { 0.0 });
+        self.perc2 = std::array::from_fn(|i| [0.0, 0.3, 0.2, 0.35][i % 4]);
         self.lead_center = r.pick(&[72, 74, 76]);
-        self.phrase = make_phrase(r, 0.35, -2, 8);
+        self.phrase = make_melody(r, 0.4, -2, 8);
         self.anticipated = false;
         sounds_lofi(r, s);
+        self.band = band_lofi(r, s);
         self.prange = (-2, 8);
         let echo = r.pick(&[4.0, 3.0, 6.0]);
         s.dly.target = (self.step_len() * echo) as f32;
@@ -2829,44 +3676,58 @@ impl Song {
         let e = sec.energy;
         let i = self.sec_bar;
         let h = self.human;
-        let fill = i % 8 == 7;
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        // an 8-bar group closes with the drums out on the last beat (or a
+        // snare pickup), a 4-bar group with the kick dropped and ghosts
+        let gap = fill == 2 && self.rng.chance(0.5);
         s.ch[CH_KEYS].cut = (0.5 * self.walk[0]).exp2();
         if m & L_KICK != 0 {
-            for st in 0..16 {
-                if self.kick[st] > 0.0 && !(fill && st >= 8 && self.rng.chance(0.5)) {
+            let p = if vb { self.kick2 } else { self.kick };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(fill > 0 && st >= 12) {
                     let j = self.rng.range(0.0, h * 0.3);
-                    b.hit(st as f32, j, CH_KICK, 0, self.kick[st] * self.rng.range(0.9, 1.0));
+                    b.hit(st as f32, j, CH_KICK, 0, v * self.rng.range(0.9, 1.0));
                 }
             }
         }
         if m & L_SNARE != 0 {
-            for st in 0..16 {
-                if self.snare[st] > 0.0 {
+            let p = if vb { self.snare2 } else { self.snare };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(gap && st >= 12) {
                     let j = self.rng.range(0.004, h + 0.004);
-                    b.hit(st as f32, j, CH_SNARE, self.snare_kind, self.snare[st] * self.rng.range(0.85, 1.0));
+                    let kind = if v < 0.5 { 0 } else { self.snare_kind };
+                    b.hit(st as f32, j, CH_SNARE, kind, v * self.rng.range(0.85, 1.0));
                 }
             }
-            for st in [3usize, 7, 9, 15] {
-                if self.rng.chance(0.12 + 0.15 * e) {
+            for st in [3usize, 9] {
+                if self.rng.chance(0.1 + 0.15 * e) {
                     b.hit(st as f32, self.rng.range(0.0, h), CH_SNARE, 0, self.rng.range(0.12, 0.22));
+                }
+            }
+            if fill == 1 || (fill == 2 && !gap) {
+                for (k, st) in [13.0, 14.0, 15.0].iter().enumerate() {
+                    b.hit(*st, self.rng.range(0.0, h), CH_SNARE, 0, 0.14 + 0.06 * k as f32);
                 }
             }
         }
         if m & L_HAT != 0 {
-            for st in 0..16 {
-                if self.hat[st] > 0.0 && (st % 2 == 0 || self.rng.chance(0.25 + 0.4 * e)) {
+            let p = if vb { self.hat2 } else { self.hat };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && !(gap && st >= 12) {
                     let j = self.rng.range(0.0, h);
-                    b.hit(st as f32, j, CH_HAT, HAT_C, self.hat[st] * self.rng.range(0.7, 1.0));
+                    b.hit(st as f32, j, CH_HAT, HAT_C, v * self.rng.range(0.7, 1.0));
                 }
             }
-            if self.rng.chance(0.25) {
+            if vb || gap {
                 b.hit(14.0, self.rng.range(0.0, h), CH_HAT, HAT_O, 0.4);
             }
         }
         if m & L_PERC != 0 {
-            for st in 0..16 {
-                if self.perc[st] > 0.0 && self.rng.chance(0.7) {
-                    b.hit(st as f32, self.rng.range(0.0, h), CH_PERC, SHAKER, self.perc[st] * self.rng.range(0.6, 1.0));
+            let p = if vb { self.perc2 } else { self.perc };
+            for (st, &v) in p.iter().enumerate() {
+                if v > 0.0 && self.rng.chance(0.8) {
+                    b.hit(st as f32, self.rng.range(0.0, h), CH_PERC, SHAKER, v * self.rng.range(0.6, 1.0));
                 }
             }
         }
@@ -2881,30 +3742,50 @@ impl Song {
             self.anticipated = false;
             if c1 != c0 {
                 self.strum(b, 8.0, c1, 7.5, 0.55);
-            } else if self.rng.chance(0.55) {
+            } else if self.rng.chance(if vb { 0.75 } else { 0.45 }) {
                 let st = self.rng.pick(&[6.0, 10.0, 11.0]);
                 self.strum(b, st, c0, 16.0 - st, 0.42);
             }
-            if next != c1 && self.rng.chance(0.3) && i + 1 < sec.bars {
+            if next != c1 && self.rng.chance(if vb { 0.5 } else { 0.25 }) && i + 1 < sec.bars {
                 self.strum(b, 14.0, next, 16.0, 0.55);
                 self.anticipated = true;
+            }
+            let k = s.ch[CH_KEYS].patch;
+            if k.ks > 0.0 || k.s < 0.1 {
+                // a guitar or a piano dies away: strum again on the off-beats
+                for st in [6.0, 11.0] {
+                    let c = if st < 8.0 { c0 } else { c1 };
+                    self.strum(b, st, c, 4.0, 0.4);
+                }
+            }
+            if m & L_KICK == 0 {
+                // with no drums the keys keep moving: a broken chord over the second half
+                let tones = self.arp_tones(c1, 60);
+                let up = self.rng.bit_chance();
+                for (k, st) in [8.0, 10.0, 12.0].iter().enumerate() {
+                    let n = tones[if up { k + 1 } else { 3 - k }.min(tones.len() - 1)];
+                    b.note(*st, self.rng.range(0.0, h), CH_KEYS, n, 0.35, 3.5, false);
+                }
             }
         }
         if m & L_BASS != 0 {
             let lo = self.tonic_near(42) - 5;
             let next_root = self.bass_note(self.chord(i * 2 + 2), lo);
-            let approach = self.rng.chance(0.35) && next_root != self.bass_note(self.chord(i * 2 + 1), lo);
+            // the B groups push into the next chord a 16th early, or walk to it
+            let push = vb && next_root != self.bass_note(self.chord(i * 2 + 1), lo) && self.rng.chance(0.6);
+            let approach = !push && self.rng.chance(0.35) && next_root != self.bass_note(self.chord(i * 2 + 1), lo);
             for hh in 0..2u32 {
                 let c = self.chord(i * 2 + hh);
                 let root = self.bass_note(c, lo);
                 let st0 = hh as f32 * 8.0;
                 if hh == 1 && c == self.chord(i * 2) && self.rng.chance(0.4) {
-                    // the second half answers with the fifth
-                    b.note(st0 + 2.0, h * 0.5, CH_BASS, root + 7, 0.65, 2.0, false);
+                    // the second half answers with the fifth, or the octave pops
+                    let n = root + self.rng.pick(&[7, 12]);
+                    b.note(st0 + 2.0, h * 0.5, CH_BASS, n, 0.65, 2.0, false);
                     continue;
                 }
-                b.note(st0, h * 0.3, CH_BASS, root, 0.85, 5.8, false);
-                if !(hh == 1 && approach) && self.rng.chance(0.6) {
+                b.note(st0, h * 0.3, CH_BASS, root, 0.85, if hh == 1 && push { 5.0 } else { 5.8 }, false);
+                if !(hh == 1 && (approach || push)) && self.rng.chance(0.6) {
                     let n = root + self.rng.pick(&[7, 12, 7, 10]);
                     b.note(st0 + 6.0, h * 0.5, CH_BASS, n, 0.6, 1.8, false);
                 }
@@ -2913,14 +3794,650 @@ impl Song {
                 let n = next_root + self.rng.pick(&[-1, 1, -2]);
                 b.note(14.0, h * 0.5, CH_BASS, n, 0.6, 2.0, false);
             }
+            if push {
+                b.note(15.0, h * 0.3, CH_BASS, next_root, 0.8, 1.6, false);
+            }
         }
         if m & L_LEAD != 0 {
             self.melody(b, CH_LEAD, 0.8, h, 0.9);
         }
+        if m & L_CTR != 0 {
+            self.counter(b, CH_BELL, self.lead_center - 8, 0.6, m & L_LEAD != 0);
+        }
+    }
+
+    // -- polka
+
+    fn piece_polka(&mut self, s: &mut Synth) {
+        let tonic = self.tonic_near(74);
+        let mode = self.mode;
+        let minor = mode != IONIAN;
+        let r = &mut self.rng;
+        self.bpm = r.range(110.0, 130.0) as f64;
+        self.swing = 0.0;
+        self.human = 0.003;
+        let (a_plans, b_plans) = if minor { (POLKA_MINOR, POLKA_MINOR) } else { (POLKA_A, POLKA_B) };
+        // strain lengths, and whether a dogfight and a last trio follow: the
+        // piece lasts a minute and a half at least (bars of two beats)
+        let mut lens: [usize; 3] = std::array::from_fn(|_| if r.chance(0.6) { 16 } else { 8 });
+        let mut dog = r.chance(0.5);
+        let bar_s = 120.0 / self.bpm;
+        let total = |l: &[usize; 3], dog: bool| 10 + 2 * (l[0] + l[1] + l[2]) + if dog { 8 + l[2] } else { 0 };
+        while total(&lens, dog) as f64 * bar_s < 95.0 {
+            match lens.iter().position(|&x| x == 8) {
+                _ if !dog => dog = true,
+                Some(k) => lens[k] = 16,
+                None => break,
+            }
+        }
+        let [la, lb, lc] = lens;
+        let a = polka_strain(r, a_plans, la, 0, mode);
+        let mut b = polka_strain(r, b_plans, lb, 0, mode);
+        for _ in 0..4 {
+            if b.chords != a.chords {
+                break;
+            }
+            b = polka_strain(r, b_plans, lb, 0, mode);
+        }
+        // the trio: in the subdominant (a minor polka's, in its relative
+        // major), up or down so the tune stays in its range
+        let (up, down) = if minor { (3, -9) } else { (5, -7) };
+        let tk = if tonic + up < 80 { up } else { down };
+        let c = polka_strain(r, POLKA_A, lc, tk, IONIAN);
+        let na = a.chords.len() as u32;
+        let (nb, nc) = (b.chords.len() as u32, c.chords.len() as u32);
+        let all = L_KICK | L_SNARE | L_HAT | L_BASS | L_KEYS | L_LEAD | L_ARP;
+        let sec = |kind: u8, bars: u32, energy: f32| Sec { kind, bars, mask: all, energy };
+        let mut plan = vec![
+            (sec(INTRO, 4, 0.8), (0, 0, na - 4)),
+            (sec(MAIN, na, 0.8), (0, 0, 0)),
+            (sec(MAIN, na, 0.85), (0, 1, 0)),
+            (sec(MAIN, nb, 0.85), (1, 0, 0)),
+            (sec(MAIN, nb, 0.9), (1, 1, 0)),
+        ];
+        if r.chance(0.7) {
+            // two bars on the trio's dominant lead into it
+            plan.push((sec(BUILD, 2, 0.8), (2, 0, 0)));
+        }
+        plan.push((sec(MAIN, nc, 0.7), (2, 0, 0)));
+        plan.push((sec(MAIN, nc, 0.95), (2, 1, 0)));
+        // a dogfight (the instruments trading phrases) and the trio once more
+        let d = polka_strain(r, POLKA_B, 8, tk, IONIAN);
+        if dog {
+            plan.push((sec(MAIN, 8, 0.9), (3, 0, 0)));
+            plan.push((sec(MAIN, nc, 1.0), (2, 2, 0)));
+        }
+        plan.push((sec(OUTRO, 2, 1.0), (2, 0, 0)));
+        self.plan = plan.iter().map(|x| x.0).collect();
+        self.pk = Polka {
+            strains: vec![a, b, c, d],
+            map: plan.iter().map(|x| x.1).collect(),
+            tonic,
+            hats: r.chance(0.5),
+            b_other: r.chance(0.5),
+            lead: CH_LEAD,
+            ..Polka::default()
+        };
+        let trumpet = r.chance(0.5);
+        sounds_polka(r, s, trumpet);
+        self.band = band_polka(r, s);
+    }
+
+    /// A polka section begins: its tune as it goes this time through (a
+    /// repeat re-figures a bar, adds graces and turns the answers round), who
+    /// leads, and whether the other instrument doubles a third below.
+    fn polka_section(&mut self) {
+        let sec = self.plan[self.sec];
+        let (si, rep, _) = self.pk.map[self.sec];
+        let (chords, mode) = (self.pk.strains[si].chords.clone(), self.pk.strains[si].mode);
+        let mut mel = self.pk.strains[si].mel.clone();
+        let mut ans = self.pk.strains[si].ans.clone();
+        let r = &mut self.rng;
+        if rep > 0 && sec.kind == MAIN {
+            let bars = chords.len();
+            let b = r.below(bars - 1);
+            if b % 4 != 3 && r.chance(0.7) {
+                let prev = mel.iter().filter(|n| (n.step as usize) < 8 * b).last().map_or(7, |n| n.pitch);
+                let kind = r.pick(&MID_FIGS);
+                let fig = polka_figure(r, kind, chords[b], mode, prev, None, PK_LO, PK_HI);
+                mel.retain(|n| n.step as usize / 8 != b);
+                mel.extend(fig.iter().map(|n| PNote { step: n.step + 8 * b as u16, ..*n }));
+                mel.sort_by_key(|n| n.step);
+            }
+            polka_graces(r, &mut mel, 0.12);
+            // each answer's notes in reverse order: an upward figure turned down
+            let mut k = 0;
+            while k < ans.len() {
+                let bar = ans[k].step / 8;
+                let end = (k..ans.len()).find(|&j| ans[j].step / 8 != bar).unwrap_or(ans.len());
+                let pitches: Vec<i32> = ans[k..end].iter().map(|n| n.pitch).rev().collect();
+                for (n, p) in ans[k..end].iter_mut().zip(pitches) {
+                    n.pitch = p;
+                }
+                k = end;
+            }
+        }
+        let other_leads = (si == 1 && self.pk.b_other) || (si == 2 && rep == 2);
+        self.pk.lead = if other_leads { CH_ARP } else { CH_LEAD };
+        self.pk.trade = si == 3;
+        self.pk.thirds = sec.kind == MAIN && rep > 0 && (si == 2 || r.chance(0.5)) && !self.pk.trade;
+        self.pk.mel = mel;
+        self.pk.ans = ans;
+    }
+
+    /// A bar of polka: oom on the beats (the bass, root then fifth, walking
+    /// into a new strain now and then; the kick), pah off them (the chord,
+    /// short, with the snare), the tune, answers and thirds; rolls into a new
+    /// strain, a crash at its top; the trio's dominant leading in; a button
+    /// to end on.
+    fn polka(&mut self, b: &mut Bar, sec: Sec) {
+        let (si, rep, first) = self.pk.map[self.sec];
+        let (key, mode, bars) = {
+            let st = &self.pk.strains[si];
+            (st.key, st.mode, st.chords.len() as u32)
+        };
+        let e = sec.energy;
+        let i = self.sec_bar;
+        let bi = (i + first) % bars;
+        let last = i + 1 == sec.bars;
+        let dom = Harm { root: 7, q: Q_DOM7, inv: 0 };
+        let h = match sec.kind {
+            BUILD => dom,
+            OUTRO if i == 0 => dom,
+            OUTRO => Harm { root: 0, q: Q_MAJ, inv: 0 },
+            _ => self.pk.strains[si].chords[bi as usize],
+        };
+        let tonic_pc = self.root + key;
+        self.pk.mask = h.mask(tonic_pc);
+        let tune = self.pk.tonic + key;
+        let mut lead = self.pk.lead;
+        let mut other = if lead == CH_LEAD { CH_ARP } else { CH_LEAD };
+        if self.pk.trade && (bi / 2) % 2 == 1 {
+            (lead, other) = (other, lead);
+        }
+        let blo = 34;
+        let root = blo + (tonic_pc + h.bass() - blo).rem_euclid(12);
+        if sec.kind == OUTRO && i == 1 {
+            // the button: one stab, everyone
+            b.hit(0.0, 0.0, CH_KICK, 0, 1.0);
+            b.hit(0.0, 0.0, CH_SNARE, 0, 0.8);
+            b.hit(0.0, 0.0, CH_CYM, 0, 0.8);
+            b.note(0.0, 0.0, CH_BASS, root, 1.0, 3.0, false);
+            let pcs: Vec<i32> = h.pcs().iter().map(|p| (tonic_pc + p).rem_euclid(12)).collect();
+            for &n in &voicing_pcs(&pcs, 55, 70, &self.keys_v, false) {
+                b.note(0.0, 0.0, CH_KEYS, n, 0.9, 3.0, false);
+            }
+            let t = tune + if tune - self.pk.tonic > 6 { 0 } else { 12 };
+            b.note(0.0, 0.0, CH_LEAD, t, 0.95, 4.0, false);
+            b.note(0.0, 0.0, CH_ARP, t - 8, 0.85, 4.0, false);
+            return;
+        }
+        // the beats and the off-beats
+        b.hit(0.0, 0.0, CH_KICK, 0, 0.8 + 0.15 * e);
+        b.hit(4.0, 0.0, CH_KICK, 0, 0.7 + 0.15 * e);
+        let roll = last && self.rng.chance(0.75);
+        for st in [2.0, 6.0] {
+            if !(roll && st == 6.0) {
+                b.hit(st, 0.0, CH_SNARE, 0, 0.35 + 0.35 * e);
+            }
+            if self.pk.hats && e > 0.75 {
+                b.hit(st, 0.0, CH_HAT, HAT_C, 0.4);
+            }
+        }
+        if roll {
+            for k in 0..8 {
+                b.hit(4.0 + 0.5 * k as f32, 0.0, CH_SNARE, 1, 0.3 + 0.07 * k as f32);
+            }
+        }
+        if i == 0 && sec.kind == MAIN && (si > 0 && (rep == 0 || si >= 2)) {
+            b.hit(0.0, 0.0, CH_CYM, 0, 0.6 + 0.2 * e);
+        }
+        // the bass: root and fifth, or a walk into the next strain's first chord
+        let next = self.pk.map.get(self.sec + 1).filter(|_| last && sec.kind == MAIN).map(|&(s2, _, f2)| {
+            let st = &self.pk.strains[s2];
+            st.key + st.chords[f2 as usize].bass()
+        });
+        let sc: Vec<i32> = in_range(&chord_scale(mode, h), blo - 6 - tonic_pc, blo + 18 - tonic_pc)
+            .into_iter()
+            .map(|p| p + tonic_pc)
+            .collect();
+        match next.filter(|&n| (n + self.root - root).rem_euclid(12) != 0 && self.rng.chance(0.6)) {
+            Some(n) => {
+                let target = root - 6 + (n + self.root - (root - 6)).rem_euclid(12);
+                let d: isize = if target >= root { 1 } else { -1 };
+                let k = nearest(&sc, root) as isize;
+                for j in 0..4 {
+                    let p = sc[(k + d * j).clamp(0, sc.len() as isize - 1) as usize];
+                    b.note(2.0 * j as f32, 0.0, CH_BASS, if j == 0 { root } else { p }, 0.85, 1.7, false);
+                }
+            }
+            None => {
+                let fifth = (tonic_pc + h.root + 7).rem_euclid(12);
+                let f = root - 7 + (fifth - (root - 7)).rem_euclid(12);
+                let f = if f < 30 { f + 12 } else { f };
+                b.note(0.0, 0.0, CH_BASS, root, 0.9, 1.8, false);
+                b.note(4.0, 0.0, CH_BASS, f, 0.8, 1.8, false);
+            }
+        }
+        // the pah: the chord, short and bright (a seventh as its shell)
+        let iv: &[i32] = if h.q == Q_DOM7 { &[0, 4, 10] } else { &q_iv(h.q)[..3] };
+        let pcs: Vec<i32> = iv.iter().map(|x| (tonic_pc + h.root + x).rem_euclid(12)).collect();
+        let v = voicing_pcs(&pcs, 55, 70, &self.keys_v, false);
+        for (st, acc) in [(2.0, 1.0), (6.0, 0.9)] {
+            for &n in &v {
+                b.note(st, 0.0, CH_KEYS, n, (0.5 + 0.25 * e) * acc, 1.0, false);
+            }
+        }
+        self.keys_v = v;
+        // the tune
+        let vel = 0.7 + 0.3 * e;
+        let mel: Vec<PNote> = match sec.kind {
+            BUILD | OUTRO => {
+                let kind = if i == 0 { F_ARP_UP } else { F_RUN_HALF };
+                let prev = self.pk.mel.last().map_or(4, |n| n.pitch);
+                polka_figure(&mut self.rng, kind, h, mode, prev, None, PK_LO, PK_HI)
+            }
+            _ => self
+                .pk
+                .mel
+                .iter()
+                .filter(|n| n.step as u32 / 8 == bi)
+                .map(|n| PNote { step: n.step % 8, ..*n })
+                .collect(),
+        };
+        let csc = in_range(&chord_scale(mode, h), PK_LO - 12, PK_HI);
+        let grace_steps = 0.06 / b.secs(1.0);
+        for n in &mel {
+            let st = n.step as f32;
+            let len = n.len as f32 * if lead == CH_ARP { 0.95 } else { 0.85 };
+            let mut late = 0.0;
+            if n.grace != 0 {
+                b.note(st, 0.0, lead, tune + n.pitch + n.grace as i32, n.vel * vel * 0.7, grace_steps, false);
+                late = 0.045;
+            }
+            b.note(st, late, lead, tune + n.pitch, n.vel * vel, len, n.grace != 0 && lead == CH_ARP);
+            if self.pk.thirds {
+                let k = nearest(&csc, n.pitch);
+                let third = csc[k.saturating_sub(2)];
+                b.note(st, late, other, tune + third, n.vel * vel * 0.8, len, false);
+            }
+        }
+        if matches!(sec.kind, MAIN | INTRO) && !self.pk.trade {
+            for n in self.pk.ans.iter().filter(|n| n.step as u32 / 8 == bi) {
+                b.note((n.step % 8) as f32, 0.0, other, tune + n.pitch, n.vel * vel, n.len as f32 * 0.9, false);
+            }
+        }
+    }
+
+    // -- tavern
+
+    fn piece_tavern(&mut self, s: &mut Synth) {
+        let r = &mut self.rng;
+        // the dance: its meter and tempo
+        let kind = r.weighted(&[3.0, 1.5, 3.0, 1.5, 1.0]) as u8;
+        let (bar_steps, beat_steps) = match kind {
+            T_JIG => (12, 6),
+            T_SLIP => (18, 6),
+            T_REEL => (16, 4),
+            T_WALTZ => (12, 4),
+            _ => {
+                if r.bit_chance() {
+                    (12, 4)
+                } else {
+                    (16, 4)
+                }
+            }
+        };
+        self.bpm = if kind == T_BALLAD { r.range(64.0, 80.0) } else { r.range(100.0, 130.0) } as f64;
+        self.swing = if kind == T_REEL { r.range(0.05, 0.15) } else { 0.0 };
+        self.human = 0.012;
+        // a fiddler's and a piper's keys
+        self.root = r.pick(&[2, 7, 9, 4, 0, 2, 7, 5]);
+        let mode = self.mode;
+        let pools = match mode {
+            IONIAN => TAV_ION,
+            MIXOLYDIAN => TAV_MIX,
+            AEOLIAN => TAV_AEO,
+            _ => TAV_DOR,
+        };
+        self.tv = Tavern { kind, bar_steps, beat_steps, drone: r.chance(0.75), ..Tavern::default() };
+        let mut strains = Vec::new();
+        for (k, pool) in pools.iter().enumerate() {
+            let chords = halves(r.pick(pool));
+            // the B strain sits higher
+            let (lo, hi) = if k == 0 { (-3, 12) } else { (0, 15) };
+            let (mel, ans) = tavern_tune(r, &self.tv, &chords, mode, lo, hi);
+            strains.push(TStrain { chords, mel, ans });
+        }
+        self.tv.strains = strains;
+        // AABB as many times through as a minute and a half takes; each time
+        // round more join (the answering instrument, the tambourine, the
+        // spoons, a harmony above, at last the claps)
+        let bar_s = bar_steps as f64 / beat_steps as f64 * 60.0 / self.bpm;
+        let rounds = ((95.0 / (32.0 * bar_s)).ceil() as u32).clamp(1, 4);
+        let ballad = kind == T_BALLAD;
+        let drone = if self.tv.drone { L_DRONE } else { 0 };
+        let bass = if r.chance(0.4) { L_BASS } else { 0 };
+        let mut plan = vec![(
+            Sec { kind: INTRO, bars: if ballad { 4 } else { 2 }, mask: L_KEYS | drone | L_KICK, energy: 0.5 },
+            (0, 0),
+        )];
+        for round in 0..rounds {
+            for (si, half) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                let q = 2 * round + half;
+                let mut mask = L_LEAD | L_KEYS | drone;
+                if !ballad || q >= 1 {
+                    mask |= L_KICK;
+                }
+                if q >= 1 {
+                    mask |= L_BELL;
+                }
+                if q >= 1 && !ballad {
+                    mask |= L_HAT;
+                }
+                if q >= 2 {
+                    mask |= bass | L_CTR | if ballad { 0 } else { L_PERC };
+                }
+                if round + 1 == rounds && si == 1 && half == 1 && !ballad {
+                    mask |= L_SNARE;
+                }
+                let energy = (0.55 + 0.12 * q as f32 + 0.05 * si as f32).min(1.0);
+                plan.push((Sec { kind: MAIN, bars: 8, mask, energy }, (si, q)));
+            }
+        }
+        plan.push((Sec { kind: OUTRO, bars: 2, mask: L_LEAD | L_KEYS | drone | L_KICK | L_BELL, energy: 0.8 }, (0, 0)));
+        self.plan = plan.iter().map(|x| x.0).collect();
+        self.tv.map = plan.iter().map(|x| x.1).collect();
+        sounds_tavern(r, s);
+        self.band = band_tavern(r, s);
+    }
+
+    /// A tavern section begins: the strain's tune this time through (a bar
+    /// re-figured on repeats, more ornaments each time), a harmony above
+    /// (a third or a sixth) where the second instrument doubles, the B
+    /// strain up an octave late on.
+    fn tavern_section(&mut self) {
+        let sec = self.plan[self.sec];
+        let (si, rep) = self.tv.map[self.sec];
+        let st = self.tv.strains[si].clone();
+        let (bs, beat) = (self.tv.bar_steps as u16, self.tv.beat_steps as u16);
+        let beats = bs / beat;
+        let mode = self.mode;
+        let r = &mut self.rng;
+        let mut mel = st.mel;
+        if sec.kind == MAIN && rep > 0 && r.chance(0.7) {
+            let bar = r.pick(&[0u16, 1, 2, 4, 5, 6]);
+            let mut p = mel.iter().filter(|n| n.step / bs < bar).last().map_or(4, |n| n.pitch);
+            let mut dir = if r.bit_chance() { 1 } else { -1 };
+            let (lo, hi) = if si == 0 { (-3, 12) } else { (0, 15) };
+            let mut v = Vec::new();
+            for k in 0..beats {
+                let h = st.chords[bar as usize * 2 + ((k * 2) / beats) as usize];
+                for (s0, len, pitch) in tavern_beat(r, self.tv.kind, beat as u32, h, mode, p, dir, lo, hi) {
+                    v.push(PNote {
+                        step: bar * bs + k * beat + s0,
+                        len,
+                        pitch,
+                        vel: if s0 == 0 { 0.9 } else { 0.75 },
+                        grace: 0,
+                    });
+                    p = pitch;
+                }
+                if !(lo + 2..=hi - 2).contains(&p) {
+                    dir = -dir;
+                }
+            }
+            mel.retain(|n| n.step / bs != bar);
+            mel.extend(v);
+            mel.sort_by_key(|n| n.step);
+        }
+        tavern_ornaments(r, &mut mel, 0.06 + 0.07 * rep as f32);
+        self.tv.harmony = if sec.mask & L_CTR != 0 { r.pick(&[2, 5, 2]) } else { 0 };
+        self.tv.up = if si == 1 && rep >= 3 && r.chance(0.5) { 12 } else { 0 };
+        self.tv.mel = mel;
+        self.tv.ans = st.ans;
+    }
+
+    /// A bar of tavern music: the bodhran (and tambourine, spoons, claps)
+    /// in the dance's pattern, the lute's bass on the beat and chord after it
+    /// (or a broken chord), the drone, the bass viol, the tune with its cuts
+    /// and rolls, and the second instrument answering or in harmony.
+    fn tavern(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        let (si, rep) = self.tv.map[self.sec];
+        let (bs, beat) = (self.tv.bar_steps, self.tv.beat_steps);
+        let beats = bs / beat;
+        let kind = self.tv.kind;
+        let i = self.sec_bar;
+        let e = sec.energy;
+        let h = self.human;
+        let bi = (i % 8) as usize;
+        let minor = MODES[self.mode][2] == 3;
+        let home = Harm { root: 0, q: if minor { Q_MIN } else { Q_MAJ }, inv: 0 };
+        let chords: [Harm; 2] = match sec.kind {
+            MAIN => [self.tv.strains[si].chords[bi * 2], self.tv.strains[si].chords[bi * 2 + 1]],
+            OUTRO if i == 0 => {
+                let last = self.tv.strains[1].chords[15];
+                [last, last]
+            }
+            _ => [home, home],
+        };
+        let chord_at = |k: u32| chords[((k * 2) / beats) as usize];
+        self.tv.mask = chords[0].mask(self.root);
+        // the drone buzzes with the beat (a hurdy-gurdy's trompette)
+        let d = &mut s.ch[CH_DRONE];
+        d.swell = 0.25;
+        d.swell_rate = (self.bpm / 60.0) as f32;
+        d.swell_ph = 0.25;
+        let vb = rep % 2 == 1;
+        if m & L_KICK != 0 {
+            let soft = if kind == T_BALLAD { 0.6 } else { 1.0 };
+            for k in 0..beats {
+                let at = (k * beat) as f32;
+                let v = if k == 0 { 0.9 } else { 0.72 };
+                match (kind, beat) {
+                    (T_BALLAD, _) => {
+                        if k == 0 {
+                            b.hit(0.0, 0.0, CH_KICK, 0, 0.55);
+                        }
+                    }
+                    (_, 6) => {
+                        b.hit(at, self.rng.range(0.0, h), CH_KICK, 0, v * soft);
+                        b.hit(at + 2.0, self.rng.range(0.0, h), CH_KICK, 1, 0.42);
+                        b.hit(at + 4.0, self.rng.range(0.0, h), CH_KICK, 1, 0.5);
+                        if vb && self.rng.chance(0.35) {
+                            b.hit(at + 3.0, self.rng.range(0.0, h), CH_KICK, 1, 0.3);
+                        }
+                    }
+                    (T_WALTZ, _) => {
+                        b.hit(at, self.rng.range(0.0, h), CH_KICK, if k == 0 { 0 } else { 1 }, v);
+                    }
+                    _ => {
+                        b.hit(
+                            at,
+                            self.rng.range(0.0, h),
+                            CH_KICK,
+                            if k % 2 == 0 { 0 } else { 1 },
+                            if k % 2 == 0 { v } else { 0.6 },
+                        );
+                        b.hit(at + 2.0, self.rng.range(0.0, h), CH_KICK, 1, 0.4);
+                        if vb && self.rng.chance(0.3) {
+                            b.hit(at + 3.0, self.rng.range(0.0, h), CH_KICK, 1, 0.28);
+                        }
+                    }
+                }
+            }
+        }
+        if m & L_HAT != 0 {
+            for k in 0..beats {
+                let at = (k * beat) as f32;
+                if beat == 6 {
+                    b.hit(at + 2.0, self.rng.range(0.0, h), CH_HAT, 0, 0.35);
+                    b.hit(at + 4.0, self.rng.range(0.0, h), CH_HAT, 0, 0.3);
+                    if k % 2 == 1 {
+                        b.hit(at, self.rng.range(0.0, h), CH_HAT, 1, 0.45);
+                    }
+                } else {
+                    b.hit(at + 2.0, self.rng.range(0.0, h), CH_HAT, 0, 0.35);
+                    if k % 2 == 1 {
+                        b.hit(at, self.rng.range(0.0, h), CH_HAT, 1, 0.45);
+                    }
+                }
+            }
+        }
+        if m & L_PERC != 0 {
+            for st in (0..bs).step_by(2) {
+                let on_beat = st % beat == 0;
+                if on_beat || self.rng.chance(0.7) {
+                    b.hit(st as f32, self.rng.range(0.0, h), CH_PERC, 0, if on_beat { 0.55 } else { 0.32 });
+                }
+            }
+        }
+        if m & L_SNARE != 0 {
+            for k in 1..beats {
+                if beat == 6 || k % 2 == 1 {
+                    b.hit((k * beat) as f32, self.rng.range(0.0, h), CH_SNARE, 0, 0.6);
+                }
+            }
+        }
+        if i == 0 && sec.kind == MAIN && rep == 0 {
+            b.hit(0.0, 0.0, CH_PERC, 3, 0.45);
+        }
+        if m & L_DRONE != 0 && i % 4 == 0 {
+            let t = self.tonic_near(45);
+            let len = 4.0 * bs as f32 + 4.0;
+            b.note(0.0, 0.0, CH_DRONE, t, 0.6, len, false);
+            b.note(0.0, 0.0, CH_DRONE, t + 7, 0.45, len, false);
+        }
+        if m & L_KEYS != 0 {
+            let arpeggio = kind == T_BALLAD || s.ch[CH_KEYS].patch.ks > 2.0;
+            for k in 0..beats {
+                let c = chord_at(k);
+                let lo = self.tonic_near(48) - 5;
+                let bass = lo + (self.root + c.bass() - lo).rem_euclid(12);
+                let v = self.voicing(c, 55, 69, &self.keys_v, false);
+                let at = (k * beat) as f32;
+                let j = self.rng.range(0.0, h);
+                if arpeggio {
+                    let tones = self.arp_tones(c, 55);
+                    b.note(at, j, CH_KEYS, bass, 0.6, beat as f32, false);
+                    for (n, x) in (2..beat).step_by(2).enumerate() {
+                        b.note(at + x as f32, j, CH_KEYS, tones[(n + k as usize) % tones.len()], 0.45, 3.0, false);
+                    }
+                } else if beat == 6 {
+                    // strings ring until the next stroke
+                    b.note(at, j, CH_KEYS, bass, 0.7, 5.5, false);
+                    for x in [2.0, 4.0] {
+                        for &n in &v {
+                            b.note(at + x, j, CH_KEYS, n, 0.38, 1.9, false);
+                        }
+                    }
+                } else if kind == T_WALTZ {
+                    if k == 0 {
+                        b.note(at, j, CH_KEYS, bass, 0.7, bs as f32 - 0.5, false);
+                    } else {
+                        for &n in &v {
+                            b.note(at, j, CH_KEYS, n, 0.4, beat as f32 - 0.2, false);
+                        }
+                    }
+                } else {
+                    b.note(at, j, CH_KEYS, bass, 0.7, 3.8, false);
+                    for &n in &v {
+                        b.note(at + 2.0, j, CH_KEYS, n, 0.4, 1.9, false);
+                    }
+                }
+                self.keys_v = v;
+            }
+        }
+        if m & L_BASS != 0 {
+            let lo = self.tonic_near(38) - 5;
+            for k in [0, beats / 2].iter().take(if beats >= 4 { 2 } else { 1 }) {
+                let c = chord_at(*k);
+                let n = lo + (self.root + c.bass() - lo).rem_euclid(12);
+                b.note((k * beat) as f32, 0.0, CH_BASS, n, 0.7, (beats / 2).max(1) as f32 * beat as f32 * 0.9, false);
+            }
+        }
+        // the tune (silent in the intro; in the outro, the cadence and a last long tonic)
+        let tune = self.tonic_near(74) + self.tv.up;
+        let lead = CH_LEAD;
+        let mel: Vec<PNote> = match sec.kind {
+            MAIN => self
+                .tv
+                .mel
+                .iter()
+                .filter(|n| n.step as usize / bs as usize == bi)
+                .map(|n| PNote { step: n.step % bs as u16, ..*n })
+                .collect(),
+            OUTRO if i == 0 => self.tv.strains[1]
+                .mel
+                .iter()
+                .filter(|n| n.step as usize / bs as usize == 7)
+                .map(|n| PNote { step: n.step % bs as u16, ..*n })
+                .collect(),
+            OUTRO => vec![PNote { step: 0, len: bs as u16, pitch: 0, vel: 0.85, grace: 0 }],
+            _ => Vec::new(),
+        };
+        if m & L_LEAD != 0 {
+            let vel = 0.7 + 0.25 * e;
+            let mono = s.ch[lead].mono;
+            let st_s = b.secs(1.0);
+            for n in &mel {
+                let st = n.step as f32;
+                let len = n.len as f32 * 0.92;
+                let p = tune + n.pitch;
+                let j = self.rng.range(0.0, h);
+                match n.grace {
+                    0 => b.note(st, j, lead, p, n.vel * vel, len, false),
+                    9 => {
+                        // a roll: cut, the note, a tap below, the note
+                        let g = 0.045 / st_s;
+                        b.note(st, j, lead, p + 2, n.vel * vel * 0.7, g, false);
+                        b.note(st, j + 0.045, lead, p, n.vel * vel * 0.8, g, mono);
+                        b.note(st, j + 0.09, lead, p - 1, n.vel * vel * 0.7, g, mono);
+                        b.note(st, j + 0.135, lead, p, n.vel * vel, len - 0.135 / st_s, mono);
+                    }
+                    g => {
+                        // a cut: a grace above, slid off into the note
+                        b.note(st, j, lead, p + g as i32, n.vel * vel * 0.7, 0.05 / st_s, false);
+                        b.note(st, j + 0.04, lead, p, n.vel * vel, len - 0.04 / st_s, mono);
+                    }
+                }
+            }
+            // the second instrument: a harmony above, or answers under the long notes
+            if m & L_CTR != 0 && self.tv.harmony > 0 {
+                for n in &mel {
+                    let c = chord_at(n.step as u32 / beat);
+                    let sc = in_range(&chord_scale(self.mode, c), PK_LO - 2, PK_HI + 12);
+                    let k = nearest(&sc, n.pitch);
+                    let p = sc[(k + self.tv.harmony as usize).min(sc.len() - 1)];
+                    b.note(
+                        n.step as f32,
+                        self.rng.range(0.0, h),
+                        CH_BELL,
+                        tune + p - 12 * (self.tv.harmony == 5) as i32,
+                        n.vel * vel * 0.75,
+                        n.len as f32 * 0.9,
+                        false,
+                    );
+                }
+            }
+        }
+        if m & L_BELL != 0 && sec.kind == MAIN && !(m & L_CTR != 0 && self.tv.harmony > 0) {
+            for n in self.tv.ans.iter().filter(|n| n.step as usize / bs as usize == bi) {
+                b.note(
+                    (n.step % bs as u16) as f32,
+                    self.rng.range(0.0, h),
+                    CH_BELL,
+                    tune + n.pitch,
+                    n.vel * 0.8,
+                    n.len as f32 * 0.9,
+                    false,
+                );
+            }
+        }
     }
 
     /// The electric piano's chord, rolled upward.
-    fn strum(&mut self, b: &mut Bar, step: f32, c: Chord, steps: f32, vel: f32) {
+    fn strum(&mut self, b: &mut Bar, step: f32, c: Harm, steps: f32, vel: f32) {
         let v = self.voicing(c, 50, 74, &self.keys_v, true);
         let gap = self.rng.range(0.006, 0.02);
         let late = self.rng.range(0.0, self.human);
@@ -2930,6 +4447,740 @@ impl Song {
         }
         self.keys_v = v;
     }
+}
+
+// -- polka
+
+/// A note of a polka line: a 16th within its strain, a length in 16ths, a
+/// pitch in semitones above the strain's tonic, and a grace note's offset
+/// (0: none) played on the beat with the note itself just after.
+#[derive(Clone, Copy)]
+struct PNote {
+    step: u16,
+    len: u16,
+    pitch: i32,
+    vel: f32,
+    grace: i8,
+}
+
+/// A strain: 8 or 16 bars of 2/4, a chord a bar, in a key (semitones from the
+/// piece's tonic) and mode, with its tune and the other instrument's answers.
+#[derive(Clone)]
+struct Strain {
+    key: i32,
+    mode: usize,
+    chords: Vec<Harm>,
+    mel: Vec<PNote>,
+    ans: Vec<PNote>,
+}
+
+/// The polka in play.
+#[derive(Default)]
+struct Polka {
+    strains: Vec<Strain>,
+    /// per section: the strain, which time through, its first bar
+    map: Vec<(usize, u32, u32)>,
+    /// this time through: the tune and answers (varied on repeats), whether
+    /// the other instrument doubles a third below, which channel leads
+    mel: Vec<PNote>,
+    ans: Vec<PNote>,
+    thirds: bool,
+    lead: usize,
+    /// the tune's tonic (MIDI), whether the hats play, the bar's chord (for the stats)
+    tonic: i32,
+    hats: bool,
+    mask: u16,
+    /// the other instrument leads the B strain
+    b_other: bool,
+    /// a dogfight: the two instruments trade two-bar phrases
+    trade: bool,
+}
+
+/// Eight-bar chord plans: major A strains, B strains (away from the tonic
+/// at first), and minor ones.
+const POLKA_A: &[&str] = &[
+    "I I V7 V7 V7 V7 I I",
+    "I I I V7 V7 V7 V7 I",
+    "I IV I V7 I IV V7 I",
+    "I I V7/V V7 I I V7 I",
+    "I I IV IV V7 V7 I I",
+    "I V7 I V7 I IV V7 I",
+    "I I ii V7 V7 V7 I I",
+    "I I^1 IV V7 I vi V7/V^1 V7",
+    "I vi ii V7 I vi V7 I",
+    "I I7 IV IV I V7/V V7 I",
+];
+const POLKA_B: &[&str] = &[
+    "V7 V7 I I V7 V7 I I",
+    "IV IV I I V7 V7 I I",
+    "V7/V V7/V V7 V7 V7 V7 I I",
+    "IV I V7 I IV I V7 I",
+    "vi vi V7/V V7 I IV V7 I",
+    "V7 I V7 I IV IV V7 I",
+    "IV iv I vi ii V7 I I",
+    "V7/vi vi V7/V V7 I IV V7 I",
+];
+const POLKA_MINOR: &[&str] = &[
+    "i i V7 V7 V7 V7 i i",
+    "i iv V7 i i iv V7 i",
+    "i i iv iv V7 V7 i i",
+    "i bVI iv V7 i bVI V7 i",
+    "i V7 i V7 iv i V7 i",
+    "bIII bIII bVII bVII iv iv V7 V7",
+];
+
+/// Figures a bar of tune is made of.
+const F_ARP_UP: u8 = 0;
+const F_ARP_DOWN: u8 = 1;
+const F_RUN: u8 = 2;
+const F_RUN_HALF: u8 = 3;
+const F_REPEAT: u8 = 4;
+const F_DOTTED: u8 = 5;
+const F_TURN: u8 = 6;
+const F_QUARTERS: u8 = 7;
+const F_QE: u8 = 8;
+const F_LONG: u8 = 9;
+const F_HALF: u8 = 10;
+const MID_FIGS: [u8; 8] = [F_ARP_UP, F_ARP_DOWN, F_RUN, F_RUN_HALF, F_DOTTED, F_TURN, F_QE, F_REPEAT];
+
+/// One bar of tune over chord `h`, starting near `prev`: arpeggios, scale
+/// runs, repeated notes, dotted rhythms, turns, or a cadence (`target`, if
+/// given, is where a cadence lands).
+fn polka_figure(
+    r: &mut Rng,
+    kind: u8,
+    h: Harm,
+    mode: usize,
+    prev: i32,
+    target: Option<i32>,
+    lo: i32,
+    hi: i32,
+) -> Vec<PNote> {
+    let ct = in_range(&h.pcs(), lo, hi);
+    let sc = in_range(&chord_scale(mode, h), lo, hi);
+    let i = nearest(&ct, prev);
+    let at = |v: &[i32], k: isize| v[k.clamp(0, v.len() as isize - 1) as usize];
+    let j = nearest(&sc, ct[i]) as isize;
+    let ii = i as isize;
+    let up = (prev as f32) < (lo + hi) as f32 / 2.0 || r.chance(0.3);
+    let d: isize = if up { 1 } else { -1 };
+    let n = |step: u16, len: u16, pitch: i32| PNote { step, len, pitch, vel: 0.0, grace: 0 };
+    let mut v = match kind {
+        F_ARP_UP => {
+            let b = ii.min(ct.len() as isize - 4).max(0);
+            (0..4).map(|k| n(2 * k as u16, 2, at(&ct, b + k))).collect()
+        }
+        F_ARP_DOWN => {
+            let b = ii.max(3);
+            (0..4).map(|k| n(2 * k as u16, 2, at(&ct, b - k))).collect()
+        }
+        F_RUN => (0..8).map(|k| n(k as u16, 1, at(&sc, j + d * k as isize))).collect(),
+        F_RUN_HALF => {
+            let mut v: Vec<PNote> = (0..4).map(|k| n(k as u16, 1, at(&sc, j + d * k as isize))).collect();
+            let land = at(&sc, j + d * 4);
+            v.push(n(4, 4, ct[nearest(&ct, land)]));
+            v
+        }
+        F_REPEAT => {
+            let (p, q) = (ct[i], at(&ct, ii + d));
+            if r.chance(0.5) {
+                vec![n(0, 2, p), n(2, 2, p), n(4, 2, p), n(6, 2, p)]
+            } else {
+                vec![n(0, 2, p), n(2, 2, q), n(4, 2, p), n(6, 2, q)]
+            }
+        }
+        F_DOTTED => {
+            let p2 = at(&ct, ii + d);
+            let j2 = nearest(&sc, p2) as isize;
+            vec![n(0, 3, ct[i]), n(3, 1, at(&sc, j + d)), n(4, 3, p2), n(7, 1, at(&sc, j2 + d))]
+        }
+        F_TURN => vec![
+            n(0, 1, at(&sc, j + 1)),
+            n(1, 1, at(&sc, j)),
+            n(2, 1, at(&sc, j - 1)),
+            n(3, 1, at(&sc, j)),
+            n(4, 4, at(&ct, ii + d)),
+        ],
+        F_QUARTERS => vec![n(0, 4, ct[i]), n(4, 4, at(&ct, ii + d))],
+        F_QE => vec![n(0, 4, ct[i]), n(4, 2, at(&sc, j + d)), n(6, 2, at(&sc, j + 2 * d))],
+        F_LONG => vec![n(0, 8, target.map_or(ct[i], |t| ct[nearest(&ct, t)]))],
+        _ => vec![n(0, 4, target.map_or(ct[i], |t| ct[nearest(&ct, t)]))],
+    };
+    for x in v.iter_mut() {
+        x.vel = match x.step {
+            0 => 0.95,
+            4 => 0.85,
+            _ => 0.75,
+        } + r.range(-0.05, 0.05);
+    }
+    v
+}
+
+/// A bar of tune moved onto another chord: chord tones to the nearest tone
+/// of the new chord, the rest to the nearest tone of its scale.
+fn polka_refit(notes: &[PNote], from: Harm, to: Harm, mode: usize, lo: i32, hi: i32) -> Vec<PNote> {
+    if from == to {
+        return notes.to_vec();
+    }
+    let (fc, ct, sc) = (from.pcs(), in_range(&to.pcs(), lo, hi), in_range(&chord_scale(mode, to), lo, hi));
+    notes
+        .iter()
+        .map(|n| {
+            let v = if fc.contains(&n.pitch.rem_euclid(12)) { &ct } else { &sc };
+            PNote { pitch: v[nearest(v, n.pitch)], ..*n }
+        })
+        .collect()
+}
+
+/// The melody's range and the answering instrument's, semitones about the strain's tonic.
+const PK_LO: i32 = -3;
+const PK_HI: i32 = 14;
+const PK_ALO: i32 = -9;
+const PK_AHI: i32 = 9;
+
+/// A strain's tune: four-bar phrases opening on a two-bar motif (which comes
+/// back fitted to the chords), a free bar, then a cadence: half (on V) mid
+/// strain, home at its end. A sixteen-bar strain repeats its first eight with
+/// a new ending. Where the tune rests on the second beat of a cadence bar the
+/// other instrument answers.
+fn polka_tune(r: &mut Rng, chords: &[Harm], mode: usize) -> (Vec<PNote>, Vec<PNote>) {
+    let bars = chords.len();
+    let motif: [u8; 2] = r.pick(&[
+        [F_RUN_HALF, F_REPEAT],
+        [F_ARP_UP, F_DOTTED],
+        [F_DOTTED, F_DOTTED],
+        [F_REPEAT, F_ARP_DOWN],
+        [F_TURN, F_QUARTERS],
+        [F_ARP_UP, F_RUN],
+        [F_RUN, F_QE],
+        [F_QE, F_ARP_DOWN],
+        [F_REPEAT, F_REPEAT],
+        [F_DOTTED, F_RUN_HALF],
+        [F_ARP_UP, F_ARP_DOWN],
+    ]);
+    let mut bar_notes: Vec<Vec<PNote>> = Vec::with_capacity(bars);
+    let mut prev = r.pick(&[4, 7, 0, 12, 7]);
+    for b in 0..bars {
+        let pos = b % 4;
+        let fig = if b >= 8 && b < bars - 2 {
+            // the second half of a long strain: its first half again
+            polka_refit(&bar_notes[b - 8], chords[b - 8], chords[b], mode, PK_LO, PK_HI)
+        } else if b >= 4 && pos < 2 && r.chance(0.8) {
+            polka_refit(&bar_notes[pos], chords[pos], chords[b], mode, PK_LO, PK_HI)
+        } else {
+            let (kind, target) = match pos {
+                0 | 1 => (motif[pos], None),
+                2 => (r.pick(&MID_FIGS), None),
+                _ if b == bars - 1 => (if r.chance(0.6) { F_HALF } else { F_LONG }, Some(r.pick(&[0, 12, 4]))),
+                _ => (if r.chance(0.7) { F_HALF } else { F_QUARTERS }, None),
+            };
+            polka_figure(r, kind, chords[b], mode, prev, target, PK_LO, PK_HI)
+        };
+        prev = fig.last().map_or(prev, |n| n.pitch);
+        bar_notes.push(fig);
+    }
+    let mut mel = Vec::new();
+    let mut ans = Vec::new();
+    for (b, notes) in bar_notes.iter().enumerate() {
+        let st0 = 8 * b as u16;
+        mel.extend(notes.iter().map(|n| PNote { step: n.step + st0, ..*n }));
+        // a free second beat: the other instrument answers, leading on
+        if notes.iter().all(|n| n.step < 4 && n.step + n.len <= 4) && r.chance(0.8) {
+            let h = chords[b];
+            let ct = in_range(&h.pcs(), PK_ALO, PK_AHI);
+            let sc = in_range(&chord_scale(mode, h), PK_ALO, PK_AHI);
+            let start = nearest(&ct, notes[0].pitch - 7) as isize;
+            let at = |v: &[i32], k: isize| v[k.clamp(0, v.len() as isize - 1) as usize];
+            let fill: Vec<(u16, u16, i32)> = match r.below(3) {
+                0 => (0..4).map(|k| (4 + k as u16, 1, at(&ct, start + k))).collect(),
+                1 => {
+                    let j = nearest(&sc, at(&ct, start + 2)) as isize;
+                    (0..4).map(|k| (4 + k as u16, 1, at(&sc, j - k))).collect()
+                }
+                _ => vec![(4, 2, at(&ct, start + 1)), (6, 2, at(&ct, start + 2))],
+            };
+            ans.extend(fill.into_iter().map(|(st, len, pitch)| PNote {
+                step: st0 + st,
+                len,
+                pitch,
+                vel: 0.75 + r.range(-0.05, 0.05),
+                grace: 0,
+            }));
+        }
+    }
+    (mel, ans)
+}
+
+/// Grace notes on a few strong, long enough notes: a semitone below or the
+/// scale tone above.
+fn polka_graces(r: &mut Rng, mel: &mut [PNote], p: f32) {
+    for n in mel.iter_mut() {
+        if n.step % 4 == 0 && n.len >= 2 && n.grace == 0 && r.chance(p) {
+            n.grace = r.pick(&[-1, -1, 2, 1]);
+        }
+    }
+}
+
+/// A strain of `bars` (8 or 16) from the plans.
+fn polka_strain(r: &mut Rng, plans: &[&str], bars: usize, key: i32, mode: usize) -> Strain {
+    let mut chords = harms(r.pick(plans));
+    if bars == 16 {
+        // the first eight close on the dominant, the second at home
+        chords[7] = Harm { root: 7, q: Q_DOM7, inv: 0 };
+        chords[6] = r.pick(&[chords[6], Harm { root: 2, q: Q_DOM7, inv: 0 }, Harm { root: 0, q: Q_MAJ, inv: 0 }]);
+        if mode != IONIAN && chords[6].root == 2 {
+            chords[6] = Harm { root: 5, q: Q_MIN, inv: 0 };
+        }
+        let second = harms(r.pick(plans));
+        chords.extend(second);
+    }
+    let (mut mel, ans) = polka_tune(r, &chords, mode);
+    polka_graces(r, &mut mel, 0.08);
+    Strain { key, mode, chords, mel, ans }
+}
+
+// -- tavern
+
+/// Tavern dances: jig (6/8), slip jig (9/8), reel (4/4), a dance in 3/4,
+/// and now and then a slow ballad.
+const T_JIG: u8 = 0;
+const T_SLIP: u8 = 1;
+const T_REEL: u8 = 2;
+const T_WALTZ: u8 = 3;
+const T_BALLAD: u8 = 4;
+
+/// Eight-bar strains for the modes, A and B (the B away from home at
+/// first), with modal cadences (bVII-I, i-bVII-i).
+const TAV_ION: [&[&str]; 2] = [
+    &["I I IV V I I IV+V I", "I IV I V I IV V I", "I vi IV V I vi IV+V I", "I I V V I I IV+V I"],
+    &["IV IV I I IV IV V V", "vi vi IV IV I I V I", "IV V I vi IV V I I"],
+];
+const TAV_MIX: [&[&str]; 2] = [
+    &["I bVII I bVII I bVII IV I", "I I bVII bVII I I bVII+IV I", "I IV I bVII I IV bVII I"],
+    &["bVII bVII I I bVII bVII IV I", "IV IV I I bVII bVII I I", "bVII IV I I bVII IV bVII I"],
+];
+const TAV_DOR: [&[&str]; 2] = [
+    &["i bVII i bVII i bVII IV i", "i i bVII bVII i i IV+bVII i", "i IV i IV bIII bVII IV i", "i i IV IV i bVII i i"],
+    &["bIII bIII bVII bVII IV IV i i", "bVII bVII i i bVII bVII IV+bVII i", "IV IV i i bIII bVII i i"],
+];
+const TAV_AEO: [&[&str]; 2] = [
+    &[
+        "i bVII bVI bVII i bVII bVI+bVII i",
+        "i i bVII bVII bVI bVII i i",
+        "i iv i bVII i iv bVII i",
+        "i bVII i v i bVII bVI+v i",
+    ],
+    &["bIII bIII bVII bVII bVI bVI v i", "bVI bVII i i bVI bVII v+bVII i", "bIII bVII iv i bIII bVII v i"],
+];
+
+/// A tavern tune's strain: its chords (two a bar) and tune (and the answers).
+#[derive(Clone)]
+struct TStrain {
+    chords: Vec<Harm>,
+    mel: Vec<PNote>,
+    ans: Vec<PNote>,
+}
+
+/// The tavern piece in play.
+#[derive(Default)]
+struct Tavern {
+    kind: u8,
+    /// 16ths a bar and a beat
+    bar_steps: u32,
+    beat_steps: u32,
+    strains: Vec<TStrain>,
+    /// per section: the strain, which time through
+    map: Vec<(usize, u32)>,
+    /// this time through: the tune (varied), answers, a harmony above (semitone
+    /// steps of the chord-scale: 2 a third, 5 a sixth; 0 none), the B strain up an octave
+    mel: Vec<PNote>,
+    ans: Vec<PNote>,
+    harmony: i32,
+    up: i32,
+    /// the bar's chords (for the stats), the lute's last voicing, the drone
+    mask: u16,
+    drone: bool,
+}
+
+/// One beat of a tavern tune: a rhythm cell (16th steps, lengths) for the
+/// meter, its notes moving from `prev` by step in the chord-scale, by chord
+/// tone, or repeated; the beat's first note on a chord tone.
+fn tavern_beat(
+    r: &mut Rng,
+    kind: u8,
+    beat_steps: u32,
+    h: Harm,
+    mode: usize,
+    prev: i32,
+    dir: i32,
+    lo: i32,
+    hi: i32,
+) -> Vec<(u16, u16, i32)> {
+    let cells: &[(&[(u16, u16)], f32)] = if beat_steps == 6 {
+        &[
+            (&[(0, 2), (2, 2), (4, 2)], 0.45),
+            (&[(0, 4), (4, 2)], 0.3),
+            (&[(0, 2), (2, 1), (3, 1), (4, 2)], 0.12),
+            (&[(0, 3), (3, 1), (4, 2)], 0.08),
+            (&[(0, 6)], 0.05),
+        ]
+    } else if kind == T_BALLAD {
+        &[(&[(0, 4)], 0.45), (&[(0, 2), (2, 2)], 0.35), (&[(0, 3), (3, 1)], 0.2)]
+    } else {
+        &[(&[(0, 2), (2, 2)], 0.55), (&[(0, 4)], 0.2), (&[(0, 1), (1, 1), (2, 2)], 0.15), (&[(0, 3), (3, 1)], 0.1)]
+    };
+    let w: Vec<f32> = cells.iter().map(|c| c.1).collect();
+    let cell = cells[r.weighted(&w)].0;
+    let ct = in_range(&h.pcs(), lo, hi);
+    let sc = in_range(&chord_scale(mode, h), lo, hi);
+    let mut p = ct[nearest(&ct, prev + dir)];
+    let mut out = Vec::with_capacity(cell.len());
+    for (k, &(st, len)) in cell.iter().enumerate() {
+        if k > 0 {
+            let j = nearest(&sc, p) as isize;
+            p = match r.weighted(&[0.6, 0.25, 0.15]) {
+                0 => sc[(j + dir as isize).clamp(0, sc.len() as isize - 1) as usize],
+                1 => {
+                    let i = nearest(&ct, p) as isize;
+                    ct[(i + dir as isize).clamp(0, ct.len() as isize - 1) as usize]
+                }
+                _ => p,
+            };
+        }
+        out.push((st, len, p));
+    }
+    out
+}
+
+/// A tavern strain's tune: eight bars in two four-bar phrases; the first
+/// two bars a motif that comes back fitted to the chords in bars 5 and 6;
+/// bar 4 rests on a chord tone (half cadence), bar 8 comes home long. The
+/// line climbs and falls in arcs. Where it rests the answering instrument
+/// plays.
+fn tavern_tune(r: &mut Rng, t: &Tavern, chords: &[Harm], mode: usize, lo: i32, hi: i32) -> (Vec<PNote>, Vec<PNote>) {
+    let (bs, beat) = (t.bar_steps as u16, t.beat_steps as u16);
+    let beats = bs / beat;
+    let chord_at = |bar: usize, b: u16| chords[bar * 2 + ((b * 2) / beats) as usize];
+    let mut bars: Vec<Vec<PNote>> = Vec::new();
+    let mut prev = r.pick(&[0, 4, 7, 7, 12]).clamp(lo, hi);
+    let mut dir = 1;
+    for bar in 0..8 {
+        let notes: Vec<PNote> = if (bar == 4 || bar == 5) && r.chance(0.8) {
+            // the motif again, its notes moved onto these chords
+            bars[bar - 4]
+                .iter()
+                .map(|n| {
+                    let (from, to) = (chord_at(bar - 4, n.step / beat), chord_at(bar, n.step / beat));
+                    if from == to {
+                        *n
+                    } else {
+                        let set =
+                            if from.pcs().contains(&n.pitch.rem_euclid(12)) { to.pcs() } else { chord_scale(mode, to) };
+                        let v = in_range(&set, lo, hi);
+                        PNote { pitch: v[nearest(&v, n.pitch)], ..*n }
+                    }
+                })
+                .collect()
+        } else if bar == 3 || bar == 7 {
+            // a cadence: the first beat's figure, then a long note
+            let h = chord_at(bar, 0);
+            let mut v: Vec<PNote> = tavern_beat(r, t.kind, t.beat_steps, h, mode, prev, dir, lo, hi)
+                .into_iter()
+                .map(|(st, len, pitch)| PNote { step: st, len, pitch, vel: 0.85, grace: 0 })
+                .collect();
+            let hl = chord_at(bar, beats - 1);
+            let target = if bar == 7 { [0, 12, 7] } else { [7, 4, 2] };
+            let ct = in_range(&hl.pcs(), lo, hi);
+            let want = target.iter().map(|&x| x + 12 * ((prev - x) as f32 / 12.0).round() as i32).collect::<Vec<_>>();
+            let goal = want[nearest(&want, prev)].clamp(lo, hi);
+            let land = ct[nearest(&ct, goal)];
+            v.push(PNote { step: beat, len: bs - beat, pitch: land, vel: 0.9, grace: 0 });
+            v
+        } else {
+            let mut v = Vec::new();
+            for b in 0..beats {
+                let h = chord_at(bar, b);
+                for (st, len, pitch) in tavern_beat(r, t.kind, t.beat_steps, h, mode, prev, dir, lo, hi) {
+                    v.push(PNote { step: b * beat + st, len, pitch, vel: if st == 0 { 0.9 } else { 0.75 }, grace: 0 });
+                    prev = pitch;
+                }
+                // arcs: turn at the edges, sometimes on a whim
+                if prev >= hi - 2 {
+                    dir = -1;
+                } else if prev <= lo + 2 {
+                    dir = 1;
+                } else if r.chance(0.25) {
+                    dir = -dir;
+                }
+            }
+            v
+        };
+        prev = notes.last().map_or(prev, |n| n.pitch);
+        bars.push(notes);
+    }
+    let mut mel = Vec::new();
+    let mut ans = Vec::new();
+    for (bar, notes) in bars.iter().enumerate() {
+        let st0 = bs * bar as u16;
+        mel.extend(notes.iter().map(|n| PNote { step: n.step + st0, ..*n }));
+        // the long note of a cadence: the other instrument answers under it
+        if (bar == 3 || bar == 7) && r.chance(0.75) {
+            let h = chords[bar * 2 + 1];
+            let sc = in_range(&chord_scale(mode, h), lo - 7, hi - 5);
+            let j = nearest(&sc, notes.last().map_or(0, |n| n.pitch) - 5) as isize;
+            let up = r.bit_chance();
+            for k in 0..(beats as isize * if beat == 6 { 3 } else { 2 } - 2) {
+                let p = sc[(j + if up { k } else { -k }).clamp(0, sc.len() as isize - 1) as usize];
+                ans.push(PNote { step: st0 + beat + 2 * k as u16, len: 2, pitch: p, vel: 0.7, grace: 0 });
+            }
+        }
+    }
+    (mel, ans)
+}
+
+/// Tavern ornaments on long notes: a cut (a grace a step above) or a roll
+/// (cut, the note, a tap below, the note).
+fn tavern_ornaments(r: &mut Rng, mel: &mut [PNote], p: f32) {
+    for n in mel.iter_mut() {
+        if n.len >= 3 && n.grace == 0 && r.chance(p) {
+            n.grace = r.pick(&[2, 2, 1, 9]);
+        }
+    }
+}
+
+const P_TAV_LEAD: &[(&str, Make)] = &[
+    ("fiddle", fiddle),
+    ("tin whistle", whistle),
+    ("recorder", recorder),
+    ("wooden flute", flute),
+    ("bagpipe chanter", chanter),
+    ("hurdy-gurdy", gurdy),
+    ("gemshorn", ocarina),
+    ("crumhorn", crumhorn),
+];
+const P_TAV_SECOND: &[(&str, Make)] = &[
+    ("recorder", recorder),
+    ("tin whistle", whistle),
+    ("fiddle", fiddle),
+    ("harp", harp),
+    ("hammered dulcimer", dulcimer),
+    ("psaltery", psaltery),
+];
+const P_TAV_PLUCK: &[(&str, Make)] = &[
+    ("lute", lute),
+    ("cittern", cittern),
+    ("harp", harp),
+    ("hammered dulcimer", dulcimer),
+    ("nylon-strung guitar", nylon),
+];
+const P_TAV_DRONE: &[(&str, Make)] =
+    &[("hurdy-gurdy drone", drone_reed), ("bagpipe drone", pipe_drone), ("voices", drone_choir)];
+const P_TAV_BASS: &[(&str, Make)] = &[("bass viol", viol), ("plucked bass", bass_upright)];
+const K_TAV_KICK: &[(&str, MakeKit)] = &[("frame drum", kit_frame)];
+const K_TAV_HAT: &[(&str, MakeKit)] = &[("shaker", kit_shaker)];
+const K_TAV_PERC: &[(&str, MakeKit)] = &[("woodblock and bones", kit_bones)];
+
+fn chanter(r: &mut Rng) -> Patch {
+    // a bagpipe's chanter: a narrow pulse, nasal, loud and steady
+    Patch {
+        wave: Wave::Square,
+        pw: r.range(0.2, 0.3),
+        vowel: 2,
+        cutoff: 3500.0,
+        keytrack: 0.3,
+        a: 0.01,
+        d: 0.2,
+        s: 1.0,
+        r: 0.05,
+        glide: 0.008,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+fn gurdy(r: &mut Rng) -> Patch {
+    // a hurdy-gurdy's melody string: a saw buzzing through a nasal vowel
+    Patch {
+        unison: 2,
+        detune: r.range(3.0, 6.0),
+        width: 0.2,
+        vowel: 3,
+        noise: 0.03,
+        cutoff: 3000.0,
+        keytrack: 0.3,
+        a: 0.03,
+        d: 0.3,
+        s: 0.95,
+        r: 0.1,
+        vib: 0.05,
+        vib_rate: 6.0,
+        glide: 0.015,
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+fn crumhorn(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.5,
+        cutoff: r.range(1200.0, 1600.0),
+        res: 0.3,
+        keytrack: 0.5,
+        a: 0.02,
+        d: 0.2,
+        s: 0.95,
+        r: 0.05,
+        glide: 0.01,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+fn psaltery(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(2.5, 3.5), ks_tone: 0.85, a: 0.001, d: 4.0, s: 1.0, r: 0.5, gain: 0.45, ..PATCH }
+}
+
+fn pipe_drone(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.35,
+        unison: 2,
+        detune: r.range(2.0, 4.0),
+        vowel: 5,
+        cutoff: 2200.0,
+        keytrack: 0.0,
+        a: 0.6,
+        d: 1.0,
+        s: 1.0,
+        r: 1.0,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+fn viol(r: &mut Rng) -> Patch {
+    Patch {
+        vowel: 4,
+        noise: 0.02,
+        cutoff: r.range(900.0, 1300.0),
+        keytrack: 0.4,
+        a: 0.05,
+        d: 0.4,
+        s: 0.8,
+        r: 0.15,
+        vib: 0.08,
+        vib_rate: 5.0,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+/// The bodhran (or a frame drum): [the open bass stroke, the muted high one].
+fn kit_bodhran(r: &mut Rng) -> Vec<DrumPatch> {
+    let bass = DrumPatch {
+        tone: 1.0,
+        f0: r.range(130.0, 150.0),
+        f1: r.range(80.0, 95.0),
+        pdec: 0.03,
+        tdec: 0.35,
+        noise: 0.5,
+        nmode: 0,
+        ncut: 400.0,
+        ndec: 0.12,
+        gain: 0.9,
+        ..DRUM
+    };
+    let top = DrumPatch { f0: 260.0, f1: 220.0, tdec: 0.08, noise: 0.6, ncut: 1200.0, ndec: 0.05, gain: 0.55, ..bass };
+    vec![bass, top]
+}
+fn kit_frame(r: &mut Rng) -> Vec<DrumPatch> {
+    let bass = kit_kick_frame(r)[0];
+    vec![bass, DrumPatch { f0: 240.0, f1: 200.0, tdec: 0.1, noise: 0.5, ncut: 1500.0, ndec: 0.06, gain: 0.5, ..bass }]
+}
+/// Percussion: [spoons, a low and a high frame-drum stroke, finger cymbals, shaker].
+fn kit_bones(r: &mut Rng) -> Vec<DrumPatch> {
+    let mut v = kit_spoons(r);
+    v[0] = DrumPatch {
+        tone: 0.6,
+        f0: 1800.0,
+        f1: 1700.0,
+        tdec: 0.04,
+        noise: 0.5,
+        nmode: 1,
+        ncut: 2500.0,
+        ndec: 0.02,
+        claps: 2,
+        gain: 0.55,
+        ..DRUM
+    };
+    v
+}
+
+fn band_tavern(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_LEAD, P_TAV_LEAD, 74.0);
+    b.tone(r, s, CH_BELL, P_TAV_SECOND, 74.0);
+    b.tone(r, s, CH_KEYS, P_TAV_PLUCK, 60.0);
+    b.tone(r, s, CH_DRONE, P_TAV_DRONE, 45.0);
+    b.tone(r, s, CH_BASS, P_TAV_BASS, 43.0);
+    b.kit(r, s, CH_KICK, K_TAV_KICK);
+    b.kit(r, s, CH_HAT, K_TAV_HAT);
+    b.kit(r, s, CH_PERC, K_TAV_PERC);
+    b
+}
+
+fn sounds_tavern(r: &mut Rng, s: &mut Synth) {
+    let ch = &mut s.ch;
+    ch[CH_LEAD].patch = fiddle(r);
+    ch[CH_LEAD].mono = true;
+    ch[CH_BELL].patch = recorder(r);
+    ch[CH_KEYS].patch = lute(r);
+    ch[CH_DRONE].patch = drone_reed(r);
+    ch[CH_BASS].patch = viol(r);
+    ch[CH_BASS].mono = true;
+    ch[CH_KICK].drums = kit_bodhran(r);
+    ch[CH_HAT].drums = kit_tambourine(r);
+    ch[CH_PERC].drums = kit_spoons(r);
+    ch[CH_SNARE].drums = kit_hand_clap(r);
+    mix(&mut ch[CH_KICK], 0.6, 0.0, 0.1, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], 0.3, 0.35, 0.15, 0.0, 0.0);
+    mix(&mut ch[CH_PERC], 0.35, -0.35, 0.15, 0.0, 0.0);
+    mix(&mut ch[CH_SNARE], 0.35, 0.1, 0.2, 0.0, 0.0);
+    mix(&mut ch[CH_KEYS], 0.45, -0.2, 0.2, 0.0, 0.0);
+    mix(&mut ch[CH_LEAD], 0.42, 0.1, 0.22, 0.05, 0.0);
+    mix(&mut ch[CH_BELL], 0.32, 0.3, 0.22, 0.05, 0.0);
+    mix(&mut ch[CH_DRONE], 0.22, -0.1, 0.2, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], 0.35, 0.0, 0.1, 0.0, 0.0);
+    // a room, not a hall
+    s.rev.fb = r.range(0.72, 0.78);
+    s.rev.damp = 0.5;
+    s.rev_wet = r.range(0.14, 0.2);
+    s.dly.fb = 0.0;
+    s.dly_rev = 0.0;
+    s.r2mode = R2_OFF;
+    s.fx.crackle = 0.0;
+    s.fx.wind_to = 0.0;
+    s.fx.rain_to = 0.0;
+    s.m.gain = 2.1;
+    s.m.target = 0.21;
+}
+
+/// A bassline changed in `k` places: a note on or off, another note, an
+/// accent or a slide.
+fn mutate_bass(r: &mut Rng, p: &[Step; 16], mode: usize, k: usize) -> [Step; 16] {
+    let mut p = *p;
+    for _ in 0..k {
+        let i = r.below(16);
+        let x = &mut p[i];
+        match r.below(4) {
+            0 => x.on = !x.on || i == 0,
+            1 => x.note = deg_semi(mode, r.pick(&[0, 0, 0, 7, 7, 2, 4, 6, -1])),
+            2 => x.accent = !x.accent,
+            _ => x.slide = !x.slide,
+        }
+    }
+    p
 }
 
 /// A bassline for techno: acid (16ths, accents, slides) or rolling (offbeats).
@@ -3050,6 +5301,1561 @@ fn crash(r: &mut Rng) -> Vec<DrumPatch> {
     }]
 }
 
+// ---------------------------------------------------------------- the instruments
+
+/// An instrument of a palette: its name and how to make one (each a little
+/// different).
+type Make = fn(&mut Rng) -> Patch;
+/// A drum kit for one channel, its kinds in the channel's order.
+type MakeKit = fn(&mut Rng) -> Vec<DrumPatch>;
+
+/// How loud a patch plays: the RMS of one note at `note`, velocity 0.8, over
+/// 0.12 s after a short attack (the patch's own attack would only delay it).
+fn loudness(p: &Patch, note: f32) -> f32 {
+    let q = Patch { a: p.a.min(0.03), ..*p };
+    let mut v = VOICE;
+    v.start(&q, note, 0.8, (0.5 * SR) as i64, false, 0x1234_5679);
+    let mut buf = [[0.0f32; 2]; BLOCK];
+    let (mut sum, mut n) = (0.0f32, 0usize);
+    for k in 0..(0.15 * SR) as usize / BLOCK {
+        buf.fill([0.0; 2]);
+        v.render(1.0, &mut buf);
+        if k * BLOCK >= (0.03 * SR) as usize {
+            sum += buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>();
+            n += 2 * BLOCK;
+        }
+    }
+    (sum / n.max(1) as f32).sqrt().max(1e-5)
+}
+
+/// A piece's instruments: two for each tonal role (A and B: verses one,
+/// choruses and bridges the other, give or take), and two kits for each drum
+/// channel; swapped at section boundaries, each note keeping the patch it
+/// began with.
+#[derive(Default)]
+struct Band {
+    tones: Vec<(usize, [Patch; 2])>,
+    kits: Vec<(usize, [Vec<DrumPatch>; 2])>,
+}
+
+impl Band {
+    /// Channel `ch`'s pair: the role's tuned original (sometimes) or a pick
+    /// from `pal`, and another pick, both brought to the original's
+    /// loudness at `note`.
+    fn tone(&mut self, r: &mut Rng, s: &Synth, ch: usize, pal: &[(&str, Make)], note: f32) {
+        let orig = s.ch[ch].patch;
+        let target = loudness(&orig, note);
+        let level = |p: Patch| Patch { gain: p.gain * (target / loudness(&p, note)).clamp(0.2, 5.0), ..p };
+        let ia = if r.chance(0.35) { None } else { Some(r.below(pal.len())) };
+        let mut ib = r.below(pal.len());
+        if Some(ib) == ia {
+            ib = (ib + 1 + r.below(pal.len() - 1)) % pal.len();
+        }
+        let a = ia.map_or(orig, |i| level((pal[i].1)(r)));
+        let b = level((pal[ib].1)(r));
+        self.tones.push((ch, [a, b]));
+    }
+
+    /// Channel `ch`'s kits: the original and one from `kits`.
+    fn kit(&mut self, r: &mut Rng, s: &Synth, ch: usize, kits: &[(&str, MakeKit)]) {
+        let orig = s.ch[ch].drums.clone();
+        let alt = (r.pick(kits).1)(r);
+        let [a, b] = if r.bit_chance() { [orig, alt] } else { [alt, orig] };
+        self.kits.push((ch, [a, b]));
+    }
+}
+
+// -- pads
+
+fn pad_strings(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(18.0, 28.0),
+        width: 1.0,
+        cutoff: r.range(2500.0, 4000.0),
+        res: 0.05,
+        keytrack: 0.5,
+        a: r.range(0.6, 1.2),
+        d: 2.0,
+        s: 0.9,
+        r: 1.5,
+        vib: 0.08,
+        vib_rate: 5.0,
+        gain: 0.14,
+        ..PATCH
+    }
+}
+
+fn pad_brass(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 6.0,
+        width: 0.5,
+        cutoff: r.range(600.0, 900.0),
+        res: 0.15,
+        env_amt: 2.2,
+        fdec: 0.6,
+        keytrack: 0.4,
+        a: 0.08,
+        d: 1.0,
+        s: 0.8,
+        r: 0.6,
+        gain: 0.15,
+        ..PATCH
+    }
+}
+
+fn pad_choir(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(8.0, 14.0),
+        width: 0.8,
+        vowel: r.pick(&[1, 4, 5]),
+        cutoff: 3200.0,
+        keytrack: 0.2,
+        a: r.range(0.5, 1.2),
+        d: 2.0,
+        s: 0.9,
+        r: 2.0,
+        vib: 0.15,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn pad_glass(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.4),
+        ratio: r.pick(&[2.0, 3.0]),
+        fm_dec: 3.0,
+        a: r.range(0.5, 1.2),
+        d: 3.0,
+        s: 0.8,
+        r: 2.5,
+        gain: 0.2,
+        ..PATCH
+    }
+}
+
+fn pad_shimmer(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        unison: 3,
+        detune: 6.0,
+        width: 1.0,
+        wave2: Wave::Sine,
+        mix2: 0.4,
+        semi2: r.pick(&[19.0, 24.0]),
+        cutoff: 6000.0,
+        keytrack: 0.3,
+        a: r.range(0.8, 1.6),
+        d: 3.0,
+        s: 0.8,
+        r: 3.0,
+        trem: 0.25,
+        vib_rate: r.range(5.0, 7.0),
+        gain: 0.14,
+        ..PATCH
+    }
+}
+
+fn pad_warm(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        unison: 3,
+        detune: r.range(5.0, 9.0),
+        width: 0.8,
+        wave2: Wave::Sine,
+        mix2: 0.6,
+        cutoff: 1200.0,
+        keytrack: 0.4,
+        a: r.range(0.8, 1.8),
+        d: 3.0,
+        s: 0.9,
+        r: 2.5,
+        gain: 0.16,
+        ..PATCH
+    }
+}
+
+fn pad_organ(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.5,
+        wave2: Wave::Sine,
+        mix2: 0.5,
+        semi2: 12.0,
+        sub: 0.3,
+        cutoff: r.range(2000.0, 3000.0),
+        keytrack: 0.3,
+        a: 0.02,
+        d: 0.1,
+        s: 1.0,
+        r: 0.15,
+        trem: r.range(0.0, 0.15),
+        vib_rate: 6.0,
+        gain: 0.12,
+        ..PATCH
+    }
+}
+
+fn pad_dark(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(10.0, 18.0),
+        width: 0.9,
+        cutoff: r.range(400.0, 700.0),
+        res: 0.25,
+        keytrack: 0.3,
+        a: 1.5,
+        d: 2.0,
+        s: 0.8,
+        r: 2.5,
+        gain: 0.16,
+        ..PATCH
+    }
+}
+
+// -- keys and mallets
+
+fn ep_rhodes(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.2, 2.0),
+        ratio: 1.0,
+        fm_dec: r.range(0.6, 1.2),
+        fm2: r.range(0.4, 0.8),
+        ratio2: r.pick(&[14.0, 13.0, 15.0]),
+        fm2_dec: 0.05,
+        a: 0.002,
+        d: r.range(1.2, 2.0),
+        s: r.range(0.3, 0.42),
+        r: 0.35,
+        trem: r.range(0.1, 0.25),
+        vib_rate: r.range(3.0, 5.0),
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn ep_wurli(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(2.0, 3.0),
+        ratio: 1.0,
+        fm_dec: 0.4,
+        a: 0.002,
+        d: 1.5,
+        s: 0.3,
+        r: 0.25,
+        trem: r.range(0.15, 0.3),
+        vib_rate: 5.5,
+        drive: 0.6,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn piano_felt(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        wave2: Wave::Sine,
+        mix2: 0.6,
+        semi2: 12.0,
+        cutoff: r.range(1000.0, 1600.0),
+        env_amt: 1.0,
+        fdec: 0.5,
+        keytrack: 0.5,
+        a: 0.003,
+        d: 1.5,
+        s: 0.35,
+        r: 0.3,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn piano(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.0, 1.5),
+        ratio: 1.0,
+        fm_dec: 0.8,
+        fm2: 0.8,
+        ratio2: 3.0,
+        fm2_dec: 0.03,
+        a: 0.002,
+        d: 3.0,
+        s: 0.0,
+        r: 0.3,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn vibes(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.2),
+        ratio: 4.0,
+        fm_dec: 0.4,
+        a: 0.002,
+        d: 1.8,
+        s: 0.0,
+        r: 0.5,
+        trem: 0.3,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn marimba(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(2.0, 3.0),
+        ratio: 4.0,
+        fm_dec: 0.05,
+        a: 0.001,
+        d: r.range(0.4, 0.7),
+        s: 0.0,
+        r: 0.2,
+        gain: 0.35,
+        ..PATCH
+    }
+}
+
+fn celesta(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.2, 1.8),
+        ratio: r.pick(&[4.0, 7.0]),
+        fm_dec: 0.3,
+        a: 0.001,
+        d: 1.5,
+        s: 0.0,
+        r: 0.5,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn kalimba(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(0.6, 1.0), ks_tone: 0.75, a: 0.001, d: 3.0, s: 1.0, r: 0.2, gain: 0.5, ..PATCH }
+}
+
+fn harp(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(2.0, 3.0), ks_tone: 0.55, a: 0.001, d: 4.0, s: 1.0, r: 0.6, gain: 0.5, ..PATCH }
+}
+
+fn music_box(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.2),
+        ratio: 5.0,
+        fm_dec: 0.15,
+        a: 0.001,
+        d: 1.2,
+        s: 0.0,
+        r: 0.4,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn glockenspiel(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.5, 2.1),
+        ratio: 3.5,
+        fm_dec: 0.2,
+        a: 0.001,
+        d: 1.6,
+        s: 0.0,
+        r: 0.5,
+        gain: 0.26,
+        ..PATCH
+    }
+}
+
+fn bell_fm(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(1.5, 3.0),
+        ratio: r.pick(&[3.5, 1.41, 2.0, 4.0, 2.76]),
+        fm_dec: r.range(1.2, 2.5),
+        a: 0.002,
+        d: r.range(3.0, 5.0),
+        s: 0.0,
+        r: 2.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn dulcimer(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(1.2, 1.8), ks_tone: 0.9, a: 0.001, d: 3.0, s: 1.0, r: 0.4, gain: 0.45, ..PATCH }
+}
+
+fn glass_arp(_: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        wave2: Wave::Sine,
+        mix2: 0.6,
+        semi2: 12.0,
+        cutoff: 2500.0,
+        res: 0.1,
+        keytrack: 0.2,
+        a: 0.006,
+        d: 1.2,
+        s: 0.0,
+        r: 0.8,
+        gain: 0.25,
+        ..PATCH
+    }
+}
+
+// -- plucked strings
+
+fn nylon(r: &mut Rng) -> Patch {
+    Patch {
+        ks: r.range(1.8, 2.5),
+        ks_tone: 0.45,
+        cutoff: 3000.0,
+        keytrack: 0.3,
+        a: 0.001,
+        d: 3.0,
+        s: 1.0,
+        r: 0.3,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn lute(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(1.4, 2.0), ks_tone: 0.5, a: 0.001, d: 3.0, s: 1.0, r: 0.3, gain: 0.5, ..PATCH }
+}
+
+fn cittern(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(0.8, 1.2), ks_tone: 0.8, a: 0.001, d: 2.0, s: 1.0, r: 0.25, gain: 0.45, ..PATCH }
+}
+
+fn banjo(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        ks: r.range(0.5, 0.8),
+        ks_tone: 0.92,
+        drive: 0.4,
+        a: 0.001,
+        d: 1.5,
+        s: 1.0,
+        r: 0.15,
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+fn pizzicato(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(0.3, 0.45), ks_tone: 0.5, a: 0.001, d: 1.0, s: 1.0, r: 0.1, gain: 0.5, ..PATCH }
+}
+
+// -- leads
+
+fn lead_saw(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(6.0, 10.0),
+        width: 0.35,
+        cutoff: r.range(2500.0, 4500.0),
+        res: 0.15,
+        env_amt: 1.0,
+        fdec: 0.3,
+        keytrack: 0.3,
+        a: 0.015,
+        d: 0.6,
+        s: 0.75,
+        r: 0.3,
+        vib: r.range(0.18, 0.3),
+        vib_rate: r.range(5.0, 6.0),
+        glide: 0.06,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn lead_square(r: &mut Rng) -> Patch {
+    Patch { wave: Wave::Square, pw: r.range(0.4, 0.5), unison: 2, detune: 6.0, width: 0.3, ..lead_saw(r) }
+}
+
+fn lead_sync(r: &mut Rng) -> Patch {
+    // a tearing, sweeping lead (FM standing in for oscillator sync)
+    Patch {
+        fm: r.range(2.5, 3.5),
+        ratio: r.pick(&[2.5, 3.5, 1.5]),
+        fm_dec: r.range(0.25, 0.45),
+        cutoff: 4000.0,
+        keytrack: 0.3,
+        a: 0.01,
+        d: 0.6,
+        s: 0.8,
+        r: 0.25,
+        vib: 0.15,
+        vib_rate: 5.5,
+        glide: 0.05,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn sax(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(1.8, 2.6),
+        ratio: 1.0,
+        fm_dec: 2.0,
+        cutoff: r.range(2400.0, 3200.0),
+        res: 0.2,
+        keytrack: 0.4,
+        a: 0.04,
+        d: 0.4,
+        s: 0.85,
+        r: 0.12,
+        vib: 0.25,
+        vib_rate: 5.5,
+        glide: 0.03,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn flute(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.4,
+        noise: r.range(0.03, 0.05),
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.05,
+        d: 0.5,
+        s: 0.8,
+        r: 0.2,
+        vib: 0.15,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn ocarina(_: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.3,
+        noise: 0.015,
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.04,
+        d: 0.5,
+        s: 0.8,
+        r: 0.4,
+        vib: 0.12,
+        vib_rate: 4.5,
+        gain: 0.35,
+        ..PATCH
+    }
+}
+
+fn recorder(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.5,
+        semi2: 12.0,
+        noise: 0.03,
+        cutoff: 4000.0,
+        keytrack: 0.3,
+        a: 0.025,
+        d: 0.3,
+        s: 0.9,
+        r: 0.08,
+        vib: r.range(0.05, 0.1),
+        vib_rate: 5.0,
+        glide: 0.012,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn whistle(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        noise: r.range(0.04, 0.06),
+        cutoff: 6000.0,
+        keytrack: 0.2,
+        a: 0.015,
+        d: 0.3,
+        s: 0.9,
+        r: 0.06,
+        vib: 0.12,
+        vib_rate: 6.0,
+        glide: 0.01,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn muted_trumpet(r: &mut Rng) -> Patch {
+    Patch {
+        vowel: 2,
+        cutoff: r.range(1800.0, 2400.0),
+        env_amt: 1.0,
+        fdec: 0.1,
+        keytrack: 0.5,
+        a: 0.02,
+        d: 0.4,
+        s: 0.8,
+        r: 0.08,
+        vib: 0.1,
+        vib_rate: 5.5,
+        glide: 0.015,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+fn trumpet(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 4.0,
+        width: 0.1,
+        cutoff: r.range(1200.0, 1600.0),
+        res: 0.15,
+        env_amt: 1.6,
+        fdec: 0.09,
+        keytrack: 0.6,
+        a: 0.015,
+        d: 0.4,
+        s: 0.8,
+        r: 0.07,
+        vib: 0.1,
+        vib_rate: 5.5,
+        glide: 0.015,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn clarinet(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.5,
+        cutoff: r.range(1800.0, 2600.0),
+        res: 0.1,
+        env_amt: 0.5,
+        fdec: 0.1,
+        keytrack: 0.6,
+        noise: 0.012,
+        a: 0.02,
+        d: 0.3,
+        s: 0.85,
+        r: 0.06,
+        vib: 0.08,
+        vib_rate: 5.2,
+        glide: 0.015,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn trombone(r: &mut Rng) -> Patch {
+    Patch {
+        cutoff: r.range(700.0, 1000.0),
+        res: 0.15,
+        env_amt: 1.2,
+        fdec: 0.15,
+        keytrack: 0.5,
+        a: 0.03,
+        d: 0.4,
+        s: 0.85,
+        r: 0.1,
+        vib: 0.08,
+        vib_rate: 5.0,
+        glide: 0.05,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn fiddle(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 4.0,
+        width: 0.2,
+        vowel: 2,
+        noise: 0.02,
+        cutoff: 4500.0,
+        keytrack: 0.3,
+        a: 0.05,
+        d: 0.3,
+        s: 0.9,
+        r: 0.15,
+        vib: r.range(0.2, 0.3),
+        vib_rate: 5.8,
+        glide: 0.02,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn accordion(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: r.range(0.35, 0.45),
+        unison: 3,
+        detune: r.range(12.0, 22.0),
+        width: 0.5,
+        wave2: Wave::Saw,
+        mix2: 0.3,
+        semi2: if r.chance(0.4) { 12.0 } else { 0.0 },
+        cutoff: r.range(2600.0, 3600.0),
+        res: 0.25,
+        keytrack: 0.5,
+        a: 0.025,
+        d: 0.4,
+        s: 0.9,
+        r: 0.08,
+        gain: 0.32,
+        ..PATCH
+    }
+}
+
+fn bandoneon(r: &mut Rng) -> Patch {
+    Patch { unison: 2, detune: r.range(2.0, 5.0), semi2: 0.0, cutoff: r.range(2000.0, 2600.0), ..accordion(r) }
+}
+
+fn harmonica(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.3,
+        vowel: 3,
+        cutoff: 3500.0,
+        keytrack: 0.3,
+        a: 0.03,
+        d: 0.3,
+        s: 0.85,
+        r: 0.08,
+        vib: r.range(0.1, 0.2),
+        vib_rate: 5.5,
+        trem: 0.1,
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+fn horn(r: &mut Rng) -> Patch {
+    Patch { cutoff: r.range(900.0, 1300.0), unison: 2, detune: 5.0, width: 0.2, ..trombone(r) }
+}
+
+fn hoover(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 3,
+        detune: r.range(25.0, 40.0),
+        width: 1.0,
+        wave2: Wave::Saw,
+        mix2: 0.6,
+        semi2: -12.0,
+        cutoff: r.range(1500.0, 2200.0),
+        res: 0.2,
+        keytrack: 0.3,
+        bend: -7.0,
+        glide: 0.12,
+        a: 0.02,
+        d: 0.5,
+        s: 0.8,
+        r: 0.3,
+        gain: 0.22,
+        ..PATCH
+    }
+}
+
+fn vox_chop(r: &mut Rng) -> Patch {
+    Patch {
+        vowel: r.pick(&[1, 2, 3, 4, 5]),
+        cutoff: 4000.0,
+        keytrack: 0.2,
+        a: 0.005,
+        d: 0.15,
+        s: 0.0,
+        r: 0.08,
+        vib: 0.0,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn pluck_hook(r: &mut Rng) -> Patch {
+    Patch {
+        wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
+        pw: 0.3,
+        cutoff: r.range(900.0, 1600.0),
+        res: 0.35,
+        env_amt: 2.5,
+        fdec: 0.12,
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.2,
+        s: 0.0,
+        r: 0.08,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn arp_pluck(r: &mut Rng) -> Patch {
+    Patch {
+        wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
+        pw: r.range(0.3, 0.5),
+        cutoff: r.range(1000.0, 2200.0),
+        res: r.range(0.2, 0.35),
+        env_amt: 2.0,
+        fdec: r.range(0.15, 0.3),
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.3,
+        s: 0.0,
+        r: 0.12,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn glass_fm(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        fm: r.range(0.8, 1.6),
+        ratio: r.pick(&[2.0, 3.0, 1.0]),
+        fm_dec: 0.5,
+        a: 0.003,
+        d: 1.2,
+        s: 0.2,
+        r: 0.3,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn stab_saw(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 12.0,
+        width: 0.7,
+        cutoff: r.range(600.0, 1200.0),
+        res: 0.3,
+        env_amt: 2.0,
+        fdec: r.range(0.12, 0.25),
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.35,
+        s: 0.0,
+        r: 0.2,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+fn stab_dub(r: &mut Rng) -> Patch {
+    Patch { cutoff: r.range(400.0, 700.0), res: 0.4, env_amt: 1.5, fdec: 0.1, d: 0.25, ..stab_saw(r) }
+}
+
+fn stab_organ(r: &mut Rng) -> Patch {
+    Patch { d: 0.2, s: 0.0, r: 0.1, ..pad_organ(r) }
+}
+
+// -- basses
+
+fn bass_reese(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: r.range(14.0, 24.0),
+        cutoff: r.range(450.0, 700.0),
+        res: 0.2,
+        keytrack: 0.3,
+        a: 0.005,
+        d: 0.5,
+        s: 0.9,
+        r: 0.08,
+        drive: 0.5,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_sub(_: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        cutoff: 300.0,
+        keytrack: 0.0,
+        a: 0.004,
+        d: 0.4,
+        s: 0.8,
+        r: 0.06,
+        drive: 0.3,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_fm(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(2.0, 3.0),
+        ratio: r.pick(&[1.0, 2.0]),
+        fm_dec: 0.15,
+        cutoff: 1200.0,
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.4,
+        s: 0.5,
+        r: 0.06,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_slap(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(3.5, 4.5),
+        ratio: 1.0,
+        fm_dec: 0.05,
+        cutoff: 2000.0,
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.3,
+        s: 0.4,
+        r: 0.05,
+        drive: 0.5,
+        gain: 0.55,
+        ..PATCH
+    }
+}
+
+fn bass_seq(r: &mut Rng) -> Patch {
+    Patch {
+        cutoff: r.range(350.0, 600.0),
+        res: 0.25,
+        env_amt: 2.0,
+        fdec: 0.1,
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.2,
+        s: 0.0,
+        r: 0.04,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_moog(r: &mut Rng) -> Patch {
+    Patch {
+        wave2: Wave::Square,
+        mix2: 0.6,
+        semi2: -12.0,
+        poles4: true,
+        cutoff: r.range(250.0, 400.0),
+        res: 0.5,
+        env_amt: 1.5,
+        fdec: 0.2,
+        keytrack: 0.3,
+        a: 0.003,
+        d: 0.3,
+        s: 0.6,
+        r: 0.06,
+        drive: 0.4,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn bass_upright(r: &mut Rng) -> Patch {
+    Patch {
+        ks: r.range(1.0, 1.6),
+        ks_tone: 0.35,
+        cutoff: 900.0,
+        keytrack: 0.2,
+        a: 0.002,
+        d: 2.0,
+        s: 1.0,
+        r: 0.12,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_synth(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Tri,
+        wave2: Wave::Saw,
+        mix2: 0.25,
+        sub: 0.4,
+        cutoff: r.range(450.0, 700.0),
+        res: 0.1,
+        env_amt: 1.2,
+        fdec: 0.15,
+        keytrack: 0.3,
+        a: 0.004,
+        d: 0.8,
+        s: 0.35,
+        r: 0.08,
+        drive: 0.6,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_acid_sq(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        poles4: true,
+        cutoff: r.range(180.0, 320.0),
+        res: r.range(0.78, 0.9),
+        env_amt: r.range(2.5, 4.0),
+        fdec: r.range(0.2, 0.45),
+        keytrack: 0.3,
+        a: 0.002,
+        d: 0.5,
+        s: 0.6,
+        r: 0.02,
+        glide: r.range(0.04, 0.07),
+        drive: r.range(1.0, 2.5),
+        gain: 0.55,
+        ..PATCH
+    }
+}
+
+fn bass_acid_saw(r: &mut Rng) -> Patch {
+    Patch { wave: Wave::Saw, ..bass_acid_sq(r) }
+}
+
+fn tuba(r: &mut Rng) -> Patch {
+    Patch {
+        wave2: Wave::Sine,
+        mix2: 0.7,
+        cutoff: r.range(350.0, 550.0),
+        res: 0.15,
+        env_amt: 1.4,
+        fdec: 0.1,
+        keytrack: 0.5,
+        a: 0.015,
+        d: 0.25,
+        s: 0.6,
+        r: 0.07,
+        gain: 0.8,
+        ..PATCH
+    }
+}
+
+fn bass_accordion(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.4,
+        cutoff: r.range(700.0, 1000.0),
+        keytrack: 0.4,
+        a: 0.01,
+        d: 0.3,
+        s: 0.9,
+        r: 0.06,
+        gain: 0.6,
+        ..PATCH
+    }
+}
+
+fn drone_hum(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Saw,
+        mix2: r.range(0.08, 0.18),
+        semi2: 0.08,
+        cutoff: r.range(250.0, 450.0),
+        res: 0.1,
+        keytrack: 0.0,
+        a: 4.0,
+        d: 2.0,
+        s: 1.0,
+        r: 6.0,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn drone_choir(r: &mut Rng) -> Patch {
+    Patch { vowel: r.pick(&[4, 5]), unison: 2, detune: 8.0, width: 0.6, a: 3.0, r: 5.0, keytrack: 0.0, ..pad_choir(r) }
+}
+
+fn drone_reed(r: &mut Rng) -> Patch {
+    // a hurdy-gurdy or a bagpipe's drone: a buzzing, nasal saw
+    Patch {
+        unison: 2,
+        detune: r.range(3.0, 6.0),
+        vowel: r.pick(&[2, 3]),
+        cutoff: r.range(1800.0, 2600.0),
+        res: 0.2,
+        keytrack: 0.0,
+        a: 0.4,
+        d: 1.0,
+        s: 1.0,
+        r: 1.0,
+        gain: 0.4,
+        ..PATCH
+    }
+}
+
+// -- drum kits (each channel's kinds in their order)
+
+fn kit_kick_808(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![DrumPatch { drive: 0.2, ..kick(r, (80.0, 100.0), (43.0, 48.0), (1.0, 1.5), 0.0, 0.0) }]
+}
+fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), 0.25, 0.8)]
+}
+fn kit_kick_dist(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (180.0, 230.0), (50.0, 56.0), (0.4, 0.55), 0.3, 3.0)]
+}
+fn kit_kick_deep(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)]
+}
+fn kit_kick_linn(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)]
+}
+fn kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)]
+}
+fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![DrumPatch {
+        tone: 1.0,
+        f0: r.range(100.0, 120.0),
+        f1: r.range(80.0, 95.0),
+        pdec: 0.03,
+        tdec: 0.6,
+        noise: 0.35,
+        nmode: 0,
+        ncut: 800.0,
+        ndec: 0.25,
+        gain: 0.9,
+        ..DRUM
+    }]
+}
+
+/// Snares and claps: [the main hit, a softer one for rolls and ghosts].
+fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(800.0, 1000.0),
+        nres: 0.3,
+        ndec: 0.45,
+        claps: 4,
+        gain: 0.9,
+        ..DRUM
+    };
+    vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }]
+}
+fn kit_snap(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch { noise: 1.0, nmode: 1, ncut: r.range(2200.0, 2800.0), nres: 0.4, ndec: 0.06, gain: 0.9, ..DRUM };
+    vec![c, DrumPatch { gain: 0.6, ..c }]
+}
+fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.55,
+        f0: 200.0,
+        f1: r.range(170.0, 185.0),
+        pdec: 0.01,
+        tdec: 0.1,
+        noise: 0.9,
+        nmode: 2,
+        ncut: 1800.0,
+        nres: 0.1,
+        ndec: 0.15,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }]
+}
+fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.15,
+        f0: 220.0,
+        f1: 200.0,
+        tdec: 0.1,
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(3000.0, 4000.0),
+        nres: 0.1,
+        ndec: 0.25,
+        natt: 0.03,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.12, gain: 0.6, ..c }]
+}
+fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(1300.0, 1700.0),
+        nres: 0.3,
+        ndec: 0.12,
+        claps: 2,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { claps: 0, gain: 0.5, ..c }]
+}
+
+/// Hats: [closed, open].
+fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
+    hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8)
+}
+fn kit_hats_909(r: &mut Rng) -> Vec<DrumPatch> {
+    hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8)
+}
+fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(5500.0, 7000.0),
+        nres: 0.2,
+        ndec: 0.08,
+        natt: 0.01,
+        gain: 0.65,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.2, ..c }]
+}
+fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 2,
+        ncut: 6000.0,
+        nres: 0.2,
+        ndec: 0.12,
+        metal: 0.7,
+        mf: r.range(3.5, 4.5),
+        natt: 0.002,
+        gain: 0.7,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.35, ..c }]
+}
+fn kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.12,
+        f0: 480.0,
+        f1: 480.0,
+        tdec: 0.8,
+        noise: 1.0,
+        nmode: 2,
+        ncut: 5000.0,
+        ndec: 0.9,
+        metal: 0.6,
+        mf: r.range(2.4, 2.8),
+        gain: 0.5,
+        ..DRUM
+    };
+    vec![DrumPatch { ndec: 0.25, ..c }, c]
+}
+
+/// Percussion: [rim (or a click), tom low, mid, high, shaker].
+fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
+    // clave, congas and a bongo, a shaker
+    let conga = |f: f32| DrumPatch {
+        tone: 1.0,
+        f0: f * 1.25,
+        f1: f,
+        pdec: 0.02,
+        tdec: 0.2,
+        noise: 0.1,
+        nmode: 1,
+        ncut: 2000.0,
+        ndec: 0.02,
+        gain: 0.7,
+        ..DRUM
+    };
+    let clave = DrumPatch { tone: 0.9, f0: 2500.0, f1: 2500.0, tdec: 0.05, gain: 0.6, ..DRUM };
+    let base = r.range(260.0, 320.0);
+    vec![clave, conga(base), conga(base * 1.3), conga(base * 1.8), kit_shaker(r)[0]]
+}
+fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
+    // a cowbell, electronic toms, a woodblock
+    let cow = DrumPatch {
+        tone: 0.7,
+        f0: 560.0,
+        f1: 560.0,
+        tdec: 0.18,
+        tone2: 0.8,
+        ratio2: 1.48,
+        noise: 0.2,
+        nmode: 1,
+        ncut: 800.0,
+        ndec: 0.05,
+        drive: 1.5,
+        gain: 0.45,
+        ..DRUM
+    };
+    let tom = |f: f32| DrumPatch {
+        tone: 1.0,
+        f0: f * 2.0,
+        f1: f,
+        pdec: 0.08,
+        tdec: 0.4,
+        noise: 0.25,
+        nmode: 0,
+        ncut: 3000.0,
+        ndec: 0.1,
+        gain: 0.75,
+        ..DRUM
+    };
+    let wood = DrumPatch {
+        tone: 0.8,
+        f0: 1000.0,
+        f1: 950.0,
+        tdec: 0.06,
+        noise: 0.3,
+        nmode: 1,
+        ncut: 1000.0,
+        ndec: 0.03,
+        gain: 0.5,
+        ..DRUM
+    };
+    let base = r.range(90.0, 120.0);
+    vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood]
+}
+fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
+    // spoons (two clicks), a frame drum's rim, finger cymbals
+    let spoons = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(2800.0, 3500.0),
+        nres: 0.3,
+        ndec: 0.03,
+        claps: 2,
+        gain: 0.6,
+        ..DRUM
+    };
+    let ding = DrumPatch { tone: 0.6, f0: 2600.0, f1: 2600.0, tdec: 1.2, tone2: 0.5, ratio2: 2.76, gain: 0.25, ..DRUM };
+    let tom = |f: f32| DrumPatch {
+        tone: 0.9,
+        f0: f * 1.2,
+        f1: f,
+        pdec: 0.03,
+        tdec: 0.3,
+        noise: 0.2,
+        nmode: 0,
+        ncut: 900.0,
+        ndec: 0.1,
+        gain: 0.7,
+        ..DRUM
+    };
+    vec![spoons, tom(140.0), tom(190.0), ding, kit_shaker(r)[0]]
+}
+
+// -- the genres' palettes (each role's tuned original comes on top)
+
+const P_AMB_PAD: &[(&str, Make)] = &[
+    ("string ensemble", pad_strings),
+    ("choir", pad_choir),
+    ("glassy FM pad", pad_glass),
+    ("shimmer", pad_shimmer),
+    ("warm triangle pad", pad_warm),
+    ("organ pad", pad_organ),
+];
+const P_AMB_BELL: &[(&str, Make)] = &[
+    ("FM bell", bell_fm),
+    ("celesta", celesta),
+    ("marimba", marimba),
+    ("kalimba", kalimba),
+    ("harp", harp),
+    ("piano", piano),
+    ("music box", music_box),
+    ("vibraphone", vibes),
+    ("hammered dulcimer", dulcimer),
+];
+const P_AMB_ARP: &[(&str, Make)] = &[
+    ("glass pluck", glass_arp),
+    ("kalimba", kalimba),
+    ("harp", harp),
+    ("marimba", marimba),
+    ("nylon guitar", nylon),
+    ("celesta", celesta),
+    ("lute", lute),
+];
+const P_AMB_LEAD: &[(&str, Make)] =
+    &[("flute", flute), ("recorder", recorder), ("ocarina", ocarina), ("tin whistle", whistle)];
+const P_AMB_BASS: &[(&str, Make)] =
+    &[("sub", bass_sub), ("upright bass", bass_upright), ("soft synth bass", bass_synth)];
+const P_AMB_DRONE: &[(&str, Make)] =
+    &[("choir drone", drone_choir), ("hum", drone_hum), ("reed organ drone", drone_reed)];
+const K_AMB_KICK: &[(&str, MakeKit)] = &[("frame drum", kit_kick_frame), ("deep kick", kit_kick_deep)];
+const K_AMB_PERC: &[(&str, MakeKit)] = &[("hand percussion", kit_perc_hand), ("spoons and finger cymbals", kit_spoons)];
+const K_AMB_HAT: &[(&str, MakeKit)] = &[("shaker", kit_shaker), ("tambourine", kit_tambourine)];
+
+const P_TECH_ACID: &[(&str, Make)] = &[("303 (saw)", bass_acid_saw), ("303 (square)", bass_acid_sq)];
+const P_TECH_BASS: &[(&str, Make)] =
+    &[("Reese", bass_reese), ("sub", bass_sub), ("FM bass", bass_fm), ("sequenced saw", bass_seq)];
+const P_TECH_STAB: &[(&str, Make)] = &[("chord stab", stab_saw), ("dub chord", stab_dub), ("organ stab", stab_organ)];
+const P_TECH_PAD: &[(&str, Make)] = &[("dark pad", pad_dark), ("strings", pad_strings), ("choir", pad_choir)];
+const P_TECH_LEAD: &[(&str, Make)] = &[
+    ("pluck", pluck_hook),
+    ("hoover", hoover),
+    ("vocal chop", vox_chop),
+    ("marimba blip", marimba),
+    ("sync lead", lead_sync),
+];
+const K_TECH_KICK: &[(&str, MakeKit)] = &[
+    ("808 kick", kit_kick_808),
+    ("distorted kick", kit_kick_dist),
+    ("deep kick", kit_kick_deep),
+    ("909 kick", kit_kick_909),
+];
+const K_TECH_SNARE: &[(&str, MakeKit)] =
+    &[("808 clap", kit_clap_808), ("snap", kit_snap), ("Linn snare", kit_snare_linn)];
+const K_TECH_HAT: &[(&str, MakeKit)] =
+    &[("808 hats", kit_hats_808), ("909 hats", kit_hats_909), ("shaker", kit_shaker)];
+const K_TECH_PERC: &[(&str, MakeKit)] =
+    &[("cowbell, toms, woodblock", kit_perc_metal), ("clave, congas", kit_perc_hand)];
+const K_CYM: &[(&str, MakeKit)] = &[("ride", kit_ride)];
+
+const P_SW_BASS: &[(&str, Make)] =
+    &[("Moog-ish bass", bass_moog), ("slap bass", bass_slap), ("sequenced bass", bass_seq), ("FM bass", bass_fm)];
+const P_SW_PAD: &[(&str, Make)] =
+    &[("strings", pad_strings), ("brass", pad_brass), ("choir", pad_choir), ("warm pad", pad_warm)];
+const P_SW_ARP: &[(&str, Make)] = &[
+    ("saw pluck", arp_pluck),
+    ("glockenspiel", glockenspiel),
+    ("electric piano", ep_rhodes),
+    ("marimba", marimba),
+    ("pizzicato strings", pizzicato),
+];
+const P_SW_LEAD: &[(&str, Make)] =
+    &[("saw lead", lead_saw), ("square lead", lead_square), ("sync lead", lead_sync), ("sax", sax)];
+const P_SW_BELL: &[(&str, Make)] =
+    &[("glassy FM", glass_fm), ("electric piano", ep_rhodes), ("vibraphone", vibes), ("celesta", celesta)];
+const K_SW_KICK: &[(&str, MakeKit)] =
+    &[("Linn kick", kit_kick_linn), ("909 kick", kit_kick_909), ("808 kick", kit_kick_808)];
+const K_SW_SNARE: &[(&str, MakeKit)] = &[("Linn snare", kit_snare_linn), ("808 clap", kit_clap_808)];
+const K_SW_HAT: &[(&str, MakeKit)] = &[("808 hats", kit_hats_808), ("909 hats", kit_hats_909)];
+const K_SW_PERC: &[(&str, MakeKit)] = &[("cowbell and electronic toms", kit_perc_metal), ("congas", kit_perc_hand)];
+
+const P_LOFI_KEYS: &[(&str, Make)] = &[
+    ("Rhodes", ep_rhodes),
+    ("Wurlitzer", ep_wurli),
+    ("felt piano", piano_felt),
+    ("nylon guitar", nylon),
+    ("piano", piano),
+    ("organ", pad_organ),
+];
+const P_LOFI_BASS: &[(&str, Make)] = &[("upright bass", bass_upright), ("sub", bass_sub), ("synth bass", bass_synth)];
+const P_LOFI_LEAD: &[(&str, Make)] = &[
+    ("vibraphone", vibes),
+    ("flute", flute),
+    ("muted trumpet", muted_trumpet),
+    ("sax", sax),
+    ("harmonica", harmonica),
+    ("trumpet", trumpet),
+    ("clarinet", clarinet),
+];
+const K_LOFI_KICK: &[(&str, MakeKit)] = &[("Linn kick", kit_kick_linn), ("soft kick", kit_kick_soft)];
+const K_LOFI_SNARE: &[(&str, MakeKit)] = &[("brushes", kit_brush), ("snap", kit_snap)];
+const K_LOFI_HAT: &[(&str, MakeKit)] = &[("shaker", kit_shaker), ("808 hats", kit_hats_808)];
+const K_LOFI_PERC: &[(&str, MakeKit)] = &[("clave, congas", kit_perc_hand)];
+
+const P_POLKA_BASS: &[(&str, Make)] =
+    &[("tuba", tuba), ("bass accordion", bass_accordion), ("upright bass", bass_upright)];
+const P_POLKA_PAH: &[(&str, Make)] = &[("banjo", banjo), ("piano", piano), ("cittern", cittern)];
+const P_POLKA_LEAD: &[(&str, Make)] =
+    &[("musette accordion", accordion), ("bandoneon", bandoneon), ("harmonica", harmonica), ("fiddle", fiddle)];
+const P_POLKA_OTHER: &[(&str, Make)] = &[
+    ("clarinet", clarinet),
+    ("trumpet", trumpet),
+    ("trombone", trombone),
+    ("tenor horn", horn),
+    ("sax", sax),
+    ("fiddle", fiddle),
+    ("glockenspiel", glockenspiel),
+    ("piccolo", whistle),
+];
+const K_POLKA_KICK: &[(&str, MakeKit)] = &[("deep bass drum", kit_kick_deep)];
+const K_POLKA_SNARE: &[(&str, MakeKit)] = &[("brushes", kit_brush), ("hand claps", kit_hand_clap)];
+const K_POLKA_HAT: &[(&str, MakeKit)] = &[("tambourine", kit_tambourine), ("ride", kit_ride)];
+
+fn band_ambient(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_PAD, P_AMB_PAD, 60.0);
+    b.tone(r, s, CH_BELL, P_AMB_BELL, 76.0);
+    b.tone(r, s, CH_ARP, P_AMB_ARP, 72.0);
+    b.tone(r, s, CH_LEAD, P_AMB_LEAD, 67.0);
+    b.tone(r, s, CH_BASS, P_AMB_BASS, 40.0);
+    b.tone(r, s, CH_DRONE, P_AMB_DRONE, 38.0);
+    b.kit(r, s, CH_KICK, K_AMB_KICK);
+    b.kit(r, s, CH_PERC, K_AMB_PERC);
+    b.kit(r, s, CH_HAT, K_AMB_HAT);
+    b
+}
+
+fn band_techno(r: &mut Rng, s: &Synth, acid: bool) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_BASS, if acid { P_TECH_ACID } else { P_TECH_BASS }, 40.0);
+    b.tone(r, s, CH_KEYS, P_TECH_STAB, 62.0);
+    b.tone(r, s, CH_PAD, P_TECH_PAD, 60.0);
+    b.tone(r, s, CH_LEAD, P_TECH_LEAD, 70.0);
+    b.kit(r, s, CH_KICK, K_TECH_KICK);
+    b.kit(r, s, CH_SNARE, K_TECH_SNARE);
+    b.kit(r, s, CH_HAT, K_TECH_HAT);
+    b.kit(r, s, CH_PERC, K_TECH_PERC);
+    b.kit(r, s, CH_CYM, K_CYM);
+    b
+}
+
+fn band_synthwave(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_BASS, P_SW_BASS, 40.0);
+    b.tone(r, s, CH_PAD, P_SW_PAD, 62.0);
+    b.tone(r, s, CH_ARP, P_SW_ARP, 70.0);
+    b.tone(r, s, CH_LEAD, P_SW_LEAD, 74.0);
+    b.tone(r, s, CH_BELL, P_SW_BELL, 64.0);
+    b.kit(r, s, CH_KICK, K_SW_KICK);
+    b.kit(r, s, CH_SNARE, K_SW_SNARE);
+    b.kit(r, s, CH_HAT, K_SW_HAT);
+    b.kit(r, s, CH_PERC, K_SW_PERC);
+    b.kit(r, s, CH_CYM, K_CYM);
+    b
+}
+
+fn band_lofi(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_KEYS, P_LOFI_KEYS, 62.0);
+    b.tone(r, s, CH_BASS, P_LOFI_BASS, 40.0);
+    b.tone(r, s, CH_LEAD, P_LOFI_LEAD, 74.0);
+    b.tone(r, s, CH_BELL, P_LOFI_LEAD, 66.0);
+    b.kit(r, s, CH_KICK, K_LOFI_KICK);
+    b.kit(r, s, CH_SNARE, K_LOFI_SNARE);
+    b.kit(r, s, CH_HAT, K_LOFI_HAT);
+    b.kit(r, s, CH_PERC, K_LOFI_PERC);
+    b
+}
+
+fn band_polka(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_BASS, P_POLKA_BASS, 40.0);
+    b.tone(r, s, CH_KEYS, P_POLKA_PAH, 62.0);
+    b.tone(r, s, CH_LEAD, P_POLKA_LEAD, 74.0);
+    b.tone(r, s, CH_ARP, P_POLKA_OTHER, 70.0);
+    b.kit(r, s, CH_KICK, K_POLKA_KICK);
+    b.kit(r, s, CH_SNARE, K_POLKA_SNARE);
+    b.kit(r, s, CH_HAT, K_POLKA_HAT);
+    b
+}
+
 fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
     let ch = &mut s.ch;
     ch[CH_PAD].patch = Patch {
@@ -3066,7 +6872,7 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         a: r.range(2.0, 4.0),
         d: 3.0,
         s: 0.9,
-        r: r.range(5.0, 8.0),
+        r: r.range(3.0, 4.5),
         vib: 0.05,
         vib_rate: r.range(0.2, 0.4),
         gain: 0.16,
@@ -3114,20 +6920,42 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.25,
         ..PATCH
     };
+    // the pulse bass: soft round plucks
     ch[CH_BASS].patch = Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
         mix2: 0.3,
-        cutoff: 400.0,
+        cutoff: 450.0,
+        env_amt: 0.8,
+        fdec: 0.2,
         keytrack: 0.0,
-        a: 0.05,
-        d: 2.0,
-        s: 0.7,
-        r: 1.0,
-        gain: 0.6,
+        a: 0.008,
+        d: 0.6,
+        s: 0.4,
+        r: 0.15,
+        gain: 0.7,
         ..PATCH
     };
     ch[CH_BASS].mono = true;
+    // the ocarina: a sine and a little triangle, breathy, its vibrato late
+    ch[CH_LEAD].patch = Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.3,
+        noise: 0.015,
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.04,
+        d: 0.5,
+        s: 0.8,
+        r: 0.4,
+        vib: 0.12,
+        vib_rate: 4.5,
+        gain: 0.35,
+        ..PATCH
+    };
+    ch[CH_LEAD].mono = false;
+    mix(&mut ch[CH_LEAD], 0.3, r.range(-0.3, 0.3), 0.6, 0.3, 0.0);
     ch[CH_KICK].drums = vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)];
     ch[CH_HAT].drums = vec![DrumPatch {
         noise: 1.0,
@@ -3146,6 +6974,10 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
     mix(&mut ch[CH_BASS], 0.5, 0.0, 0.1, 0.0, 0.0);
     mix(&mut ch[CH_KICK], 0.45, 0.0, 0.2, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.25, 0.3, 0.4, 0.2, 0.0);
+    ch[CH_PERC].drums = percs(r);
+    mix(&mut ch[CH_PERC], 0.18, -0.3, 0.5, 0.25, 0.0);
+    ch[CH_PERC].lp_base = 4000.0;
+    ch[CH_PERC].lp = 4000.0;
     mix(&mut ch[CH_FX], 1.0, 0.0, 0.5, 0.0, 0.0);
     ch[CH_KICK].lp_base = 2500.0;
     ch[CH_KICK].lp = 2500.0;
@@ -3266,6 +7098,24 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.16,
         ..PATCH
     };
+    // the hook: a short bright pluck
+    ch[CH_LEAD].patch = Patch {
+        wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
+        pw: 0.3,
+        cutoff: r.range(900.0, 1600.0),
+        res: 0.35,
+        env_amt: 2.5,
+        fdec: 0.12,
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.2,
+        s: 0.0,
+        r: 0.08,
+        gain: 0.3,
+        ..PATCH
+    };
+    ch[CH_LEAD].mono = false;
+    mix(&mut ch[CH_LEAD], 0.3, r.range(-0.3, 0.3), 0.25, 0.4, 0.3);
     mix(&mut ch[CH_KICK], 0.6, 0.0, 0.0, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.5, 0.0, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.85, 0.15, 0.08, 0.0, 0.0);
@@ -3387,6 +7237,20 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         ..PATCH
     };
     ch[CH_LEAD].mono = true;
+    // the second voice: a glassy FM tone
+    ch[CH_BELL].patch = Patch {
+        filter: false,
+        fm: r.range(0.8, 1.6),
+        ratio: r.pick(&[2.0, 3.0, 1.0]),
+        fm_dec: 0.5,
+        a: 0.003,
+        d: 1.2,
+        s: 0.2,
+        r: 0.3,
+        gain: 0.3,
+        ..PATCH
+    };
+    mix(&mut ch[CH_BELL], 0.3, r.range(-0.4, 0.4), 0.4, 0.35, 0.2);
     mix(&mut ch[CH_KICK], 0.8, 0.0, 0.0, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.4, 0.0, 0.15, 0.0, 0.0);
     ch[CH_SNARE].rev2 = 0.9;
@@ -3517,39 +7381,41 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
         ..PATCH
     };
     ch[CH_BASS].mono = true;
-    ch[CH_LEAD].patch = if r.chance(0.5) {
-        Patch {
-            filter: false,
-            fm: 1.0,
-            ratio: 4.0,
-            fm_dec: 0.4,
-            a: 0.002,
-            d: 1.8,
-            s: 0.0,
-            r: 0.5,
-            trem: 0.3,
-            vib_rate: 5.0,
-            gain: 0.3,
-            ..PATCH
-        }
-    } else {
-        Patch {
-            wave: Wave::Sine,
-            wave2: Wave::Tri,
-            mix2: 0.4,
-            noise: 0.04,
-            cutoff: 2500.0,
-            keytrack: 0.3,
-            a: 0.05,
-            d: 0.5,
-            s: 0.8,
-            r: 0.2,
-            vib: 0.15,
-            vib_rate: 5.0,
-            gain: 0.3,
-            ..PATCH
-        }
+    let vibes = Patch {
+        filter: false,
+        fm: 1.0,
+        ratio: 4.0,
+        fm_dec: 0.4,
+        a: 0.002,
+        d: 1.8,
+        s: 0.0,
+        r: 0.5,
+        trem: 0.3,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
     };
+    let flute = Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.4,
+        noise: 0.04,
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.05,
+        d: 0.5,
+        s: 0.8,
+        r: 0.2,
+        vib: 0.15,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    };
+    // the second voice is whichever of vibes and flute the lead is not
+    let (lead, second) = if r.chance(0.5) { (vibes, flute) } else { (flute, vibes) };
+    ch[CH_LEAD].patch = lead;
+    ch[CH_BELL].patch = second;
+    mix(&mut ch[CH_BELL], 0.18, r.range(-0.3, 0.3), 0.3, 0.2, 0.1);
     ch[CH_LEAD].mono = false;
     let dusty = r.range(5000.0, 8000.0);
     mix(&mut ch[CH_KICK], 0.85, 0.0, 0.0, 0.0, 0.0);
@@ -3581,6 +7447,161 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
     s.m.wrate = r.range(0.35, 0.7);
     s.m.gain = 1.4;
     s.m.target = 0.195;
+}
+
+fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
+    let ch = &mut s.ch;
+    ch[CH_KICK].drums = vec![kick(r, (100.0, 130.0), (52.0, 60.0), (0.25, 0.35), 0.08, 0.4)];
+    let snare = DrumPatch {
+        tone: 0.45,
+        f0: 260.0,
+        f1: 215.0,
+        pdec: 0.01,
+        tdec: 0.09,
+        tone2: 0.3,
+        ratio2: 1.5,
+        noise: 0.9,
+        nmode: 1,
+        ncut: r.range(2500.0, 3500.0),
+        nres: 0.15,
+        ndec: r.range(0.12, 0.17),
+        gain: 0.8,
+        ..DRUM
+    };
+    ch[CH_SNARE].drums = vec![snare, DrumPatch { tone: 0.2, ndec: 0.07, gain: 0.6, ..snare }];
+    ch[CH_HAT].drums = hats(r, 8000.0, 0.035, 0.25, 0.2, 0.7);
+    ch[CH_CYM].drums = crash(r);
+    // the tuba: a soft saw with a sine under it, a brassy bloom in the filter
+    ch[CH_BASS].patch = Patch {
+        wave: Wave::Saw,
+        wave2: Wave::Sine,
+        mix2: 0.7,
+        cutoff: r.range(350.0, 550.0),
+        res: 0.15,
+        env_amt: 1.4,
+        fdec: 0.1,
+        keytrack: 0.5,
+        a: 0.015,
+        d: 0.25,
+        s: 0.6,
+        r: 0.07,
+        gain: 0.8,
+        ..PATCH
+    };
+    ch[CH_BASS].mono = true;
+    // the pah: the accordion's chord reeds
+    ch[CH_KEYS].patch = Patch {
+        wave: Wave::Square,
+        pw: 0.42,
+        unison: 2,
+        detune: r.range(6.0, 12.0),
+        width: 0.4,
+        wave2: Wave::Saw,
+        mix2: 0.35,
+        cutoff: r.range(1800.0, 2600.0),
+        res: 0.2,
+        env_amt: 0.8,
+        fdec: 0.08,
+        keytrack: 0.4,
+        a: 0.006,
+        d: 0.2,
+        s: 0.4,
+        r: 0.05,
+        gain: 0.3,
+        ..PATCH
+    };
+    // the accordion, musette: three reeds (one in tune, one sharp, one flat),
+    // reedy (a narrowish pulse and a saw), sometimes an octave reed above
+    ch[CH_LEAD].patch = Patch {
+        wave: Wave::Square,
+        pw: r.range(0.35, 0.45),
+        unison: 3,
+        detune: r.range(12.0, 22.0),
+        width: 0.5,
+        wave2: Wave::Saw,
+        mix2: 0.3,
+        semi2: if r.chance(0.4) { 12.0 } else { 0.0 },
+        cutoff: r.range(2600.0, 3600.0),
+        res: 0.25,
+        keytrack: 0.5,
+        a: 0.025,
+        d: 0.4,
+        s: 0.9,
+        r: 0.08,
+        gain: 0.32,
+        ..PATCH
+    };
+    ch[CH_LEAD].mono = false;
+    // a clarinet (a square: odd harmonics, a breath of noise) or a trumpet
+    // (saws with a brassy filter bloom); graces slide into the note
+    ch[CH_ARP].patch = if trumpet {
+        Patch {
+            wave: Wave::Saw,
+            unison: 2,
+            detune: 4.0,
+            width: 0.1,
+            cutoff: r.range(1200.0, 1600.0),
+            res: 0.15,
+            env_amt: 1.6,
+            fdec: 0.09,
+            keytrack: 0.6,
+            a: 0.015,
+            d: 0.4,
+            s: 0.8,
+            r: 0.07,
+            vib: 0.1,
+            vib_rate: 5.5,
+            glide: 0.015,
+            gain: 0.3,
+            ..PATCH
+        }
+    } else {
+        Patch {
+            wave: Wave::Square,
+            pw: 0.5,
+            cutoff: r.range(1800.0, 2600.0),
+            res: 0.1,
+            env_amt: 0.5,
+            fdec: 0.1,
+            keytrack: 0.6,
+            noise: 0.012,
+            a: 0.02,
+            d: 0.3,
+            s: 0.85,
+            r: 0.06,
+            vib: 0.08,
+            vib_rate: 5.2,
+            glide: 0.015,
+            gain: 0.3,
+            ..PATCH
+        }
+    };
+    ch[CH_ARP].mono = true;
+    mix(&mut ch[CH_KICK], 0.7, 0.0, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_SNARE], 0.45, 0.1, 0.15, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], 0.5, 0.2, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_CYM], 0.4, -0.2, 0.2, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], 0.5, 0.0, 0.08, 0.0, 0.0);
+    mix(&mut ch[CH_KEYS], 0.45, -0.1, 0.15, 0.0, 0.0);
+    mix(&mut ch[CH_LEAD], 0.45, 0.1, 0.25, 0.05, 0.0);
+    mix(&mut ch[CH_ARP], 0.4, -0.25, 0.25, 0.05, 0.0);
+    // the bellows: a slow swell on the accordion's reeds
+    let (depth, rate) = (r.range(0.08, 0.15), r.range(0.3, 0.6));
+    for c in [CH_LEAD, CH_KEYS] {
+        ch[c].swell = depth;
+        ch[c].swell_rate = rate;
+    }
+    s.rev.fb = r.range(0.78, 0.84);
+    s.rev.damp = 0.45;
+    s.rev_wet = 0.2;
+    s.dly.fb = 0.2;
+    s.dly.lpk = 0.3;
+    s.dly_rev = 0.2;
+    s.r2mode = R2_OFF;
+    s.fx.crackle = 0.0;
+    s.fx.wind_to = 0.0;
+    s.m.gain = 1.3;
+    s.m.target = 0.2;
 }
 
 // ---------------------------------------------------------------- the engine
@@ -3649,7 +7670,7 @@ impl Engine {
         if end - t <= 2.5 * SR as f64 {
             return end.ceil() as u64;
         }
-        let beat = len / 4.0;
+        let beat = len * self.song.beat_steps() as f64 / self.song.bar_steps() as f64;
         (start + ((t - start) / beat).ceil() * beat).ceil() as u64
     }
 }
@@ -3944,7 +7965,7 @@ pub fn render_wav(genre: usize, seed: u64, secs: f64, path: &str) -> Result<(), 
 
 /// The pieces (start in seconds, tempo, tonic, mode) the first `secs` of a
 /// genre and seed hold: the composer run alone, without the sound.
-fn pieces(genre: usize, seed: u64, secs: f64) -> Vec<(f64, f64, i32, usize)> {
+fn pieces(genre: usize, seed: u64, secs: f64) -> Vec<(f64, f64, i32, usize, &'static str)> {
     let mut e = Engine::new(genre, seed);
     let mut ev = Vec::new();
     let mut starts = vec![0.0];
@@ -3957,7 +7978,92 @@ fn pieces(genre: usize, seed: u64, secs: f64) -> Vec<(f64, f64, i32, usize)> {
         }
         ev.clear();
     }
-    starts.iter().zip(&e.song.log).map(|(&t, &(bpm, k, m))| (t, bpm, k, m)).collect()
+    starts.iter().zip(&e.song.log).map(|(&t, &(bpm, k, m, meter))| (t, bpm, k, m, meter)).collect()
+}
+
+/// What the composer wrote in a stretch of music, to compare versions by:
+/// chord changes and distinct chords a minute, notes and drum hits a second,
+/// and how alike bars 4 and 8 apart are (the mean Jaccard index of their
+/// events, as (16th, instrument, pitch or drum); all events, then notes alone).
+struct Stats {
+    changes_per_min: f64,
+    distinct_per_min: f64,
+    notes_per_s: f64,
+    hits_per_s: f64,
+    sim: [f64; 4],
+}
+
+fn stats(genre: usize, seed: u64, secs: f64) -> Stats {
+    let mut e = Engine::new(genre, seed);
+    let mut ev = Vec::new();
+    // per bar: piece, start (s), all events, notes alone
+    let mut bars: Vec<(usize, f64, Vec<u32>, Vec<u32>)> = Vec::new();
+    let mut chords: Vec<(f64, u16)> = Vec::new();
+    let (mut notes, mut hits) = (0usize, 0usize);
+    while e.pos < secs * SR as f64 {
+        let t0 = e.pos;
+        let len = e.song.bar(&mut e.syn, t0, &mut ev);
+        let step = e.song.step_len();
+        let (mut all, mut pitched) = (Vec::new(), Vec::new());
+        for &(t, x) in &ev {
+            let st = ((t as f64 - t0) / step).round().max(0.0) as u32;
+            match x {
+                Ev::Note { ch, note, .. } => {
+                    let k = st << 16 | (ch as u32) << 8 | note as u32;
+                    all.push(k);
+                    pitched.push(k);
+                    notes += 1;
+                }
+                Ev::Hit { ch, kind, .. } => {
+                    all.push(st << 16 | (ch as u32 + 100) << 8 | kind as u32);
+                    hits += 1;
+                }
+                Ev::Riser { .. } => {}
+            }
+        }
+        for v in [&mut all, &mut pitched] {
+            v.sort_unstable();
+            v.dedup();
+        }
+        for m in e.song.bar_chords() {
+            chords.push((t0 / SR as f64, m));
+        }
+        bars.push((e.song.log.len(), t0 / SR as f64, all, pitched));
+        e.pos += len;
+        ev.clear();
+    }
+    let jaccard = |a: &[u32], b: &[u32]| {
+        let common = a.iter().filter(|x| b.binary_search(x).is_ok()).count();
+        common as f64 / (a.len() + b.len() - common).max(1) as f64
+    };
+    let sim = |lag: usize, notes_only: bool| {
+        let v: Vec<f64> = (0..bars.len().saturating_sub(lag))
+            .filter(|&i| bars[i].0 == bars[i + lag].0)
+            .map(|i| if notes_only { (&bars[i].3, &bars[i + lag].3) } else { (&bars[i].2, &bars[i + lag].2) })
+            .filter(|(a, b)| !a.is_empty() || !b.is_empty())
+            .map(|(a, b)| jaccard(a, b))
+            .collect();
+        v.iter().sum::<f64>() / v.len().max(1) as f64
+    };
+    let minutes = secs / 60.0;
+    let changes = chords.windows(2).filter(|w| w[0].1 != w[1].1).count();
+    let full = (secs / 60.0).floor().max(1.0) as usize;
+    let distinct: usize = (0..full)
+        .map(|m| {
+            let mut v: Vec<u16> =
+                chords.iter().filter(|c| c.0 >= m as f64 * 60.0 && c.0 < (m + 1) as f64 * 60.0).map(|c| c.1).collect();
+            v.sort_unstable();
+            v.dedup();
+            v.len()
+        })
+        .sum();
+    Stats {
+        changes_per_min: changes as f64 / minutes,
+        distinct_per_min: distinct as f64 / full as f64,
+        notes_per_s: notes as f64 / secs,
+        hits_per_s: hits as f64 / secs,
+        sim: [sim(4, false), sim(8, false), sim(4, true), sim(8, true)],
+    }
 }
 
 /// `--musicwav GENRE SECONDS OUT.wav`: renders and says how long it took.
@@ -3982,13 +8088,26 @@ pub fn cli(args: &[String], seed: u64) {
     const MODE: [&str; 7] = ["ionian", "dorian", "phrygian", "lydian", "mixolydian", "aeolian", "harmonic minor"];
     let p: Vec<String> = pieces
         .iter()
-        .map(|&(t, bpm, k, m)| format!("{t:.0} s: {bpm:.1} bpm {} {}", KEYS[k as usize % 12], MODE[m]))
+        .map(|&(t, bpm, k, m, meter)| format!("{t:.0} s: {bpm:.1} bpm {meter} {} {}", KEYS[k as usize % 12], MODE[m]))
         .collect();
     println!(
         "{path}: {secs:.1} s of {} (seed {seed}) in {took:.2} s, {:.0}x real time; pieces: {}",
         GENRES[genre % GENRES.len()],
         secs / took.max(1e-9),
         p.join(", ")
+    );
+    let st = stats(genre, seed, secs);
+    println!(
+        "  composition: {:.1} chord changes and {:.1} distinct chords a minute, {:.1} notes and {:.1} drum hits a second; \
+         bars 4 / 8 apart alike {:.2} / {:.2} (notes alone {:.2} / {:.2})",
+        st.changes_per_min,
+        st.distinct_per_min,
+        st.notes_per_s,
+        st.hits_per_s,
+        st.sim[0],
+        st.sim[1],
+        st.sim[2],
+        st.sim[3]
     );
 }
 
@@ -4027,9 +8146,36 @@ mod tests {
     }
 
     #[test]
+    fn chord_pools_parse() {
+        let tav = [TAV_ION, TAV_MIX, TAV_DOR, TAV_AEO].concat();
+        for pool in [AMB_MAJ, AMB_MIN, TECH_MIN, SW_MAJ, SW_MIN, LOFI_MAJ, LOFI_MIN].into_iter().chain(tav) {
+            for plan in pool {
+                assert_eq!(plan.split_whitespace().count(), 8, "{plan}");
+                for tok in plan.split_whitespace().flat_map(|t| t.split('+')) {
+                    assert!(parse_harm(tok).is_some(), "{tok} in {plan}");
+                }
+            }
+        }
+        for pool in [POLKA_A, POLKA_B, POLKA_MINOR] {
+            for plan in pool {
+                assert_eq!(plan.split_whitespace().count(), 8, "{plan}");
+                for tok in plan.split_whitespace() {
+                    assert!(parse_harm(tok).is_some(), "{tok} in {plan}");
+                }
+            }
+        }
+        assert_eq!(parse_harm("V7/V"), Some(Harm { root: 2, q: Q_DOM7, inv: 0 }));
+        assert_eq!(parse_harm("bVImaj7^1"), Some(Harm { root: 8, q: Q_MAJ7, inv: 1 }));
+        assert_eq!(parse_harm("ii7"), Some(Harm { root: 2, q: Q_MIN7, inv: 0 }));
+        assert!(parse_harm("X7").is_none() && parse_harm("I^5").is_none());
+    }
+
+    #[test]
     fn deterministic_per_seed() {
         assert_eq!(render(3, 5, 2.0), render(3, 5, 2.0));
         assert_ne!(render(3, 5, 2.0), render(3, 6, 2.0));
+        assert_eq!(render(POLKA, 5, 2.0), render(POLKA, 5, 2.0));
+        assert_eq!(render(TAVERN, 5, 2.0), render(TAVERN, 5, 2.0));
     }
 
     /// Genres flipped every 3-7 s for four minutes, from a few seeds: the
