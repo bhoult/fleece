@@ -92,6 +92,10 @@ pub struct Opts {
     pub taste: bool,
     /// --audio FILE: a recording the video is made to (and carries)
     pub soundtrack: Option<String>,
+    /// a recording's sound this much later (seconds; else the live lag)
+    pub sound_delay: Option<f64>,
+    /// the window optimizes itself for the display's rate at the start
+    pub optimize: bool,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -103,7 +107,7 @@ fn usage() -> ! {
     eprintln!("              [--es | --es-hd | --render WxH | --native | --scale F] [--quality N]");
     eprintln!("              [--load FILE.flam3]... [--fresh] [--cpu-only | --gpu-only] [--threads N]");
     eprintln!("              [--classic] [--glow 0-3] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
-    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--audio-strength 0-3] [--supersample 1-4] [--taste on|off]");
+    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--audio-strength 0-3] [--sound-delay MS] [--optimize on|off] [--supersample 1-4] [--taste on|off]");
     eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
     eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
     eprintln!("       fleece --shot OUT.png [--quality Q] [--angle DEG] [--breed N] [size]   one still");
@@ -151,6 +155,8 @@ fn parse() -> Opts {
         fx: app::Fx::V2,
         taste: true,
         soundtrack: None,
+        sound_delay: None,
+        optimize: true,
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -283,6 +289,18 @@ fn parse() -> Opts {
                 i += 1;
                 o.fx.tilt = (num(i) as u8).min(2);
             }
+            "--sound-delay" => {
+                i += 1;
+                o.sound_delay = Some(num(i) / 1000.0);
+            }
+            "--optimize" => match args.get(i + 1).map(|s| s.as_str()) {
+                Some("off") => {
+                    o.optimize = false;
+                    i += 1;
+                }
+                Some("on") => i += 1,
+                _ => {}
+            },
             "--audio-strength" => {
                 i += 1;
                 o.fx.audio = (num(i) as u8).min(3);

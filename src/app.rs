@@ -77,6 +77,10 @@ const OPT_STEPS: [&str; 6] = ["ITERATIONS 70%", "SUPERSAMPLE 1X", "ITERATIONS 55
 /// How strongly the music moves the picture (A: off, low, medium, high): a
 /// factor on every response to it.
 const AUDIO_STRENGTH: [f64; 4] = [0.0, 0.5, 1.0, 1.8];
+/// How long the audio analysis takes to see a beat (seconds): its parec's
+/// 20 ms chunks and the onset showing in its 2048-sample window. With a frame
+/// of rendering, the picture of a recording ran 1-3 frames behind its sound.
+const ANALYSIS_LAG: f64 = 0.04;
 /// Frame blending's time constants (animation seconds) for short and long trails.
 const TRAILS: [f64; 3] = [0.0, 0.06, 0.35];
 /// Glow (subtle, soft, strong): its strength, and the most light it adds,
@@ -160,6 +164,10 @@ pub struct App {
     /// the music's own exposure (natural log, like `exposure`), this frame and
     /// the last (whose picture the next brightness counts come from)
     audio_ev: [f64; 2],
+    /// a fixed delay for a recording's sound (--sound-delay), else measured
+    sound_delay: Option<f64>,
+    /// when the optimizer starts by itself (the window, once warmed up)
+    auto_optimize: Option<Instant>,
     /// the music's lead on the camera drift and the hues (show::Look)
     drift_lead: f64,
     hue_lead: f64,
@@ -274,6 +282,8 @@ impl App {
             exposure: 0.0,
             exposure_unset: true,
             audio_ev: [0.0; 2],
+            sound_delay: o.sound_delay,
+            auto_optimize: None,
             drift_lead: 0.0,
             hue_lead: 0.0,
             audio: None,
@@ -362,6 +372,15 @@ impl App {
         }
         self.levels(dt, mid.gamma);
         self.frame += 1;
+        // the window optimizes itself once the first sheep's own shader runs
+        // (or 5 s later at the latest)
+        let now = Instant::now();
+        if self.auto_optimize.is_some_and(|t| now >= t && (self.r.gpu.specialised() || now >= t + std::time::Duration::from_secs(5))) {
+            self.auto_optimize = None;
+            if self.opt.is_none() {
+                self.optimize();
+            }
+        }
         self.optimize_tick();
         if let Some(s) = st {
             let k = 0.1;
@@ -988,7 +1007,10 @@ impl App {
     }
 
     pub fn stop_recording(&mut self) {
-        if let Some(r) = self.rec.take() {
+        if let Some(mut r) = self.rec.take() {
+            // the picture follows the sound a frame late (a frame is shown
+            // once the next has started) plus the analysis' own lag
+            r.sound_delay = self.sound_delay.unwrap_or(1.0 / self.fps.max(1.0) + ANALYSIS_LAG);
             let (path, frames, secs, fps) = (r.path.clone(), r.frames, r.seconds(), r.fps);
             match r.stop() {
                 Ok(()) => println!("recorded {path}: {secs:.1} s, {frames} frames at {fps} fps (credits in its metadata and {path}.credits.txt)"),
@@ -1180,6 +1202,9 @@ fn render_size(dw: u32, dh: u32, scale: f32) -> (u32, u32) {
 /// The interactive window.
 pub fn window(o: &Opts) {
     let mut app = App::new(o, false);
+    if o.optimize {
+        app.auto_optimize = Some(Instant::now() + std::time::Duration::from_secs(3));
+    }
     let mut last = Instant::now();
     while app.events() {
         let now = Instant::now();

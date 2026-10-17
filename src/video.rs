@@ -245,6 +245,9 @@ pub struct Recorder {
     /// what the speakers play, captured from some frame on
     sound: Option<Sound>,
     sound_tried: bool,
+    /// how far the picture runs behind the sound it follows (seconds): the
+    /// sound goes that much later into the file, so the two line up again
+    pub sound_delay: f64,
 }
 
 /// The speakers' sound (the default output's monitor: other programs' sound
@@ -281,6 +284,7 @@ impl Recorder {
             credits: Credits::default(),
             sound: None,
             sound_tried: false,
+            sound_delay: 0.0,
         })
     }
 
@@ -358,7 +362,7 @@ impl Recorder {
     fn add_sound(&self, s: &Sound) -> Result<(), String> {
         let ext = std::path::Path::new(&self.path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let tmp = format!("{}.sound.{ext}", self.path);
-        let offset = format!("{:.4}", s.frame as f64 / self.fps);
+        let offset = format!("{:.4}", s.frame as f64 / self.fps + self.sound_delay);
         let rate = SOUND_RATE.to_string();
         let mut args: Vec<&str> = vec!["-loglevel", "error", "-y", "-i", &self.path, "-itsoffset", &offset];
         args.extend(["-f", "s16le", "-ar", &rate, "-ac", "2", "-i", &s.path, "-map", "0:v", "-map", "1:a", "-c:v", "copy"]);
