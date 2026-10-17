@@ -225,6 +225,34 @@ impl Cam3 {
     pub fn is_flat(&self) -> bool {
         *self == Cam3::default()
     }
+
+    /// Sample::proj: Fractorium's camera matrix (Ember::SetProjFunc) and
+    /// settings, turned about `center`; all zero when flat.
+    pub fn proj(&self, center: [f32; 2]) -> [f32; 16] {
+        if self.is_flat() {
+            return [0.0; 16];
+        }
+        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = (-self.yaw).sin_cos();
+        [
+            cy,
+            -sy,
+            center[0],
+            center[1],
+            cp * sy,
+            cp * cy,
+            -sp,
+            self.zpos,
+            sp * sy,
+            sp * cy,
+            cp,
+            self.persp,
+            0.1 * self.dof,
+            1.0,
+            0.0,
+            0.0,
+        ]
+    }
 }
 
 static PALETTES: &[u8] = include_bytes!("../assets/flam3-palettes.bin");
@@ -504,6 +532,7 @@ impl Genome {
             ppu * (-rs * cx - rc * cy) + h as f32 * 0.5,
             0.0,
         ];
+        out.proj = self.cam.proj(self.center);
     }
 }
 
@@ -548,10 +577,23 @@ fn flatten(x: &Xform, a: &Affine) -> XfGpu {
     let p = &x.post;
     o.post = [p[0][0], p[0][1], p[1][0], p[1][1], p[2][0], p[2][1], x.opacity, if x.has_post() { 1.0 } else { 0.0 }];
     o.vid = [-1; NV];
+    let mut n = 0;
     for (j, v) in x.vars.iter().filter(|v| v.w != 0.0).take(NV).enumerate() {
         o.vid[j] = v.id;
         o.vw[j] = v.w;
         o.vp[j] = var::gpu_params(v.id, v.p);
+        n = j + 1;
+    }
+    // in id order, as the CPU's lanes take them: the dc_ variations read the
+    // sum of the variations before them
+    for j in 1..n {
+        let mut i = j;
+        while i > 0 && o.vid[i - 1] > o.vid[i] {
+            o.vid.swap(i - 1, i);
+            o.vw.swap(i - 1, i);
+            o.vp.swap(i - 1, i);
+            i -= 1;
+        }
     }
     o
 }

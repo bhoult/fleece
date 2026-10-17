@@ -4,15 +4,19 @@
 // affine, the variations and the post transform, blends the colour index,
 // and plots the point (through the final xform and the camera) into the
 // histogram with integer atomics: r, g, b (palette 0-255) and a count.
+// THREE_D (gpu.rs adds it for a 3D camera, 3D or direct-colour variations):
+// the walkers carry z too, the variations may set the colour index, and the
+// 3D camera projects the point before the 2D one.
 
 layout(local_size_x = 256) in;
 
 struct Xf { vec4 c0; vec4 c1; vec4 p0; vec4 p1; int vid[NV]; float vw[NV]; vec4 vp[2 * NV]; };
-struct Sample { vec4 cam0; vec4 cam1; ivec4 info; Xf xf[MAXX + 1]; uint pick[MAXX * PICKN / 4]; uint pal[256]; };
+struct Sample { vec4 cam0; vec4 cam1; vec4 pj0; vec4 pj1; vec4 pj2; vec4 pj3; ivec4 info; Xf xf[MAXX + 1]; uint pick[MAXX * PICKN / 4]; uint pal[256]; };
 
 layout(std430, binding = 0) readonly restrict buffer Samples { Sample smp[]; };
 layout(std430, binding = 1) restrict buffer Walk { vec4 walk[]; };
-layout(std430, binding = 2) restrict buffer Aux { uint aux[]; };
+// prev | fuse << 8, and z's bits (THREE_D)
+layout(std430, binding = 2) restrict buffer Aux { uvec2 aux[]; };
 #ifdef HIST64
 // r | g << 32 and b | count << 32: two 64-bit atomics a point instead of four
 // (the same bytes as four uints r, g, b, count)
@@ -39,11 +43,22 @@ float rnd01() { return float(rnd() >> 8) * (1.0 / 16777216.0); }
 
 bool badv(float v) { return !(abs(v) <= 1e10); }
 
-// xform k applied to (x, y, colour); false if the result is bad
-bool apply(uint k, inout vec3 q) {
+#ifdef THREE_D
+// a point: x, y, colour, z
+#define Pt vec4
+#else
+#define Pt vec3
+#endif
+
+// xform k applied to (x, y, colour[, z]); false if the result is bad
+bool apply(uint k, inout Pt q) {
     vec4 c0 = sxf[k].c0, c1 = sxf[k].c1;
     float tx = c0.x * q.x + c0.z * q.y + c1.x;
     float ty = c0.y * q.x + c0.w * q.y + c1.y;
+#ifdef THREE_D
+    // the affine passes z on
+    vtz = q.w;
+#endif
     // pre_blur (67) moves the point before everything else
     for (int j = 0; j < NV; j++) {
         if (sxf[k].vid[j] < 0) break;
@@ -52,28 +67,76 @@ bool apply(uint k, inout vec3 q) {
             float a = rnd01() * 2.0 * PI;
             tx += g * cos(a);
             ty += g * sin(a);
+#ifdef THREE_D
+            // Fractorium's pre_blur is its pre_gaussian_blur, which sums w z into z
+            vtz += sxf[k].vw[j] * vtz;
+#endif
         }
     }
     float sumsq = tx * tx + ty * ty;
     float sq = sqrt(sumsq);
     vec2 o = vec2(0.0);
+#ifdef THREE_D
+    float oz = 0.0;
+    vcol = mix(q.z, c1.z, c1.w);
+#endif
     for (int j = 0; j < NV; j++) {
         int id = sxf[k].vid[j];
         if (id < 0) break;
 #ifdef EXP_LINEAR
         o += sxf[k].vw[j] * vec2(tx, ty);
 #else
+#ifdef THREE_D
+        vz = zdef(id, sxf[k].vw[j], tx, sumsq);
+        vsum = o;
+#endif
         o += variation(id, sxf[k].vw[j], sxf[k].vp[2 * j], sxf[k].vp[2 * j + 1], tx, ty, sumsq, sq, c0, c1);
+#ifdef THREE_D
+        oz += vz;
+#endif
 #endif
     }
+    // the post transform: x and y only
     vec4 p1 = sxf[k].p1;
     if (p1.w != 0.0) {
         vec4 p0 = sxf[k].p0;
         o = vec2(p0.x * o.x + p0.z * o.y + p1.x, p0.y * o.x + p0.w * o.y + p1.y);
     }
+#ifdef THREE_D
+    // the colour a dc_ variation set, else the blend (Fractorium's blend +
+    // direct_color (1) (set - blend), a NaN as 0); a bad z restarts the
+    // walker too (Fractorium tests x and y only, but a NaN z would stay)
+    q = vec4(o, isnan(vcol) ? 0.0 : vcol, oz);
+    return !(badv(o.x) || badv(o.y) || badv(oz));
+#else
     q = vec3(o, mix(q.z, c1.z, c1.w));
     return !(badv(o.x) || badv(o.y));
+#endif
 }
+
+#ifdef THREE_D
+// Fractorium's 3D camera (Ember::ProjectPitchYawDepthBlur; its other
+// Project* functions are this with terms left out), turned about the view's
+// centre; false behind the camera (where Fractorium's divisor goes <= 0).
+// Fleece has no blur curve, so the depth blur's scale is 1.
+bool project(inout vec2 p, float z, vec4 pj0, vec4 pj1, vec4 pj2, vec4 pj3) {
+    float x = p.x - pj0.z, y = p.y - pj0.w;
+    z -= pj1.w;
+    float px = pj0.x * x + pj0.y * y;
+    float py = pj1.x * x + pj1.y * y + pj1.z * z;
+    float pz = pj2.x * x + pj2.y * y + pj2.z * z;
+    float zr = 1.0 - pj2.w * pz;
+    if (!(zr > 0.0)) return false;
+    if (pj3.x != 0.0) {
+        float t = rnd01() * 2.0 * PI;
+        float dr = rnd01() * pj3.x * pz;
+        px += dr * cos(t);
+        py += dr * sin(t);
+    }
+    p = vec2(px, py) / zr + pj0.zw;
+    return true;
+}
+#endif
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
@@ -84,11 +147,17 @@ void main() {
     for (uint j = li; j < uint(PICKN / 4); j += 256u) spick[j] = smp[s].pick[j];
     barrier();
     vec4 wv = walk[gid];
-    uint a = aux[gid];
+    uvec2 a = aux[gid];
+#ifdef THREE_D
+    vec4 q = vec4(wv.xyz, uintBitsToFloat(a.y));
+    vec4 pj0 = smp[s].pj0, pj1 = smp[s].pj1, pj2 = smp[s].pj2, pj3 = smp[s].pj3;
+    bool proj = pj3.y != 0.0;
+#else
     vec3 q = wv.xyz;
+#endif
     rng = floatBitsToUint(wv.w);
-    uint prev = a & 255u;
-    uint fuse = a >> 8;
+    uint prev = a.x & 255u;
+    uint fuse = a.x >> 8;
     int nx = smp[s].info.x;
     bool fin = smp[s].info.y != 0;
     uint xaos = smp[s].info.z != 0 ? 1u : 0u;
@@ -103,19 +172,27 @@ void main() {
         k = subgroupBroadcastFirst(k);
 #endif
         if (!apply(k, q)) {
-            // flam3 restarts from a random point
+            // flam3 restarts from a random point (Fractorium with z = 0)
+#ifdef THREE_D
+            q = vec4(rnd01() * 2.0 - 1.0, rnd01() * 2.0 - 1.0, q.z, 0.0);
+#else
             q = vec3(rnd01() * 2.0 - 1.0, rnd01() * 2.0 - 1.0, q.z);
+#endif
             fuse = FUSE;
             continue;
         }
         prev = k;
         if (fuse > 0u) { fuse--; continue; }
         float op = sxf[k].p1.z;
-        vec3 f = q;
+        Pt f = q;
         if (fin && !apply(MAXX, f)) continue;
         if (op < 1.0 && rnd01() >= op) continue;
-        float px = cam0.x * f.x + cam0.y * f.y + cam0.z;
-        float py = cam1.x * f.x + cam1.y * f.y + cam1.z;
+        vec2 fp = f.xy;
+#ifdef THREE_D
+        if (proj && !project(fp, f.w, pj0, pj1, pj2, pj3)) continue;
+#endif
+        float px = cam0.x * fp.x + cam0.y * fp.y + cam0.z;
+        float py = cam1.x * fp.x + cam1.y * fp.y + cam1.z;
         if (!(px >= 0.0 && py >= 0.0 && px < float(u_size.x) && py < float(u_size.y))) continue;
 #ifdef EXP_NOPLOT
         if (f.z > 2.0) hist[0] += 1u;
@@ -152,6 +229,10 @@ void main() {
         atomicAdd(hist[i + 3u], 1u);
 #endif
     }
-    walk[gid] = vec4(q, uintBitsToFloat(rng));
-    aux[gid] = prev | (fuse << 8);
+    walk[gid] = vec4(q.xyz, uintBitsToFloat(rng));
+#ifdef THREE_D
+    aux[gid] = uvec2(prev | (fuse << 8), floatBitsToUint(q.w));
+#else
+    aux[gid].x = prev | (fuse << 8);
+#endif
 }

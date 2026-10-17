@@ -1,7 +1,8 @@
-// flam3's variations (variations.c), numbered as flam3 numbers them. Each
-// returns its contribution to the xform's output; `p` holds the parameters
-// with flam3's precalcs already applied on the CPU (genome.rs, gpu_params).
-// c0 / c1: the xform's affine, which waves, popcorn, rings and fan read.
+// flam3's variations (variations.c), numbered as flam3 numbers them, then
+// Fractorium's 3D, plugin and direct-colour ones (var.rs). Each returns its
+// contribution to the xform's output; `p` holds the parameters with the
+// precalcs already applied on the CPU (genome.rs, gpu_params). c0 / c1: the
+// xform's affine, which waves, popcorn, rings, fan and dc_carpet read.
 
 const float PI = 3.14159265358979;
 const float EPS = 1e-10;
@@ -12,6 +13,34 @@ float sinhf(float x) { float e = exp(clamp(x, -80.0, 80.0)); return 0.5 * (e - 1
 float coshf(float x) { float e = exp(clamp(x, -80.0, 80.0)); return 0.5 * (e + 1.0 / e); }
 float powp(float a, float b) { return a <= 0.0 ? 0.0 : exp2(b * log2(a)); }
 float log10f(float x) { return log2(x) * 0.30102999566; }
+// Fractorium's Zeps: a divisor that is never 0
+float zeps(float x) { return x == 0.0 ? 1.1920929e-7 : x; }
+
+// The 3D chaos game's side channel (iterate.comp's THREE_D variant; zero and
+// unused otherwise): apply() sets the input z, the sum of the variations
+// before this one and the colour index (the xform's blend, or what a dc_
+// variation before this one set), and presets vz to the z a flam3 variation
+// passes on; the 3D variations set vz, the dc_ ones vcol.
+float vtz = 0.0, vz = 0.0, vcol = 0.0;
+vec2 vsum = vec2(0.0);
+
+#ifdef THREE_D
+// The z a flam3 variation passes on (Fractorium's: w z for those in ZPASS,
+// var.rs; bubble's, cylinder's and flux's own; 0, DefaultZ, for the rest).
+float zdef(int id, float w, float tx, float sumsq) {
+    if (id == 28) return w * (2.0 / zeps(0.25 * sumsq + 1.0 - 1.0));
+    if (id == 29) return w * cos(tx);
+    if (id == 97) return vtz;
+    return (id < 128 && (ZPASS[id >> 5] & (1u << uint(id & 31))) != 0u) ? w * vtz : 0.0;
+}
+#endif
+
+// bMod's and bSwirl's bipolar coordinates (tau, sigma)
+vec2 bipolar(float tx, float ty) {
+    float xp1 = tx + 1.0, y2 = ty * ty;
+    float tau = 0.5 * (log(xp1 * xp1 + y2) - log((tx - 1.0) * (tx - 1.0) + y2));
+    return vec2(tau, PI - atan2s(ty, xp1) - atan2s(ty, 1.0 - tx));
+}
 
 // q: the parameters past the fourth (super_shape, lazysusan, wedge_julia, mobius)
 vec2 variation(int id, float w, vec4 p, vec4 q, float tx, float ty, float sumsq, float sq, vec4 c0, vec4 c1) {
@@ -370,6 +399,185 @@ vec2 variation(int id, float w, vec4 p, vec4 q, float tx, float ty, float sumsq,
         float rev = q.x * tx - q.y * ty + q.z, imv = q.x * ty + q.y * tx + q.w;
         float rad = w / (rev * rev + imv * imv);
         return rad * vec2(reu * rev + imu * imv, imu * rev - reu * imv);
+    }
+    // the 3D ones, after Fractorium's Linear3DVariation, Spherical3DVariation,
+    // Julia3DVariation, Julia3DzVariation, HemisphereVariation, ZConeVariation,
+    // ZblurVariation, ZTranslateVariation, ZScaleVariation, Blur3DVariation,
+    // Curl3DVariation, Pie3DVariation and Sinusoidal3DVariation
+    case 99: vz = w * vtz; return w * vec2(tx, ty);
+    case 100: { float r2 = w / zeps(sumsq + vtz * vtz); vz = r2 * vtz; return r2 * vec2(tx, ty); }
+    case 101: {
+        float z = vtz / p.y;
+        float r = w * powp(sumsq + z * z, p.z);
+        float a = (atan2s(ty, tx) + 2.0 * PI * trunc(rnd01() * p.y)) / p.x;
+        vz = r * z;
+        return r * sq * vec2(cos(a), sin(a));
+    }
+    case 102: {
+        float r = w * powp(sumsq, p.z);
+        float a = (atan2s(ty, tx) + 2.0 * PI * trunc(rnd01() * p.y)) / p.x;
+        vz = r * vtz / zeps(sq * p.y);
+        return r * vec2(cos(a), sin(a));
+    }
+    case 103: { float t = w / sqrt(sumsq + 1.0); vz = t; return t * vec2(tx, ty); }
+    case 104: vz = w * sq; return vec2(0.0);
+    case 105: vz = w * (rnd01() + rnd01() + rnd01() + rnd01() - 2.0); return vec2(0.0);
+    case 106: vz = w; return vec2(0.0);
+    case 107: vz = w * vtz; return vec2(0.0);
+    case 108: {
+        float a = rnd01() * 2.0 * PI;
+        float r = w * (rnd01() + rnd01() + rnd01() + rnd01() - 2.0);
+        float b = rnd01() * PI;
+        vz = r * cos(b);
+        return r * sin(b) * vec2(cos(a), sin(a));
+    }
+    case 109: {
+        float r2 = sumsq + vtz * vtz;
+        float r = w / zeps(r2 * p.w + 2.0 * p.x * tx - 2.0 * p.y * ty + 2.0 * p.z * vtz + 1.0);
+        vz = r * (vtz + p.z * r2);
+        return r * vec2(tx + p.x * r2, ty - p.y * r2);
+    }
+    case 110: {
+        float sl = trunc(rnd01() * p.x + 0.5);
+        float a = p.y + 2.0 * PI * (sl + rnd01() * p.z) / p.x;
+        float r = w * rnd01();
+        vz = w * sin(r);
+        return r * vec2(cos(a), sin(a));
+    }
+    case 111: vz = w * atan2s(tx * tx, ty * ty) * cos(vtz); return w * vec2(sin(tx), sin(ty));
+    // the plugins, after Fractorium's EclipseVariation, EpispiralVariation,
+    // CirclizeVariation, GlynniaVariation and SphericalNVariation (both in
+    // their flam3-compatible form, Fractorium's default), XHeartVariation,
+    // PetalVariation, SquirrelVariation, HoleVariation, FlipCircleVariation,
+    // FlipYVariation, BModVariation, BSwirlVariation, CollideoscopeVariation
+    case 112: {
+        float x = tx;
+        if (abs(ty) <= w) {
+            float c2 = sqrt(w * w - ty * ty);
+            if (abs(tx) <= c2) { float xs = p.x * w + tx; x = abs(xs) >= c2 ? -tx : xs; }
+        }
+        return w * vec2(x, ty);
+    }
+    case 113: {
+        float th = atan2s(ty, tx);
+        float tw = p.y * w;
+        float t = (tw == 0.0 ? w : tw * rnd01()) / cos(p.x * th) - p.z * w;
+        return t * vec2(cos(th), sin(th));
+    }
+    case 114: {
+        float ax = abs(tx), ay = abs(ty);
+        float side = ax >= ay ? ax : ay;
+        float per = ax >= ay ? (tx >= ay ? ax + ty : 5.0 * ax - ty) : (ty >= ax ? 3.0 * ay - tx : 7.0 * ay + tx);
+        float r = w * (4.0 / PI) * side + p.x;
+        float a = PI / 4.0 * per / side - PI / 4.0;
+        return r * vec2(cos(a), sin(a));
+    }
+    case 115: {
+        float v2 = w * 0.70710678;
+        bool outside = sq > 1.0;
+        float sg = outside ? 1.0 : -1.0;
+        if (rnd01() > 0.5) {
+            float d = sqrt(sq + tx);
+            if (!outside) d = zeps(d);
+            return vec2(sg * v2 * d, -(v2 / d * ty));
+        }
+        float d = sq + tx;
+        float s = sqrt(sq * (ty * ty + d * d));
+        float r = w / (outside ? s : zeps(s));
+        return vec2(sg * r * d, r * ty);
+    }
+    case 116: {
+        float r = zeps(powp(sq, p.y));
+        float n = floor(p.x * rnd01());
+        float a = atan2s(ty, tx) + n * 2.0 * PI / zeps(floor(p.x));
+        return w / r * vec2(cos(a), sin(a));
+    }
+    case 117: {
+        float r24 = sumsq + 4.0;
+        float bx = 4.0 / r24, by = p.z / r24;
+        float x = p.x * (bx * tx) - p.y * (by * ty);
+        float y = p.y * (bx * tx) + p.x * (by * ty);
+        return w * vec2(x, x > 0.0 ? y : -y);
+    }
+    case 118: {
+        float cx = cos(tx), cy = cos(ty);
+        float bx = cx * cy, by = sin(tx) * cy;
+        return w * cx * vec2(bx * bx * bx, by * by * by);
+    }
+    case 119: {
+        float u = sqrt(max(p.x * tx * tx + p.y * ty * ty, 0.0));
+        return w * vec2(cos(u) * tan(clamp(tx, -8388607.0, 8388607.0)), sin(u) * tan(clamp(ty, -8388607.0, 8388607.0)));
+    }
+    case 120: {
+        float d = powp(atan2s(ty, tx) / PI + 1.0, p.x);
+        float r = p.y != 0.0 ? w * d / (sq + d) : w * sq + d;
+        return r / zeps(sq) * vec2(tx, ty);
+    }
+    case 121: return w * vec2(tx, sumsq > w * w ? ty : -ty);
+    case 122: return w * vec2(tx, tx > 0.0 ? -ty : ty);
+    case 123: {
+        vec2 ts = bipolar(tx, ty);
+        float tau = ts.x;
+        if (tau < p.x && -tau < p.x) tau = fmodc(tau + p.x + p.y * p.x, 2.0 * p.x) - p.x;
+        float t = zeps(coshf(tau) - cos(ts.y));
+        return w * vec2(sinhf(tau), sin(ts.y)) / t;
+    }
+    case 124: {
+        vec2 ts = bipolar(tx, ty);
+        float sigma = ts.y + ts.x * p.y + p.x / zeps(ts.x);
+        float t = zeps(coshf(ts.x) - cos(sigma));
+        return w * vec2(sinhf(ts.x), sin(sigma)) / t;
+    }
+    case 125: {
+        float a = atan2s(ty, tx);
+        float alt = trunc(abs(a) * p.x);
+        // alt pi/n plus the angle past it, shifted by +-pi a/n by parity
+        float k = (int(alt) & 1) == 0 ? p.z : -p.z;
+        a = a >= 0.0 ? alt * p.y + fmodc(k + a, p.y) : -(alt * p.y + fmodc(k - a, p.y));
+        return w * sq * vec2(cos(a), sin(a));
+    }
+    // direct colour, after Fractorium's DCLinearVariation, DCBubbleVariation,
+    // DCCarpetVariation, DCCylinderVariation (vcol: the colour index) and
+    // DCZTranslVariation (z from it)
+    case 126: {
+        vz = w * vtz;
+        vec2 o = w * vec2(tx, ty);
+        vec2 t = o + vsum;
+        vcol = fract(abs((p.w * (p.z * t.x + p.y * t.y + p.x) + 1.0) * 0.5));
+        return o;
+    }
+    case 127: {
+        float r = w / zeps(0.25 * sumsq + 1.0);
+        vz = w * (2.0 / r - 1.0);
+        vec2 o = r * vec2(tx, ty);
+        vec2 t = o + vsum + p.xy;
+        vcol = fract(abs(p.z * dot(t, t)));
+        return o;
+    }
+    case 128: {
+        float x0 = (rnd() & 0x80000000u) != 0u ? -1.0 : 1.0;
+        float y0 = (rnd() & 0x80000000u) != 0u ? -1.0 : 1.0;
+        float x = tx + x0, y = ty + y0;
+        // Fractorium's (int) x0 ^ (int) y0: 0 for the same sign, -2 else
+        float xr = x0 == y0 ? 0.0 : -2.0;
+        float h = (1.0 - xr) * p.x - p.x;
+        vcol = fract(abs(vcol * 0.5 * (1.0 + h) + xr * (1.0 - h) * 0.5));
+        return w * vec2(c0.x * x + c0.z * y + c0.w, c1.x * x + c0.y * y + c1.y);
+    }
+    case 129: {
+        float a = rnd01() * 2.0 * PI;
+        float r = q.z * (rnd01() + rnd01() + rnd01() + rnd01() - 2.0);
+        vz = w * cos(tx + r * cos(a));
+        vec2 o = vec2(w * sin(tx + r * sin(a)) * q.x, r + ty * q.y);
+        vec2 t = o + vsum;
+        vcol = fract(abs((p.w * (p.z * t.x + p.y * t.y + p.x) + 1.0) * 0.5));
+        return o;
+    }
+    case 130: {
+        float zf = p.z * (vcol - p.x) / p.y;
+        if (q.x != 0.0) zf = clamp(zf, 0.0, 1.0);
+        vz = p.w == 0.0 ? w * vtz * zf : w * zf;
+        return w * vec2(tx, ty);
     }
     }
     return vec2(0.0);

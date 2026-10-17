@@ -1,5 +1,6 @@
 //! The variations for the CPU, eight points at a time: the same formulas as
-//! shaders/variations.glsl (flam3's variations.c), branch-free.
+//! shaders/variations.glsl (flam3's variations.c, then Fractorium's 3D,
+//! plugin and direct-colour ones), branch-free.
 
 use crate::fmath::Rng8;
 use crate::simd::{F8, I8, M8};
@@ -15,7 +16,9 @@ pub struct VarIn {
     pub sq: F8,
     pub w: F8,
     pub p: [F8; 8],
-    /// the xform's c10, c11, c20, c21 (waves, popcorn, rings, fan)
+    /// the xform's affine (waves, popcorn, rings, fan, dc_carpet)
+    pub c00: F8,
+    pub c01: F8,
     pub c10: F8,
     pub c11: F8,
     pub c20: F8,
@@ -61,6 +64,20 @@ fn atan_yx(v: &VarIn) -> F8 {
 fn polar(r: F8, a: F8) -> (F8, F8) {
     let (sn, cs) = a.sin_cos();
     (r * cs, r * sn)
+}
+/// Fractorium's Zeps: a divisor that is never 0
+#[inline(always)]
+fn zeps(x: F8) -> F8 {
+    sel(x.eq(F8::zero()), s(f32::EPSILON), x)
+}
+/// bMod's and bSwirl's bipolar coordinates (tau, sigma)
+#[inline(always)]
+fn bipolar(tx: F8, ty: F8) -> (F8, F8) {
+    let xp1 = tx + 1.0;
+    let xm1 = tx - 1.0;
+    let y2 = ty * ty;
+    let tau = ((xp1 * xp1 + y2).ln() - (xm1 * xm1 + y2).ln()) * 0.5;
+    (tau, s(PI) - ty.atan2(xp1) - ty.atan2(F8::one() - tx))
 }
 
 /// pre_blur: the point moved by a gaussian of `w` in a random direction,
@@ -582,7 +599,227 @@ pub fn eval(id: i32, v: &VarIn, rng: &mut Rng8) -> (F8, F8) {
             let rad = w / (rev * rev + imv * imv);
             (rad * (reu * rev + imu * imv), rad * (imu * rev - reu * imv))
         }
+        // the plugins, after Fractorium's EclipseVariation, EpispiralVariation,
+        // CirclizeVariation, GlynniaVariation and SphericalNVariation (both in
+        // their flam3-compatible form, Fractorium's default), XHeartVariation,
+        // PetalVariation, SquirrelVariation, HoleVariation, FlipCircleVariation,
+        // FlipYVariation, BModVariation, BSwirlVariation, CollideoscopeVariation
+        112 => {
+            let c2 = (w * w - ty * ty).max(F8::zero()).sqrt();
+            let inside = ty.abs().le(w) & tx.abs().le(c2);
+            let xs = p[0].mul_add(w, tx);
+            (w * sel(inside, sel(xs.abs().ge(c2), -tx, xs), tx), w * ty)
+        }
+        113 => {
+            let th = atan_yx(v);
+            let tw = p[1] * w;
+            let t = sel(tw.eq(F8::zero()), w, tw * rng.f01()) / (p[0] * th).fcos() - p[2] * w;
+            polar(t, th)
+        }
+        114 => {
+            let (ax, ay) = (tx.abs(), ty.abs());
+            let xside = ax.ge(ay);
+            let side = sel(xside, ax, ay);
+            let per = sel(xside, sel(tx.ge(ay), ax + ty, ax * 5.0 - ty), sel(ty.ge(ax), ay * 3.0 - tx, ay * 7.0 + tx));
+            let r = w * (4.0 / PI) * side + p[0];
+            polar(r, s(PI / 4.0) * per / side - PI / 4.0)
+        }
+        115 => {
+            let v2 = w * 0.707_106_77;
+            let outside = sq.gt(F8::one());
+            let sg = sel(outside, F8::one(), s(-1.0));
+            let first = rng.f01().gt(s(0.5));
+            let d1 = (sq + tx).sqrt();
+            let d1 = sel(outside, d1, zeps(d1));
+            let d2 = sq + tx;
+            let s2 = (sq * (ty * ty + d2 * d2)).sqrt();
+            let r = w / sel(outside, s2, zeps(s2));
+            (sel(first, sg * v2 * d1, sg * r * d2), sel(first, -(v2 / d1 * ty), r * ty))
+        }
+        116 => {
+            let r = zeps(sq.pow(p[1]));
+            let n = (p[0] * rng.f01()).floor();
+            polar(w / r, atan_yx(v) + n * (2.0 * PI) / zeps(p[0].floor()))
+        }
+        117 => {
+            let r24 = sumsq + 4.0;
+            let bx = s(4.0) / r24;
+            let by = p[2] / r24;
+            let x = p[0] * (bx * tx) - p[1] * (by * ty);
+            let y = p[1] * (bx * tx) + p[0] * (by * ty);
+            (w * x, w * sel(x.gt(F8::zero()), y, -y))
+        }
+        118 => {
+            let (sx, cx) = tx.sin_cos();
+            let cy = ty.fcos();
+            let (bx, by) = (cx * cy, sx * cy);
+            (w * cx * (bx * bx * bx), w * cx * (by * by * by))
+        }
+        119 => {
+            let u = (p[0] * tx * tx + p[1] * ty * ty).max(F8::zero()).sqrt();
+            let (sn, cs) = u.sin_cos();
+            (w * cs * tx.clamp(-8_388_607.0, 8_388_607.0).tan(), w * sn * ty.clamp(-8_388_607.0, 8_388_607.0).tan())
+        }
+        120 => {
+            let d = (atan_yx(v) * (1.0 / PI) + 1.0).pow(p[0]);
+            let r = sel(p[1].ne(F8::zero()), w * d / (sq + d), w.mul_add(sq, d)) / zeps(sq);
+            (r * tx, r * ty)
+        }
+        121 => (w * tx, w * sel(sumsq.gt(w * w), ty, -ty)),
+        122 => (w * tx, w * sel(tx.gt(F8::zero()), -ty, ty)),
+        123 => {
+            let (tau, sigma) = bipolar(tx, ty);
+            let inside = tau.lt(p[0]) & (-tau).lt(p[0]);
+            let tau = sel(inside, (tau + p[0] + p[1] * p[0]).fmod(p[0] * 2.0) - p[0], tau);
+            let t = zeps(coshf(tau) - sigma.fcos());
+            (w * sinhf(tau) / t, w * sigma.fsin() / t)
+        }
+        124 => {
+            let (tau, sigma) = bipolar(tx, ty);
+            let sigma = sigma + tau * p[1] + p[0] / zeps(tau);
+            let t = zeps(coshf(tau) - sigma.fcos());
+            (w * sinhf(tau) / t, w * sigma.fsin() / t)
+        }
+        125 => {
+            let a = atan_yx(v);
+            let alt = (a.abs() * p[0]).trunc();
+            // alt pi/n plus the angle past it, shifted by +-pi a/n by parity
+            let k = sel((alt.round_i8() & 1).eq(I8::zero()), p[2], -p[2]);
+            let pos = alt * p[1] + (k + a).fmod(p[1]);
+            let neg = -(alt * p[1] + (k - a).fmod(p[1]));
+            polar(w * sq, sel(a.ge(F8::zero()), pos, neg))
+        }
         _ => (F8::zero(), F8::zero()),
+    }
+}
+
+/// What the 3D chaos game adds to a variation's inputs: its input z, the
+/// sum of the variations before it (the dc_ ones read it) and the colour
+/// index (the xform's blend, or what a dc_ variation before it set), which
+/// the dc_ ones set.
+pub struct V3 {
+    pub tz: F8,
+    pub sx: F8,
+    pub sy: F8,
+    pub col: F8,
+}
+
+/// Variation `id` in the 3D chaos game: x, y and z (Fractorium's z rules;
+/// flam3's and the plugins through `eval`), the dc_ ones setting `e.col`.
+#[inline(always)]
+pub fn eval3(id: i32, v: &VarIn, e: &mut V3, rng: &mut Rng8) -> (F8, F8, F8) {
+    let (tx, ty, tz, w, sq, sumsq, p) = (v.tx, v.ty, e.tz, v.w, v.sq, v.sumsq, &v.p);
+    let zero = F8::zero();
+    match id {
+        // after Fractorium's Linear3DVariation, Spherical3DVariation,
+        // Julia3DVariation, Julia3DzVariation, HemisphereVariation,
+        // ZConeVariation, ZblurVariation, ZTranslateVariation,
+        // ZScaleVariation, Blur3DVariation, Curl3DVariation, Pie3DVariation
+        // and Sinusoidal3DVariation
+        99 => (w * tx, w * ty, w * tz),
+        100 => {
+            let r2 = w / zeps(sumsq + tz * tz);
+            (r2 * tx, r2 * ty, r2 * tz)
+        }
+        101 => {
+            let z = tz / p[1];
+            let r = w * (sumsq + z * z).pow(p[2]);
+            let t = (rng.f01() * p[1]).trunc();
+            let (x, y) = polar(r * sq, (atan_yx(v) + t * (2.0 * PI)) / p[0]);
+            (x, y, r * z)
+        }
+        102 => {
+            let r = w * sumsq.pow(p[2]);
+            let t = (rng.f01() * p[1]).trunc();
+            let (x, y) = polar(r, (atan_yx(v) + t * (2.0 * PI)) / p[0]);
+            (x, y, r * tz / zeps(sq * p[1]))
+        }
+        103 => {
+            let t = w / (sumsq + 1.0).sqrt();
+            (t * tx, t * ty, t)
+        }
+        104 => (zero, zero, w * sq),
+        105 => (zero, zero, w * gauss(rng)),
+        106 => (zero, zero, w),
+        107 => (zero, zero, w * tz),
+        108 => {
+            let a = rng.f01() * (2.0 * PI);
+            let r = w * gauss(rng);
+            let (sb, cb) = (rng.f01() * PI).sin_cos();
+            let (x, y) = polar(r * sb, a);
+            (x, y, r * cb)
+        }
+        109 => {
+            let r2 = sumsq + tz * tz;
+            let r = w / zeps(r2 * p[3] + p[0] * 2.0 * tx - p[1] * 2.0 * ty + p[2] * 2.0 * tz + 1.0);
+            (r * (tx + p[0] * r2), r * (ty - p[1] * r2), r * (tz + p[2] * r2))
+        }
+        110 => {
+            let sl = (rng.f01() * p[0] + 0.5).trunc();
+            let a = p[1] + (sl + rng.f01() * p[2]) * (2.0 * PI) / p[0];
+            let r = w * rng.f01();
+            let (x, y) = polar(r, a);
+            (x, y, w * r.fsin())
+        }
+        111 => (w * tx.fsin(), w * ty.fsin(), w * (tx * tx).atan2(ty * ty) * tz.fcos()),
+        // direct colour, after Fractorium's DCLinearVariation,
+        // DCBubbleVariation, DCCarpetVariation, DCCylinderVariation and
+        // DCZTranslVariation
+        126 => {
+            let (x, y) = (w * tx, w * ty);
+            let (sx, sy) = (x + e.sx, y + e.sy);
+            e.col = ((p[3] * (p[2] * sx + p[1] * sy + p[0]) + 1.0) * 0.5).abs().fract();
+            (x, y, w * tz)
+        }
+        127 => {
+            let r = w / zeps(sumsq * 0.25 + 1.0);
+            let (x, y) = (r * tx, r * ty);
+            let (sx, sy) = (x + e.sx + p[0], y + e.sy + p[1]);
+            e.col = (p[2] * (sx * sx + sy * sy)).abs().fract();
+            (x, y, w * (s(2.0) / r - 1.0))
+        }
+        128 => {
+            let x0 = sel(rand_bit(rng), s(-1.0), F8::one());
+            let y0 = sel(rand_bit(rng), s(-1.0), F8::one());
+            let (x, y) = (tx + x0, ty + y0);
+            // Fractorium's (int) x0 ^ (int) y0: 0 for the same sign, -2 else
+            let xr = sel(x0.eq(y0), zero, s(-2.0));
+            let h = (F8::one() - xr) * p[0] - p[0];
+            e.col = (e.col * 0.5 * (h + 1.0) + xr * (F8::one() - h) * 0.5).abs().fract();
+            (w * (v.c00 * x + v.c10 * y + v.c11), w * (v.c20 * x + v.c01 * y + v.c21), zero)
+        }
+        129 => {
+            let (sn, cs) = (rng.f01() * (2.0 * PI)).sin_cos();
+            let r = p[6] * gauss(rng);
+            let x = w * r.mul_add(sn, tx).fsin() * p[4];
+            let y = r + ty * p[5];
+            let (sx, sy) = (x + e.sx, y + e.sy);
+            e.col = ((p[3] * (p[2] * sx + p[1] * sy + p[0]) + 1.0) * 0.5).abs().fract();
+            (x, y, w * r.mul_add(cs, tx).fcos())
+        }
+        130 => {
+            let zf = p[2] * (e.col - p[0]) / p[1];
+            let zf = sel(p[4].ne(zero), zf.clamp(0.0, 1.0), zf);
+            (w * tx, w * ty, sel(p[3].eq(zero), w * tz * zf, w * zf))
+        }
+        _ => {
+            let (x, y) = eval(id, v, rng);
+            (x, y, zdef(id, v, tz))
+        }
+    }
+}
+
+/// The z a flam3 variation passes on: Fractorium's (w z for those in
+/// var::ZPASS; bubble's, cylinder's and flux's own; 0, DefaultZ, for the
+/// rest, the plugins among them).
+#[inline(always)]
+fn zdef(id: i32, v: &VarIn, tz: F8) -> F8 {
+    match id {
+        28 => v.w * (s(2.0) / zeps(v.sumsq.mul_add(s(0.25), F8::one()) - 1.0)),
+        29 => v.w * v.tx.fcos(),
+        97 => tz,
+        0..128 if crate::var::ZPASS_MASK[id as usize >> 5] & (1 << (id & 31)) != 0 => v.w * tz,
+        _ => F8::zero(),
     }
 }
 

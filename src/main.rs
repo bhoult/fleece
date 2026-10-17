@@ -508,8 +508,10 @@ fn shot(o: &Opts) {
 }
 
 /// Renders a small flame made of each variation on the CPU alone and on the
-/// GPU alone, and compares where the points landed: the two chaos games
-/// must agree on every variation.
+/// GPU alone, and compares where the points landed and their colours: the
+/// two chaos games must agree on every variation. The 3D and direct-colour
+/// ones are seen through a tilted camera, so z matters (with zblur feeding
+/// z in), as are a few of flam3's, and one with depth of field.
 fn varcheck(o: &Opts) {
     let (w, h) = (320u32, 180u32);
     let (_win, gpu) = open_gl(w, h, true);
@@ -519,7 +521,18 @@ fn varcheck(o: &Opts) {
         p.patience.store(if std::env::var_os("FLEECE_IMPATIENT").is_some() { 2000 } else { 5_000_000 }, std::sync::atomic::Ordering::Relaxed);
     }
     let mut worst = Vec::new();
-    for (n, vi) in var::VARS.iter().enumerate() {
+    let tilt = genome::Cam3 { pitch: 0.6, persp: 0.3, ..Default::default() };
+    let mut cases: Vec<(&var::VarInfo, genome::Cam3, &str)> = var::VARS
+        .iter()
+        .map(|vi| if var::needs_3d(vi.id) { (vi, tilt, "") } else { (vi, genome::Cam3::default(), "") })
+        .collect();
+    // flam3's z: passed on (spherical), bubble's, cylinder's, pre_blur's
+    for id in [2, 28, 29, 67] {
+        cases.push((var::info(id), tilt, " tilted"));
+    }
+    let dof = genome::Cam3 { pitch: 0.5, yaw: 0.4, persp: 0.2, zpos: 0.1, dof: 0.3 };
+    cases.push((var::info(101), dof, " dof"));
+    for (n, &(vi, cam, tag)) in cases.iter().enumerate() {
         if o.breed > 0 && vi.id != o.breed as i32 - 1 {
             continue;
         }
@@ -530,24 +543,38 @@ fn varcheck(o: &Opts) {
         while g.xforms.len() < 3 {
             g.xforms.push(genome::Xform::new());
         }
+        // tilted, the second variation is julia (z = 0), so that z settles;
+        // pre_blur keeps linear (it adds nothing of its own)
+        let second = if cam.is_flat() || vi.id == 67 { 0 } else { 13 };
         for x in g.xforms.iter_mut() {
             x.weight = 1.0;
             x.post = genome::IDENTITY;
             x.vars = vec![
                 genome::VarUse { id: vi.id, w: 0.8, p: var::random_params(vi.id, &mut rg) },
-                genome::VarUse { id: 0, w: 0.2, p: [0.0; crate::genome::NP] },
+                genome::VarUse { id: second, w: 0.2, p: [0.0; crate::genome::NP] },
             ];
+        }
+        if !cam.is_flat() {
+            g.xforms[0].vars.push(genome::VarUse { id: 105, w: 0.3, p: [0.0; crate::genome::NP] });
         }
         breed::frame(&mut g, &mut rg);
         if !(g.scale > 0.02 && g.scale < 100.0) {
             g.center = [0.0, 0.0];
             g.scale = 0.25;
         }
+        // framed flat, then tilted about the centre of that view, focused on
+        // the middle of the flame's depth (bubble's and dc_bubble's z is 2 or more)
+        if !cam.is_flat() {
+            g.cam = genome::Cam3 { zpos: cam.zpos + median_z(&g, 0.3, rg.next_u32()), ..cam };
+        }
         let mut s = vec![Sample::default()];
         g.sample(0.3, w, h, &mut s[0]);
         let tone = tone_of(&g);
         let ppu = g.scale * w as f32;
+        // the shader specialised to it, as the show uses (3D: its 3D variant)
+        r.gpu.use_variations(&sample::variation_ids(&s), true);
         let mut dens = [vec![], vec![]];
+        let mut cols = [vec![], vec![]];
         let mut rate = [0f64; 2];
         #[allow(clippy::needless_range_loop)]
         for side in 0..2 {
@@ -567,53 +594,82 @@ fn varcheck(o: &Opts) {
                 let hits: f64 = acc.iter().skip(3).step_by(4).map(|&v| v as f64).sum();
                 println!("{} side {}: {:.0} hits on screen of {:.0} iterations; scale {} centre {:?} bright {} gamma {}", vi.name, side, hits, r.total_iters(), g.scale, g.center, g.brightness, g.gamma);
             }
-            // 32 x 18 cells of the hit counts, normalised
+            // 32 x 18 cells of the hit counts and of r, g and b, normalised
             let mut cells = vec![0f64; 32 * 18];
+            let mut rgb = vec![0f64; 32 * 18 * 3];
             for y in 0..h as usize {
                 for x in 0..w as usize {
-                    cells[(y * 18 / h as usize) * 32 + x * 32 / w as usize] += acc[(y * w as usize + x) * 4 + 3] as f64;
+                    let c = (y * 18 / h as usize) * 32 + x * 32 / w as usize;
+                    let a = &acc[(y * w as usize + x) * 4..][..4];
+                    cells[c] += a[3] as f64;
+                    for k in 0..3 {
+                        rgb[c * 3 + k] += a[k] as f64;
+                    }
                 }
             }
             let t: f64 = cells.iter().sum();
+            let tc: f64 = rgb.iter().sum();
             rate[side] = t / r.total_iters().max(1.0);
             dens[side] = cells.iter().map(|c| c / t.max(1.0)).collect::<Vec<f64>>();
+            cols[side] = rgb.iter().map(|c| c / tc.max(1.0)).collect::<Vec<f64>>();
             // too few points on screen to compare (a flame that escapes)
             if t < 200_000.0 {
                 dens[side] = vec![-1.0];
             }
         }
         let empty = [dens[0].len() == 1, dens[1].len() == 1];
-        let d = match empty {
+        let name = format!("{}{tag}", vi.name);
+        let l1 = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| (a - b).abs()).sum::<f64>();
+        let (d, dc) = match empty {
             [true, true] => {
-                println!("{:3} {:2} {:14} too few points on screen on both sides (skipped)", n, vi.id, vi.name);
+                println!("{:3} {:3} {:20} too few points on screen on both sides (skipped)", n, vi.id, name);
                 continue;
             }
-            [false, false] => dens[0].iter().zip(&dens[1]).map(|(a, b)| (a - b).abs()).sum::<f64>(),
+            [false, false] => (l1(&dens[0], &dens[1]), l1(&cols[0], &cols[1])),
             // one side short of points: agreeing if both land the same share on screen
             _ if (rate[0] / rate[1].max(1e-12) - 1.0).abs() < 0.3 => {
-                println!("{:3} {:2} {:14} same share on screen ({:.2} % / {:.2} %), too few points to compare more", n, vi.id, vi.name, rate[0] * 100.0, rate[1] * 100.0);
+                println!("{:3} {:3} {:20} same share on screen ({:.2} % / {:.2} %), too few points to compare more", n, vi.id, name, rate[0] * 100.0, rate[1] * 100.0);
                 continue;
             }
-            _ => f64::NAN,
+            _ => (f64::NAN, f64::NAN),
         };
         println!(
-            "{:3} {:2} {:14} L1 {:.3}{}",
+            "{:3} {:3} {:20} L1 {:.3}, colour {:.3}{}",
             n,
             vi.id,
-            vi.name,
+            name,
             d,
+            dc,
             if d.is_nan() {
                 format!("   <-- only the {} side has points", if empty[0] { "GPU" } else { "CPU" })
-            } else if d >= 0.15 {
+            } else if d.max(dc) >= 0.15 {
                 "   <--".into()
             } else {
                 String::new()
             }
         );
-        worst.push((d, vi.name));
+        // where the points land, and their colours
+        worst.push((d.max(dc), name));
     }
     let bad = worst.iter().filter(|(d, _)| !(*d < 0.15)).count();
-    println!("{} of {} variations differ (L1 >= 0.15 or no points)", bad, worst.len());
+    println!("{} of {} cases differ (L1 >= 0.15 or no points)", bad, worst.len());
+}
+
+/// The median z of a flame's points at `angle`: seen edge-on (a quarter-turn
+/// pitch, no perspective) the 3D camera puts the centre's y minus z on y.
+fn median_z(g: &Genome, angle: f32, seed: u32) -> f32 {
+    let mut probe = g.clone();
+    probe.cam = genome::Cam3 { pitch: core::f32::consts::FRAC_PI_2, ..Default::default() };
+    let mut s = Box::new(Sample::default());
+    probe.sample(angle, 128, 128, &mut s);
+    let mut pts = Vec::with_capacity(50_000);
+    cpu::sample_points(&s, 50_000, seed, &mut pts);
+    let mut zs: Vec<f32> = pts.iter().map(|p| g.center[1] - p[1]).filter(|z| z.is_finite()).collect();
+    if zs.is_empty() {
+        return 0.0;
+    }
+    zs.sort_by(f32::total_cmp);
+    zs[zs.len() / 2]
 }
 
 /// Chaos-game throughput of each side alone, over a few bred sheep.
