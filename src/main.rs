@@ -543,6 +543,10 @@ fn shot(o: &Opts) {
         flock.rejected,
         t0.elapsed().as_secs_f64()
     );
+    let f = taste::features(&g, o.seed);
+    let t = taste::Taste::prior();
+    let ms: Vec<String> = taste::NAMES.iter().zip(f).map(|(n, v)| format!("{n} {v:.3}")).collect();
+    println!("  taste {:.2}: {}", t.score(&f), ms.join(", "));
     for (i, x) in g.xforms.iter().enumerate() {
         let vs: Vec<String> = x.vars.iter().map(|v| format!("{} {:.2}", var::info(v.id).name, v.w)).collect();
         println!("  xf{i} w {:.2} c {:.2}: {}", x.weight, x.color, vs.join(", "));
@@ -900,6 +904,8 @@ fn tastefit(o: &Opts) {
                 .map(|t| {
                     sc.spawn(move || {
                         let mut f = breed::Flock::new(o.seed ^ (t as u32 * 7919 + 1));
+                        // candidates as they come, not already chosen by a taste
+                        f.use_taste = false;
                         (0..per).map(|_| f.breed().genome).collect::<Vec<_>>()
                     })
                 })
@@ -991,6 +997,16 @@ fn tastefit(o: &Opts) {
     for i in 0..nf {
         let single: Vec<f64> = feats.iter().map(|f| f[i] as f64).collect();
         println!("  {:11} mean {:7.4} std {:7.4} weight {:+.4}  (alone: r {:+.3})", taste::NAMES[i], mean[i], std[i], w[i], corr(&single, &ys));
+    }
+    // each measure's spread in each class (1: real sheep or the high rated, 0: the rest)
+    for i in 0..nf {
+        let q = |label: bool| {
+            let mut v: Vec<f32> = feats.iter().zip(&ys).filter(|(_, y)| (**y > 0.5) == label).map(|(f, _)| f[i]).collect();
+            v.sort_by(f32::total_cmp);
+            let at = |p: f64| v.get(((v.len() as f64 - 1.0) * p) as usize).copied().unwrap_or(0.0);
+            format!("{:.3} {:.3} {:.3} {:.3}", at(0.01), at(0.5), at(0.99), at(0.999))
+        };
+        println!("  {:11} p1 p50 p99 p99.9  real {}   random {}", taste::NAMES[i], q(true), q(false));
     }
     let f = |v: &[f32]| v.iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>().join(", ");
     println!("mean: [{}],", f(&mean));

@@ -595,6 +595,8 @@ pub struct Flock {
     /// the taste new sheep are chosen by (votes teach it), and whether to use it
     pub taste: Taste,
     pub use_taste: bool,
+    /// half the random sheep use fleece's whole set of variations (v2), not just flam3's
+    pub new_variations: bool,
 }
 
 /// Candidates bred for each new sheep when the taste chooses.
@@ -614,6 +616,7 @@ impl Flock {
             rejected: 0,
             taste: Taste::prior(),
             use_taste: true,
+            new_variations: true,
         }
     }
 
@@ -692,6 +695,8 @@ impl Flock {
                 let b = self.banked().unwrap();
                 cross(&a, &b, &mut self.r)
             }
+        } else if self.new_variations && self.r.bit() {
+            Genome::random_v2(self.r.next_u32())
         } else {
             Genome::random(self.r.next_u32())
         };

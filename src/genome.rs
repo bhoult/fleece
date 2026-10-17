@@ -371,6 +371,18 @@ impl Genome {
     /// symmetry a quarter of the time without one; a random palette,
     /// hue-turned one time in eight.
     pub fn random(seed: u32) -> Genome {
+        Genome::random_with(seed, false)
+    }
+
+    /// flam3_random with fleece's whole set of variations (the Apophysis
+    /// plugins, the direct-colour and 3D ones too): `var::random_id_v2`.
+    pub fn random_v2(seed: u32) -> Genome {
+        let mut g = Genome::random_with(seed, true);
+        g.name = format!("random+ {seed:08x}");
+        g
+    }
+
+    fn random_with(seed: u32, v2: bool) -> Genome {
         let mut r = Rng::new(seed);
         let mut g = Genome::empty();
         g.hue = if r.below(8) != 0 { 0.0 } else { r.f01() };
@@ -412,12 +424,12 @@ impl Genome {
                     while r.bit() {
                         k += 1;
                     }
-                    random_vars(&mut r, k)
+                    random_vars(&mut r, k, v2)
                 };
                 g.xforms.push(x);
             } else {
                 let k = if r.bit() { 2 } else { 1 };
-                x.vars = random_vars(&mut r, k);
+                x.vars = random_vars(&mut r, k, v2);
                 x.animate = false;
                 g.fin = Some(x);
             }
@@ -542,10 +554,10 @@ impl Genome {
 
 /// flam3 picks 2+ variations at random (repeats merge), with random weights
 /// summing to 1; at most five are kept (truncate_variations).
-fn random_vars(r: &mut Rng, n: usize) -> Vec<VarUse> {
+fn random_vars(r: &mut Rng, n: usize, v2: bool) -> Vec<VarUse> {
     let mut v: Vec<VarUse> = Vec::new();
     for _ in 0..n {
-        let id = var::random_id(r);
+        let id = if v2 { var::random_id_v2(r) } else { var::random_id(r) };
         let w = r.f01();
         match v.iter_mut().find(|u| u.id == id) {
             Some(u) => u.w = w,

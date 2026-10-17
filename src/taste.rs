@@ -8,8 +8,10 @@
 use crate::genome::Genome;
 
 /// Measures per flame.
-pub const NF: usize = 8;
-pub const NAMES: [&str; NF] = ["colourful", "coverage", "coverage^2", "entropy", "edges", "symmetry", "colours", "luma"];
+pub const NF: usize = 9;
+pub const NAMES: [&str; NF] = ["colourful", "coverage", "coverage^2", "entropy", "edges", "symmetry", "colours", "luma", "streaks"];
+/// The streaks measure below which 99 % of real sheep are (--tastefit).
+const STREAKS_REAL_P99: f32 = 0.385;
 /// The render the measures come from (Electric Sheep's frame shape).
 const W: usize = 160;
 const H: usize = 118;
@@ -39,7 +41,9 @@ pub fn features(g: &Genome, seed: u32) -> [f32; NF] {
         hist[((l * 16.0) as usize).min(15)] += 1.0;
     }
     let entropy = -hist.iter().filter(|&&c| c > 0.0).map(|&c| (c / n) * (c / n).log2()).sum::<f32>() / 4.0;
-    // detail: the mean gradient of the luma
+    // detail: the mean gradient of the luma; streaks: how much the
+    // gradients of the whole picture point one way (1 for stripes, near 0
+    // for most flames), from the structure tensor
     let mut edges = 0.0;
     for y in 0..H - 1 {
         for x in 0..W - 1 {
@@ -47,7 +51,37 @@ pub fn features(g: &Genome, seed: u32) -> [f32; NF] {
             edges += (luma[i + 1] - luma[i]).abs() + (luma[i + W] - luma[i]).abs();
         }
     }
+    // the colour structure tensor (stripes may differ in hue, not
+    // brightness) of the picture averaged over 2 x 2 blocks (the render's
+    // noise points every way), from central differences
+    let (w2, h2) = (W / 2, H / 2);
+    let half: Vec<[f32; 3]> = (0..w2 * h2)
+        .map(|j| {
+            let (x, y) = (2 * (j % w2), 2 * (j / w2));
+            let mut c = [0.0; 3];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let p = px[(y + dy) * W + x + dx];
+                for k in 0..3 {
+                    c[k] += 0.25 * p[k];
+                }
+            }
+            c
+        })
+        .collect();
+    let (mut jxx, mut jyy, mut jxy) = (0.0f32, 0.0f32, 0.0f32);
+    for y in 1..h2 - 1 {
+        for x in 1..w2 - 1 {
+            let i = y * w2 + x;
+            for c in 0..3 {
+                let (gx, gy) = (half[i + 1][c] - half[i - 1][c], half[i + w2][c] - half[i - w2][c]);
+                jxx += gx * gx;
+                jyy += gy * gy;
+                jxy += gx * gy;
+            }
+        }
+    }
     edges /= n;
+    let streaks = ((jxx - jyy).powi(2) + 4.0 * jxy * jxy).sqrt() / (jxx + jyy).max(1e-9);
     // symmetry: the best correlation with its mirror images and half turn
     let corr = |f: &dyn Fn(usize, usize) -> usize| {
         let m = luma.iter().sum::<f32>() / n;
@@ -75,7 +109,7 @@ pub fn features(g: &Genome, seed: u32) -> [f32; NF] {
     }
     let colours = cells.iter().filter(|&&c| c >= 3).count() as f32 / 64.0;
     let luma_mean = luma.iter().sum::<f32>() / n;
-    [colourful, coverage, (coverage - 0.5) * (coverage - 0.5), entropy, edges, symmetry, colours, luma_mean]
+    [colourful, coverage, (coverage - 0.5) * (coverage - 0.5), entropy, edges, symmetry, colours, luma_mean, streaks]
 }
 
 /// A score over standardised measures: w . (f - mean) / std + bias.
@@ -94,9 +128,9 @@ impl Taste {
     /// colours than random ones; a score near 1 looks like one of them.
     pub fn prior() -> Taste {
         Taste {
-            mean: [0.2128, 0.4749, 0.0302, 0.6026, 0.2330, 0.3259, 1.7544, 0.1918],
-            std: [0.1111, 0.1721, 0.0361, 0.1499, 0.1072, 0.2078, 1.2091, 0.0909],
-            w: [0.1311, -0.1000, 0.0401, -0.0062, 0.1707, 0.0700, 0.1070, -0.1078],
+            mean: [0.2133, 0.4777, 0.0297, 0.6061, 0.2335, 0.3272, 1.7614, 0.1932, 0.0811],
+            std: [0.1105, 0.1709, 0.0357, 0.1487, 0.1067, 0.2082, 1.1975, 0.0926, 0.0954],
+            w: [0.1282, -0.1038, 0.0484, -0.0169, 0.1651, 0.0636, 0.1065, -0.0993, -0.0218],
             bias: 0.4989,
         }
     }
@@ -107,6 +141,16 @@ impl Taste {
 
     pub fn score(&self, f: &[f32; NF]) -> f32 {
         let z = self.z(f);
+        // streaks past what 99 % of real sheep show (0.385; random ones reach
+        // 0.8): a direct-colour flame painting stripes across the frame is
+        // colourful, which the score likes, and too rare to have been learnt
+        let streaky = 2.0 * (f[8] - STREAKS_REAL_P99).max(0.0);
+        self.bias + z.iter().zip(&self.w).map(|(a, b)| a * b).sum::<f32>() - streaky
+    }
+
+    /// The linear score alone (what votes teach).
+    fn linear(&self, f: &[f32; NF]) -> f32 {
+        let z = self.z(f);
         self.bias + z.iter().zip(&self.w).map(|(a, b)| a * b).sum::<f32>()
     }
 
@@ -114,7 +158,7 @@ impl Taste {
     /// towards 1 (a real sheep), a disliked one's towards 0.
     pub fn learn(&mut self, f: &[f32; NF], v: i32) {
         let target = if v > 0 { 1.0 } else { 0.0 };
-        let err = target - self.score(f);
+        let err = target - self.linear(f);
         let z = self.z(f);
         for i in 0..NF {
             self.w[i] += 0.02 * err * z[i];

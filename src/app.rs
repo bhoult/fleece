@@ -151,6 +151,7 @@ impl App {
         {
             let mut f = show.flock.lock().unwrap();
             f.use_taste = o.taste;
+            f.new_variations = o.fx != Fx::CLASSIC;
             // the window's taste carries on from last time; tests start from the prior
             if !headless && !o.fresh {
                 f.taste = crate::taste::Taste::load(&crate::taste_path());
@@ -597,6 +598,8 @@ impl App {
                     self.fx_saved = self.fx;
                     self.fx = Fx::CLASSIC;
                 }
+                // classic breeds from flam3's variations alone
+                self.show.flock.lock().unwrap().new_variations = self.fx != Fx::CLASSIC;
             }
             'o' => self.fx.glow = next(self.fx.glow, 3),
             't' => self.fx.trails = next(self.fx.trails, 3),
