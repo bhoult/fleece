@@ -408,6 +408,7 @@ impl App {
                 if self.show.mutating() { "   BREEDING A MUTATION" } else { "" },
                 if self.paused { "   PAUSED (REFINING)" } else { "" }
             ),
+            self.fx_line(),
             match &self.rec {
                 Some(r) => format!(
                     "*REC {}:{:02}  {}  CREDIT {}  (R TO STOP)",
@@ -418,7 +419,6 @@ impl App {
                 ),
                 None => "~LEFT/RIGHT PREVIOUS/NEXT   UP LIKE   DOWN DISLIKE   M MUTATE   P PAUSE   R RECORD   -/+ SPEED".into(),
             },
-            self.fx_line(),
             "~C CPU   G GPU   B BLUR   E/1/2/4 ES 800X592/1080P/2K/4K   S SAVE   K CREDIT IN RECORDINGS   F FULLSCREEN   H HIDE   ESC QUIT".into(),
             "~V CLASSIC/V2   O GLOW   T TRAILS   X SUPERSAMPLE   L LEVELS   D DRIFT   U HUE   W WOBBLE   3 3D   A AUDIO".into(),
         ]
