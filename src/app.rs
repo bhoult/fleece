@@ -107,6 +107,12 @@ pub struct App {
     /// yet to be set (the first measure sets it outright: no fade-in)
     exposure: f64,
     exposure_unset: bool,
+    /// the music's own exposure (natural log, like `exposure`), this frame and
+    /// the last (whose picture the next brightness counts come from)
+    audio_ev: [f64; 2],
+    /// the music's lead on the camera drift and the hues (show::Look)
+    drift_lead: f64,
+    hue_lead: f64,
     /// what the speakers play (while audio is on), or a soundtrack's levels
     /// every hop (a video made to music) and the time in it
     audio: Option<crate::audio::Audio>,
@@ -208,6 +214,9 @@ impl App {
             supersample,
             exposure: 0.0,
             exposure_unset: true,
+            audio_ev: [0.0; 2],
+            drift_lead: 0.0,
+            hue_lead: 0.0,
             audio: None,
             track: None,
             track_t: 0.0,
@@ -224,10 +233,29 @@ impl App {
         if !self.paused {
             self.show.advance(dt_show);
         }
-        self.look = Look { drift: self.fx.drift, hue: self.fx.hue, wobble: self.fx.wobble, tilt: self.fx.tilt, audio };
+        let [loud, _, _, _, high, beat] = audio.map(|v| v as f64);
+        // the music runs the drift ahead when loud, and turns the hues with
+        // its highs and a step on each beat (~0.03 of a turn)
+        self.drift_lead += dt_show * 3.0 * loud;
+        self.hue_lead += dt_show * (6.0 * high + 58.0 * beat);
+        self.look = Look {
+            drift: self.fx.drift,
+            hue: self.fx.hue,
+            wobble: self.fx.wobble,
+            tilt: self.fx.tilt,
+            audio,
+            drift_lead: self.drift_lead,
+            hue_lead: self.hue_lead,
+        };
         let tau = TRAILS[self.fx.trails as usize % 3];
         self.r.decay = if tau > 0.0 { (-dt_show / tau).exp() as f32 } else { 0.0 };
-        (self.r.gpu.glow, self.r.gpu.glow_cap) = GLOW[self.fx.glow as usize % 4];
+        let (mut glow, mut cap) = GLOW[self.fx.glow as usize % 4];
+        if glow > 0.0 {
+            // the glow swells with the music and flares on the beats
+            glow *= (0.7 + 0.6 * loud + 0.8 * beat) as f32;
+            cap *= (1.0 + 0.6 * beat) as f32;
+        }
+        (self.r.gpu.glow, self.r.gpu.glow_cap) = (glow, cap);
         let n = if self.blur { BLUR_SAMPLES } else { 1 };
         let shutter = SHUTTER_FRAMES / show::ES_FPS;
         let t_build = Instant::now();
@@ -235,7 +263,14 @@ impl App {
         let mid = self.show.samples(n, shutter, bw, bh, &self.look, &mut self.samples);
         self.build_ms += (t_build.elapsed().as_secs_f64() * 1000.0 - self.build_ms) * 0.1;
         let mut tone = tone_of(&mid);
-        tone.exposure = if self.fx.levels { self.exposure.exp() as f32 } else { 1.0 };
+        // the music's brightness, on top of auto-levels (which leaves it out
+        // of what it steers): louder is brighter, each beat a flash; the
+        // picture moves as exposure^(1 / gamma), hence the gamma
+        let g = mid.gamma.max(1.0) as f64;
+        let ev = if self.fx.audio { g * (0.25 * (loud - 0.5) + 0.25 * beat) } else { 0.0 };
+        self.audio_ev = [ev, self.audio_ev[0]];
+        let levels = if self.fx.levels { self.exposure } else { 0.0 };
+        tone.exposure = (levels + self.audio_ev[0]).exp() as f32;
         let ppu = mid.scale * bw as f32;
         // a shader with just this frame's variations (once compiled), and
         // the ones coming up compiling in the background
@@ -290,7 +325,7 @@ impl App {
         // own level, without the exposure, and the exposure that would take
         // it to the target (none inside the dead band)
         let g = gamma.max(1.0) as f64;
-        let own = p90 * (-self.exposure / g).exp();
+        let own = p90 * (-(self.exposure + self.audio_ev[1]) / g).exp();
         let e = (LEVEL_TARGET / own).ln();
         let mut want = g * e.signum() * (e.abs() - LEVEL_DEADBAND).max(0.0);
         if sat > LEVEL_MAX_SATURATED {

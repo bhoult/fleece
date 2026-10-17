@@ -41,6 +41,11 @@ pub struct Look {
     pub tilt: u8,
     /// the music (all 0 without): loudness, bass, low mid, mid, high, beat
     pub audio: [f32; 6],
+    /// how far the music has run the camera drift and the hues ahead of the
+    /// show's clock (seconds): loud passages drift faster, beats and highs
+    /// turn the hues
+    pub drift_lead: f64,
+    pub hue_lead: f64,
 }
 
 /// Seconds (of animation time) for the palette's hues to turn once.
@@ -416,20 +421,22 @@ impl Drop for Show {
 /// The look's changes to a genome `t` seconds into the show.
 fn dress(g: &mut Genome, t: f64, look: &Look) {
     use std::f64::consts::TAU;
-    let wave = |period: f64, phase: f64| (TAU * t / period + phase).sin() as f32;
+    let wave = |t: f64, period: f64, phase: f64| (TAU * t / period + phase).sin() as f32;
+    let [loud, bass, _lowmid, mid, high, beat] = look.audio;
     if look.drift {
         // zoom in by up to a third and back, pan by a tenth of the picture,
-        // turn a few degrees: periods that never line up, slower than a loop
-        let zoom = 0.5 * (1.0 - wave(29.0, 1.3));
-        g.scale *= (0.28 * zoom).exp();
-        let (px, py) = (0.10 * wave(47.0, 0.0), 0.07 * wave(37.0, 1.0));
+        // turn a few degrees: periods that never line up, slower than a loop;
+        // music runs it ahead and swings it wider
+        let (t, amp) = (t + look.drift_lead, 1.0 + 0.5 * loud);
+        let zoom = 0.5 * (1.0 - wave(t, 29.0, 1.3));
+        g.scale *= (0.28 * amp * zoom).exp();
+        let (px, py) = (0.10 * amp * wave(t, 47.0, 0.0), 0.07 * amp * wave(t, 37.0, 1.0));
         g.center[0] += px / g.scale;
         g.center[1] += py / g.scale;
-        g.rotate += 5.0 * wave(61.0, 2.0);
+        g.rotate += 5.0 * amp * wave(t, 61.0, 2.0);
     }
-    let [loud, bass, _lowmid, mid, high, beat] = look.audio;
     if look.hue || mid > 0.0 {
-        let turn = if look.hue { (t / HUE_TURN).fract() as f32 } else { 0.0 };
+        let turn = if look.hue { ((t + look.hue_lead) / HUE_TURN).fract() as f32 } else { 0.0 };
         let dh = 6.0 * (turn + 0.04 * mid);
         for c in g.palette.iter_mut() {
             let mut v = crate::genome::rgb2hsv(*c);
@@ -444,12 +451,12 @@ fn dress(g: &mut Genome, t: f64, look: &Look) {
         for (i, x) in g.xforms.iter_mut().enumerate().filter(|(_, x)| x.animate) {
             x.weight *= 1.0 + 0.6 * (bands[i % 4] - 0.4);
         }
-        g.brightness *= 1.0 + 0.25 * loud;
+        // (the brightness and the glow follow the music in app.rs, past auto-levels)
     }
     if look.tilt > 0 {
         // the flame as a plane leaning back, swaying a little; the zoom keeps
         // it filling the frame
-        let pitch = 0.75 + 0.12 * wave(43.0, 0.5);
+        let pitch = 0.75 + 0.12 * wave(t, 43.0, 0.5);
         g.scale *= 1.0 / pitch.cos().max(0.3);
         // the perspective in units of the picture, whatever the sheep's own
         // zoom: the top edge a third further, the bottom a third nearer
@@ -457,7 +464,7 @@ fn dress(g: &mut Genome, t: f64, look: &Look) {
         let edge = 0.37 / g.scale * pitch.sin();
         g.cam = crate::genome::Cam3 {
             pitch,
-            yaw: 0.15 * wave(53.0, 2.5),
+            yaw: 0.15 * wave(t, 53.0, 2.5),
             persp: 0.35 / edge,
             zpos: 0.0,
             dof: if look.tilt > 1 { 0.4 } else { 0.0 },
