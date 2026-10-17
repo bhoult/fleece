@@ -21,7 +21,7 @@ const SPEEDS: [f64; 9] = [0.0625, 0.125, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
 /// show as it was; `V2` the recommended set.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fx {
-    /// glow: 0 off, 1 soft, 2 strong
+    /// glow: 0 off, 1 subtle, 2 soft, 3 strong
     pub glow: u8,
     /// frames blended over time: 0 off, 1 short (a smoother picture), 2 long (trails)
     pub trails: u8,
@@ -39,13 +39,14 @@ pub struct Fx {
 
 impl Fx {
     pub const CLASSIC: Fx = Fx { glow: 0, trails: 0, levels: false, drift: false, hue: false, wobble: false, tilt: 0, audio: false };
-    pub const V2: Fx = Fx { glow: 1, trails: 1, levels: true, drift: true, hue: false, wobble: true, tilt: 0, audio: false };
+    pub const V2: Fx = Fx { glow: 2, trails: 1, levels: true, drift: true, hue: false, wobble: true, tilt: 0, audio: false };
 }
 
 /// Frame blending's time constants (animation seconds) for short and long trails.
 const TRAILS: [f64; 3] = [0.0, 0.06, 0.35];
-/// Glow strengths (soft, strong).
-const GLOW: [f32; 3] = [0.0, 1.2, 2.4];
+/// Glow (subtle, soft, strong): its strength, and the most light it adds,
+/// so a bright region keeps its detail instead of going white.
+const GLOW: [(f32, f32); 4] = [(0.0, 0.0), (0.6, 0.3), (1.2, 0.6), (2.4, 1.2)];
 /// Auto-exposure aims the 90th percentile of the lit pixels' luma at the
 /// real sheep's median (80 genebank sheep: 0.56, quartiles 0.43 and 0.70),
 /// leaves alone sheep within 15 % of it, and pulls down those saturating
@@ -226,7 +227,7 @@ impl App {
         self.look = Look { drift: self.fx.drift, hue: self.fx.hue, wobble: self.fx.wobble, tilt: self.fx.tilt, audio };
         let tau = TRAILS[self.fx.trails as usize % 3];
         self.r.decay = if tau > 0.0 { (-dt_show / tau).exp() as f32 } else { 0.0 };
-        self.r.gpu.glow = GLOW[self.fx.glow as usize % 3];
+        (self.r.gpu.glow, self.r.gpu.glow_cap) = GLOW[self.fx.glow as usize % 4];
         let n = if self.blur { BLUR_SAMPLES } else { 1 };
         let shutter = SHUTTER_FRAMES / show::ES_FPS;
         let t_build = Instant::now();
@@ -446,7 +447,7 @@ impl App {
         let on = |b: bool| if b { "ON" } else { "OFF" };
         format!(
             "V2   GLOW {}   TRAILS {}   SUPERSAMPLE {}   LEVELS {}   DRIFT {}   HUE {}   WOBBLE {}   3D {}   AUDIO {}",
-            ["OFF", "SOFT", "STRONG"][f.glow as usize % 3],
+            ["OFF", "SUBTLE", "SOFT", "STRONG"][f.glow as usize % 4],
             ["OFF", "SHORT", "LONG"][f.trails as usize % 3],
             self.ss_label(),
             if f.levels { format!("{:+.1}", self.exposure / 2f64.ln()) } else { "OFF".into() },
@@ -609,7 +610,7 @@ impl App {
                 // classic breeds from flam3's variations alone
                 self.show.flock.lock().unwrap().new_variations = self.fx != Fx::CLASSIC;
             }
-            'o' => self.fx.glow = next(self.fx.glow, 3),
+            'o' => self.fx.glow = next(self.fx.glow, 4),
             't' => self.fx.trails = next(self.fx.trails, 3),
             'x' => self.cycle_supersample(),
             'l' => self.fx.levels = !self.fx.levels,

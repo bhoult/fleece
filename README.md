@@ -19,7 +19,7 @@ v2 adds ten things to the show. Electric Sheep's show as it was is still there: 
 | | key | flag | default | what it does |
 | --- | --- | --- | --- | --- |
 | Supersampling | X | `--supersample N` | automatic | The histogram holds 2x2 or 4x4 buckets a pixel, and flam3's gaussian spatial filter brings them down to pixels, as the Electric Sheep server rendered (its sheep say `supersample="4" filter="1"`). Thin lines come out smooth instead of stair-stepped. Automatic means 2x while the histogram fits the GPU's cache (800x592 does) and 1x above that, where the scattered atomics slow to memory speed. Stills (`--shot`) use the sheep's own setting. |
-| Glow | O | `--glow 0-2` | soft | The bright parts blurred wide, through six half-size levels, and added back with a screen blend, like light scattering in a lens. |
+| Glow | O | `--glow 0-3` | soft | The bright parts blurred wide, through six half-size levels, and added back with a screen blend, like light scattering in a lens. The light it adds is softly limited, so bright regions keep their detail instead of going white. Off, subtle, soft or strong (`--glow 2` is soft; before the subtle step it was `--glow 1`). |
 | Trails | T | `--trails 0-2` | short | Frame blending: each frame keeps a fading share of the ones before. Short trails (60 ms) mostly smooth the picture; long ones (350 ms) smear the motion into streaks. A paused picture still refines forever, and a cut starts afresh. |
 | Levels | L | `--levels on/off` | on | Auto-exposure. The GPU counts each frame's lit pixels by brightness. A dim or blown-out sheep is moved towards the real sheep's typical level, measured on 80 genebank sheep. Sheep near it are left alone, and only the most saturated are pulled down. |
 | Drift | D | `--drift on/off` | on | A slow camera move: zoom in by up to a third, pan a tenth of the frame and turn a few degrees, on periods of 29 to 61 seconds that never line up. |
@@ -152,7 +152,7 @@ At 1280x720 and 30 Hz that is about 150-350 samples per pixel per frame. Electri
 | R | start / stop recording the show to ~/Videos/fleece-TIME.mp4 (see below) |
 | K | the credit burned into recordings on / off (it is in the file's metadata either way) |
 | V | v2's effects off (classic Electric Sheep) / back on |
-| O / T | glow (off, soft, strong) / trails (off, short, long) |
+| O / T | glow (off, subtle, soft, strong) / trails (off, short, long) |
 | X | supersampling: automatic, 1x, 2x, 4x |
 | L / D / U / W | auto levels / camera drift / palette (hue) drift / wobble (motion for every sheep) |
 | 3 | 3D camera: flat, tilted, tilted with depth of field |

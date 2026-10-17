@@ -102,7 +102,7 @@ fn usage() -> ! {
     eprintln!("usage: fleece [WxH | 720p | 1080p | 2k | 4k] [--fullscreen] [--seed N] [--no-hud]");
     eprintln!("              [--es | --es-hd | --render WxH | --native | --scale F] [--quality N]");
     eprintln!("              [--load FILE.flam3]... [--fresh] [--cpu-only | --gpu-only] [--threads N]");
-    eprintln!("              [--classic] [--glow 0-2] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
+    eprintln!("              [--classic] [--glow 0-3] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
     eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--supersample 1-4] [--taste on|off]");
     eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
     eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
@@ -273,7 +273,7 @@ fn parse() -> Opts {
             "--classic" => o.fx = app::Fx::CLASSIC,
             "--glow" => {
                 i += 1;
-                o.fx.glow = (num(i) as u8).min(2);
+                o.fx.glow = (num(i) as u8).min(3);
             }
             "--trails" => {
                 i += 1;

@@ -76,6 +76,8 @@ impl FrameStats {
     }
 }
 
+/// The luma where the glow starts.
+const GLOW_THRESHOLD: f32 = 0.18;
 /// Levels of the glow's blur chain (each half the size of the last).
 const GLOW_LEVELS: usize = 6;
 const STATS_RING: usize = 3;
@@ -140,7 +142,7 @@ struct Locs {
     mg_size: GLint,
     de: [GLint; 3],
     fi: [GLint; 12],
-    gl: [GLint; 5],
+    gl: [GLint; 6],
     pr_rect: GLint,
     pr_mode: GLint,
 }
@@ -190,6 +192,8 @@ pub struct Gpu {
     glow_levels: Vec<(GLuint, u32, u32)>,
     /// glow strength (0: none)
     pub glow: f32,
+    /// the most light the glow adds (luma, approached softly; 0: no limit)
+    pub glow_cap: f32,
     stats: [GLuint; STATS_RING],
     stats_ptr: [*const u32; STATS_RING],
     stats_fence: [GLsync; STATS_RING],
@@ -272,7 +276,7 @@ impl Gpu {
             mg_size: gl.uniform(p_merge, "u_size"),
             de: ["u_size", "u_k", "u_de"].map(|n| gl.uniform(p_de, n)),
             fi: fi_names.map(|n| gl.uniform(p_finish, n)),
-            gl: ["u_mode", "u_size", "u_texel", "u_thresh", "u_strength"].map(|n| gl.uniform(p_glow, n)),
+            gl: ["u_mode", "u_size", "u_texel", "u_thresh", "u_strength", "u_cap"].map(|n| gl.uniform(p_glow, n)),
             pr_rect: gl.uniform(p_present, "u_rect"),
             pr_mode: gl.uniform(p_present, "u_mode"),
         };
@@ -311,6 +315,7 @@ impl Gpu {
             glowed: 0,
             glow_levels: Vec::new(),
             glow: 0.0,
+            glow_cap: 0.0,
             stats: [0; STATS_RING],
             stats_ptr: [std::ptr::null(); STATS_RING],
             stats_fence: [std::ptr::null(); STATS_RING],
@@ -778,9 +783,10 @@ impl Gpu {
         let n = self.glow_levels.len();
         unsafe {
             gl.glUseProgram(p);
-            gl.glProgramUniform1f(p, l[3], 0.18);
+            gl.glProgramUniform1f(p, l[3], GLOW_THRESHOLD);
             // the chain sums every level: share the strength among them
             gl.glProgramUniform1f(p, l[4], self.glow * 1.5 / n as f32);
+            gl.glProgramUniform1f(p, l[5], self.glow_cap);
             let (mut src, mut sw, mut sh) = (self.out, self.w, self.h);
             for (i, &(t, w, h)) in self.glow_levels.iter().enumerate() {
                 gl.glProgramUniform1i(p, l[0], if i == 0 { 0 } else { 1 });

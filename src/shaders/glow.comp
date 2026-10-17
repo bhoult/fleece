@@ -3,7 +3,8 @@
 // takes the picture (soft-thresholded), each next one a 4-tap filtered half
 // of the last (MODE 1); then back up, each level adding the tent-filtered
 // level below (MODE 2); last the widest blur is added to the picture with a
-// screen blend (MODE 3).
+// screen blend (MODE 3), its light softly limited so that a bright region
+// keeps its detail instead of going white.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(binding = 0) uniform sampler2D src;   // the level read (or the picture)
@@ -15,6 +16,7 @@ uniform ivec2 u_size;     // of what is written
 uniform vec2 u_texel;     // 1 / the size of what is read
 uniform float u_thresh;   // where glow starts (luma)
 uniform float u_strength;
+uniform float u_cap;      // the most the glow adds (luma, softly)
 
 vec3 soft(vec3 c) {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -47,6 +49,7 @@ void main() {
         imageStore(dst, p, vec4(imageLoad(dst, p).rgb + c / 16.0, 1.0));
     } else {
         vec3 b = texture(src, uv).rgb * u_strength;
+        if (u_cap > 0.0) b /= 1.0 + dot(b, vec3(0.2126, 0.7152, 0.0722)) / u_cap;
         vec3 a = texelFetch(pic, p, 0).rgb;
         imageStore(outimg, p, vec4(1.0 - (1.0 - a) * (1.0 - clamp(b, 0.0, 1.0)), 1.0));
     }
