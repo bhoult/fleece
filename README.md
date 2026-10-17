@@ -157,11 +157,11 @@ At 1280x720 and 30 Hz that is about 150-350 samples per pixel per frame. Electri
 | L / D / U / W | auto levels / camera drift / palette (hue) drift / wobble (motion for every sheep) |
 | 3 | 3D camera: flat, tilted, tilted with depth of field |
 | A | audio: the music drives the show |
-| H | hide the text and buttons (moving the mouse shows them for a few seconds) |
+| H | hide the text and buttons / show them again |
 | F, F11, double click | fullscreen |
 | Esc, Q | quit |
 
-**Mouse.** Under the text are three rows of buttons, one for each key above, each labelled with its key and lit when its setting is on: the show (previous, next, like, dislike, mutate, pause, speed, record, save, fullscreen, hide, quit), v2's effects, and the renderer (CPU, GPU, blur, render size, credit). Clicking one does what its key does. When the text is hidden, moving the mouse brings it back for three seconds. In fullscreen the pointer shows only while the mouse moves. In a headless run, a capital letter in `--keys` clicks that key's button (`--keys "30:O"` clicks GLOW), which tests the buttons without a display.
+**Mouse.** Under the text are three rows of buttons, one for each key above, each labelled with its key and lit when its setting is on: the show (previous, next, like, dislike, mutate, pause, speed, record, save, fullscreen, hide, quit), v2's effects, and the renderer (CPU, GPU, blur, render size, credit). Clicking one does what its key does. Once hidden (H or its button), only the H key brings them back. In fullscreen the pointer shows only while the mouse moves. In a headless run, a capital letter in `--keys` clicks that key's button (`--keys "30:O"` clicks GLOW), which tests the buttons without a display.
 
 A size given on the command line (`1080p`, `2k`, `4k`, `WxH`) is rendered at full resolution, and so is fullscreen started from it. With `--native`, the window and fullscreen are rendered at most 1080 lines tall: a 4K screen gets a 2x upscale and four times the samples per pixel. `--scale F` sets the render size relative to the window, for example `4k --fullscreen --scale 0.5`.
 

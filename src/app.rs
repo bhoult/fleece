@@ -74,12 +74,12 @@ pub struct App {
     /// the HUD wants redrawing now (a key, the mouse over another button)
     hud_dirty: bool,
     /// the mouse (drawable pixels), the HUD's buttons (overlay pixels), the
-    /// one under the mouse, and until when the HUD shows after the mouse
-    /// moved (it shows while the mouse moves, even when hidden)
+    /// one under the mouse, and until when the pointer shows in fullscreen
+    /// after the mouse moved
     mouse: Option<(f64, f64)>,
     buttons: Vec<hud::Button>,
     hover: Option<char>,
-    peek_until: Option<Instant>,
+    pointer_until: Option<Instant>,
     cursor: bool,
     /// the display's frame time, seconds
     period: f64,
@@ -205,7 +205,7 @@ impl App {
             mouse: None,
             buttons: Vec::new(),
             hover: None,
-            peek_until: None,
+            pointer_until: None,
             cursor: !o.fullscreen,
             period,
             rate_gpu: 0.0,
@@ -402,7 +402,7 @@ impl App {
             self.titled = self.show.cur.id;
             self.win.set_title(&format!("fleece: sheep {} ({})", self.show.cur.id, self.show.cur.genome.name));
         }
-        let shown = self.hud_shown();
+        let shown = self.hud;
         if shown && (self.hud_dirty || self.hud_at.elapsed().as_secs_f64() > 0.25) {
             // wrapped to the window, so nothing is cut off
             let max = ((dw / (dh / 540).max(1)).saturating_sub(40) / 6) as usize;
@@ -427,7 +427,7 @@ impl App {
             self.hud_dirty = false;
         }
         // full screen hides the mouse pointer until the mouse moves
-        let cursor = !self.win.is_fullscreen() || self.peek_until.is_some_and(|t| Instant::now() < t);
+        let cursor = !self.win.is_fullscreen() || self.pointer_until.is_some_and(|t| Instant::now() < t);
         if !self.headless && cursor != self.cursor {
             self.win.show_cursor(cursor);
             self.cursor = cursor;
@@ -547,11 +547,6 @@ impl App {
         ]
     }
 
-    /// The HUD shows when on, and for a while after the mouse moves.
-    fn hud_shown(&self) -> bool {
-        self.hud || self.peek_until.is_some_and(|t| Instant::now() < t)
-    }
-
     /// Drawable pixel (`x`, `y`) on the HUD overlay, if past its corner.
     fn hud_point(&self, x: f64, y: f64) -> Option<(u32, u32)> {
         let (_, dh) = self.screen();
@@ -567,15 +562,12 @@ impl App {
         (x as f64 * dw as f64 / ww as f64, y as f64 * dh as f64 / wh as f64)
     }
 
-    /// The mouse moved to drawable pixel `p`: the HUD shows for a while, and
-    /// lights the button under it.
+    /// The mouse moved to drawable pixel `p`: the pointer shows for a while
+    /// (in fullscreen), and the button under it lights.
     fn mouse_moved(&mut self, p: (f64, f64)) {
-        if !self.hud_shown() {
-            self.hud_dirty = true;
-        }
         self.mouse = Some(p);
-        self.peek_until = Some(Instant::now() + std::time::Duration::from_secs(3));
-        let over = if self.hud_shown() { self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)) } else { None };
+        self.pointer_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+        let over = if self.hud { self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)) } else { None };
         if over != self.hover {
             self.hover = over;
             self.hud_dirty = true;
@@ -583,13 +575,12 @@ impl App {
     }
 
     /// A left click at drawable pixel `p` (`clicks` 2: a double click): a
-    /// button does what its key does, a double click elsewhere toggles full
-    /// screen. False to quit.
+    /// button does what its key does (none while the HUD is hidden: only H
+    /// brings it back), a double click elsewhere toggles fullscreen. False
+    /// to quit.
     pub fn click(&mut self, p: (f64, f64), clicks: u8) -> bool {
-        // a click on the hidden HUD only shows it
-        let visible = self.hud_shown();
         self.mouse_moved(p);
-        if let Some(c) = self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)).filter(|_| visible) {
+        if let Some(c) = self.hud_point(p.0, p.1).and_then(|(x, y)| Hud::hit(&self.buttons, x, y)).filter(|_| self.hud) {
             return self.key(c);
         }
         if clicks == 2 {
@@ -746,11 +737,7 @@ impl App {
             'm' => self.show.mutate_next(),
             'p' => self.paused = !self.paused,
             'b' => self.blur = !self.blur,
-            'h' => {
-                self.hud = !self.hud;
-                // hidden from the HUD's own button: gone until the mouse moves again
-                self.peek_until = None;
-            }
+            'h' => self.hud = !self.hud,
             'c' => {
                 if self.r.workers() > 0 {
                     self.r.use_cpu = !self.r.use_cpu || !self.r.use_gpu;
