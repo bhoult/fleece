@@ -28,8 +28,19 @@ v2 adds ten things to the show. Electric Sheep's show as it was is still there: 
 | 3D | 3 | `--tilt 0-2` | off | A 3D camera: the flame tilted back in perspective, swaying slowly, and with depth of field at 2. See "3D" below. |
 | Audio | A | `--audio [MUSIC]` | off | The music drives the show (see below). |
 | Taste | | `--taste on/off` | on | New sheep are the best of three candidates by a taste score (see below). |
+| New variations | | | on | Half of the random new sheep ("random+") draw from 31 more variations: 3D, direct-colour and Apophysis plugins (see "3D" below). Classic breeds from flam3's 99 alone. |
 
-**Taste.** Each candidate is measured on a small render of its first frame: colourfulness (Hasler and Süsstrunk), coverage, brightness entropy, detail, symmetry, distinct colours and mean brightness. A linear score of those says how much it looks like a real Electric Sheep. `fleece --tastefit` fitted the score to 3,000 genebank sheep against 3,000 random sheep that pass flam3's tests, with a cross-validated correlation of 0.58. Real sheep are more colourful and more detailed and use more distinct colours. The HUD shows each sheep's score. Every Up or Down vote nudges the score towards what you like, and the window keeps it in `~/.local/share/fleece/taste.txt`. (Fitted to the genebank's own Electric Sheep ratings instead, `--tastefit --breed 1`, the same measures predict little: r 0.12. Those sheep had all survived the flock already.)
+**3D.** fleece reads the 3D camera of Apophysis 7X and Fractorium: `cam_pitch` and `cam_yaw` (radians), `cam_perspective`, `cam_zpos`, `cam_dof`.
+- **Points carry a z.** The affine passes it on. flam3's variations keep it or drop it as Fractorium's do.
+- **13 3D variations** shape the z: linear3D, Spherical3D, julia3D, julia3Dz, hemisphere, zcone, zblur, ztranslate, zscale, blur3D, curl3D, pie3D and sinusoidal3D.
+- **The projection** follows Fractorium. After the final xform, each point is tilted and turned about the centre of the view and seen in perspective. Points behind the camera are dropped, and each point is blurred with its distance from the focal plane.
+- **14 Apophysis plugins**, as Fractorium implements them: eclipse, epispiral, circlize, glynnia, SphericalN, xheart, petal, squirrel, hole, flipcircle, flipy, bMod, bSwirl and collideoscope.
+- **Direct colour:** dc_linear, dc_bubble, dc_carpet and dc_cylinder colour a point by where it lands. dc_ztransl lifts it by its colour.
+- **The 3 key** tilts any sheep: it leans back about 43°, swaying, with the same lean whatever the sheep's own zoom. Pressed again, it adds depth of field: the middle of the plane stays sharp while the near and far edges blur.
+- **Speed:** a flat flame without these runs exactly the chaos game it always did. 3D is a separate variant of the GPU shader and of the CPU loop. A general 3D shader is compiled in the background at start, so the first tilted frame doesn't wait for a compile.
+- `--varcheck` covers the new variations with a tilted camera, and one case with depth of field.
+
+**Taste.** Each candidate is measured on a small render of its first frame: colourfulness (Hasler and Süsstrunk), coverage, brightness entropy, detail, symmetry, distinct colours, mean brightness and streaks. Streaks measures how much the picture's colour gradients point one way. A linear score of those says how much it looks like a real Electric Sheep. `fleece --tastefit` fitted the score to 3,000 genebank sheep against 3,000 random sheep that pass flam3's tests, with a cross-validated correlation of 0.58. Real sheep are more colourful and more detailed and use more distinct colours. A fixed penalty applies past the streaks of 99% of real sheep. Without it, a direct-colour flame painting stripes across the frame would win on colourfulness. The HUD shows each sheep's score. Every Up or Down vote nudges the score towards what you like, and the window keeps it in `~/.local/share/fleece/taste.txt`. (Fitted to the genebank's own Electric Sheep ratings instead, `--tastefit --breed 1`, the same measures predict little: r 0.12. Those sheep had all survived the flock already.)
 
 **Audio.** `A` (or `--audio`) listens to what the speakers play: PulseAudio or PipeWire's monitor of the default output, through `parec`, which runs only while audio is on. No microphone is used. Each hop of 512 samples (about 94 a second) gives the loudness, four bands (bass, low mid, mid, high, each with its own automatic gain) and beats (onsets from spectral flux). Bass and beats push the camera in. Each band swells some of the xforms. Loudness brightens the picture and turns the sheep faster, and the mid band shifts the hues. `--audio MUSIC` on a video makes a music video. The track (any format ffmpeg reads) is analysed ahead, the frames follow it exactly, it goes into the file, and the video runs as long as the music unless `--seconds` says otherwise:
 
@@ -196,7 +207,7 @@ The headless modes use SDL's offscreen driver, so the context is made on the GPU
 | `src/audio.rs` | listening (parec), the FFT bands and beats, soundtracks |
 | `src/genome.rs` | genomes, flam3_random, symmetry, rotation, the flattening for the chaos game, XML output |
 | `src/interp.rs` | edges: padding, log-polar affines, HSV palettes |
-| `src/var.rs` | the variation table, random parameters, precalcs |
+| `src/var.rs` | the variation table (flam3's 99, then fleece's 3D, plugin and direct-colour ones), random parameters, precalcs |
 | `src/flam3.rs` | reading flam3 XML; the flock file |
 | `src/render.rs` | one frame on both sides: publish, merge, tone |
 | `src/gpu.rs`, `src/shaders/` | buffers, specialised shaders, the passes (iterate, merge with frame blending, de: log density and density estimation per bucket, finish: flam3's spatial filter, gamma and the brightness counts, glow, present) |
