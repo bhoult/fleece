@@ -77,6 +77,9 @@ impl Rng {
     fn chance(&mut self, p: f32) -> bool {
         self.f() < p
     }
+    fn bit_chance(&mut self) -> bool {
+        self.u64() >> 63 == 1
+    }
     fn pick<T: Copy>(&mut self, t: &[T]) -> T {
         t[self.below(t.len())]
     }
@@ -289,7 +292,8 @@ impl Adsr {
             DECAY => self.level = self.sus + (self.level - self.sus) * self.dec,
             RELEASE => {
                 self.level *= self.rel;
-                if self.level < 1e-4 {
+                // -60 dB: inaudible under the music, and a voice the less
+                if self.level < 1e-3 {
                     self.level = 0.0;
                     self.stage = IDLE;
                 }
@@ -1593,8 +1597,6 @@ const MODES: [[i32; 7]; 7] = [
     [0, 2, 3, 5, 7, 8, 11], // harmonic minor
 ];
 const IONIAN: usize = 0;
-const DORIAN: usize = 1;
-const PHRYGIAN: usize = 2;
 const LYDIAN: usize = 3;
 const MIXOLYDIAN: usize = 4;
 const AEOLIAN: usize = 5;
@@ -1604,47 +1606,98 @@ fn deg_semi(mode: usize, deg: i32) -> i32 {
     deg.div_euclid(7) * 12 + MODES[mode][deg.rem_euclid(7) as usize]
 }
 
-/// Chord progressions (scale degrees from 0) that stay on the mode's major
-/// and minor chords.
-fn progressions(mode: usize) -> &'static [&'static [i32]] {
-    match mode {
-        IONIAN => {
-            &[&[0, 4, 5, 3], &[5, 3, 0, 4], &[0, 5, 3, 4], &[1, 4, 0, 0], &[0, 5, 1, 4], &[3, 2, 1, 0], &[0, 3, 0, 4]]
-        }
-        DORIAN => &[&[0, 3], &[0, 3, 0, 6], &[0, 6, 3, 0], &[0, 4, 3, 0], &[0, 2, 3, 0], &[0, 6, 2, 3]],
-        PHRYGIAN => &[&[0, 1], &[0, 1, 0, 6], &[0, 6, 1, 0], &[0, 3, 1, 0]],
-        LYDIAN => &[&[0, 1], &[0, 1, 0, 4], &[0, 6, 1, 0], &[5, 1, 0, 0], &[0, 2, 1, 0]],
-        MIXOLYDIAN => &[&[0, 6], &[0, 6, 3, 0], &[0, 3, 6, 0], &[4, 3, 0, 0], &[0, 6, 4, 3]],
-        AEOLIAN => {
-            &[&[0, 5, 2, 6], &[0, 6, 5, 6], &[5, 6, 0, 0], &[0, 3, 5, 6], &[0, 5, 3, 6], &[0, 2, 5, 6], &[0, 3, 6, 2]]
-        }
-        _ => &[&[0, 5, 3, 4], &[0, 3, 4, 0], &[5, 3, 4, 0], &[0, 4, 0, 5]],
+/// Chord progressions, eight bars each (a numeral a bar; A+B: two chords in
+/// the bar), by genre and by the mode's colour (major: ionian, lydian,
+/// mixolydian; minor: the rest). Borrowed chords, secondary dominants,
+/// suspensions, sevenths and ninths; inversions (^1, ^2) for bass lines that move.
+const AMB_MAJ: &[&str] = &[
+    "Imaj7 Imaj7^1 IVmaj7 IVmaj7 vi9 V^1 IVmaj9 Vsus4",
+    "Iadd9 V^1 vi7 iii7 IVmaj7 Iadd9^1 ii9 Vsus4",
+    "I69 II vi9 IVmaj7 I69 II IVmaj9 Vsus4",
+    "IVmaj7 V^1 vi9 Iadd9^1 IVmaj9 iii7 ii9 Vsus4",
+    "Isus2 bVIImaj7 IVadd9 Isus2 vi9 IVmaj7 bVIImaj7 Vsus4",
+    "Imaj7 vi9 IVmaj9 iv6 Iadd9 iii7 vi7 V7sus4",
+    "vi9 IVmaj7 Imaj7 V^1 vi9 IVmaj7 bVIImaj7 Vsus4",
+    "Imaj9 iii7 IVmaj7 V7/vi vi9 V^1 IVmaj7 iv6",
+];
+const AMB_MIN: &[&str] = &[
+    "i9 IV9 i9 IV9 bVImaj7 bVIImaj7 i9 V7sus4",
+    "i7 bVImaj7 bIIImaj7 bVII i7 iv9 bVImaj7 V7sus4",
+    "i9 bVIImaj7 bVImaj7 bVIImaj7 i9 iv9 bIIImaj7 bVII",
+    "iv9 bVII bIIImaj7 bVImaj7 iim7b5 V7sus4 i9 i9",
+    "i9 i9^2 bVImaj7 bVImaj7 iv9 bVII bIIImaj7 V7sus4",
+    "bVImaj7 bVII i9 v7 bVImaj7 bVII bIIImaj7 bVIIsus4",
+];
+const TECH_MIN: &[&str] = &[
+    "i7 i7 i7 i7 bVI bVI bVII bVII",
+    "i9 i9 iv9 iv9 i9 i9 bVIImaj7 bVIImaj7",
+    "i7 i7 bIIImaj7 bIIImaj7 i7 i7 v7 v7",
+    "i7 i7 i7 i7 i7 i7 i7 i7",
+    "i7 bII i7 bII i7 bII bVII bVII",
+    "i9 i9 i9 i9 bVImaj7 bVImaj7 iv7 iv7",
+    "i11 i11 bVII bVII i11 i11 bVI bVII",
+    "i7 i7 iv7 iv7 bVImaj7 bVImaj7 V7sus4 V7sus4",
+];
+const SW_MAJ: &[&str] = &[
+    "I V vi IV I V^1 vi IV",
+    "vi IV I V vi IV bVII V",
+    "I iii IV V I iii bVII IV",
+    "IV V iii vi ii V I I",
+    "I V^1 vi I^2 IV I^1 ii V7",
+    "vi V IV V vi V bVI bVII",
+];
+const SW_MIN: &[&str] = &[
+    "i bVI bIII bVII i bVI iv V7",
+    "bVI bVII i i bVI bVII bIII V7sus4+V7",
+    "i v bVI bIII iv i^2 bVI+bVII i",
+    "i bVII bVI bVII i bVII bVI+bVII V7",
+    "iv bVII bIIImaj7 bVImaj7 iim7b5 V7 i i",
+    "i bIII bVII iv bVI bIII iv+V7 i",
+    "i bVII^1 bVI bVII i bVII bVI V7sus4",
+    "bVI bIII bVII i bVI bIII V7/V V7",
+];
+const LOFI_MAJ: &[&str] = &[
+    "ii9 V9 Imaj9 Imaj9 ii9 V9 Imaj9 V7/ii",
+    "IVmaj7 iii7 vi9 V7/V ii9 V7 Imaj9 vi9",
+    "Imaj7 V7/vi vi9 ii9+V7 IVmaj7 iv6 iii7 ii7+bII7",
+    "Imaj9 I7 IVmaj7 iv6 iii7 VI7 ii9 V9",
+    "IVmaj9 V9 iii7 vi9 ii7 V7 Imaj7 Imaj7",
+    "ii9+V9 Imaj9+vi9 ii9+V9 Imaj9 IVmaj7+iv6 iii7+VI7 ii9+V9 Imaj9",
+    "Imaj7 IVmaj7 iii7 vi7 ii7 V7 Imaj7 bVIImaj7",
+];
+const LOFI_MIN: &[&str] = &[
+    "i9 iv9 bVIImaj7 bIIImaj7 bVImaj7 iim7b5 V7 i9",
+    "i9 IV9 i9 IV9 bVImaj7 bVII9 i9 i9",
+    "i9 bVImaj7 iim7b5+V7 i9 iv9 bVII9 bIIImaj7 V7",
+    "i7 iv7 bVIImaj7 bIIImaj7 iv7 V7 i7 bVI7",
+    "iv9 v7 i9 i9 bVImaj7 bVII7 i9 V7sus4+V7",
+];
+
+/// The genre's pool for the mode.
+fn pool(genre: usize, mode: usize) -> &'static [&'static str] {
+    let major = matches!(mode, IONIAN | LYDIAN | MIXOLYDIAN);
+    match (genre, major) {
+        (AMBIENT, true) => AMB_MAJ,
+        (AMBIENT, false) => AMB_MIN,
+        (TECHNO, _) => TECH_MIN,
+        (SYNTHWAVE, true) => SW_MAJ,
+        (SYNTHWAVE, false) => SW_MIN,
+        (_, true) => LOFI_MAJ,
+        (_, false) => LOFI_MIN,
     }
 }
 
-const TRIAD: u8 = 0;
-const SEV: u8 = 1;
-const NINE: u8 = 2;
-const SUS2: u8 = 3;
-const SUS4: u8 = 4;
-const ADD9: u8 = 5;
-
-#[derive(Clone, Copy, PartialEq)]
-struct Chord {
-    deg: i32,
-    kind: u8,
-}
-
-/// The chord's tones, as scale degrees above its root.
-fn chord_offsets(kind: u8) -> &'static [i32] {
-    match kind {
-        SEV => &[0, 2, 4, 6],
-        NINE => &[0, 2, 4, 6, 8],
-        SUS2 => &[0, 1, 4],
-        SUS4 => &[0, 3, 4],
-        ADD9 => &[0, 2, 4, 8],
-        _ => &[0, 2, 4],
-    }
+/// A progression from the pools, a chord per half bar.
+fn halves(plan: &str) -> Vec<Harm> {
+    plan.split_whitespace()
+        .flat_map(|t| {
+            let v = harms(&t.replace('+', " "));
+            match v.len() {
+                1 => [v[0], v[0]],
+                _ => [v[0], v[1]],
+            }
+        })
+        .collect()
 }
 
 /// A voicing of the pitch classes `pcs` (absolute) within [lo, hi], moving as
@@ -1944,39 +1997,39 @@ fn make_cell(r: &mut Rng, steps: u16, density: f32, lo: i32, hi: i32, cadence: b
     notes
 }
 
-/// A four-bar phrase: call, the call with a new ending, the call again, and a
-/// cadence (one-bar cells); or a two-bar call and its answer, which keeps the
-/// rhythm, moves the line and comes home.
-fn make_phrase(r: &mut Rng, density: f32, lo: i32, hi: i32) -> Vec<MNote> {
-    let shift = |v: &[MNote], by: u16| v.iter().map(|n| MNote { step: n.step + by, ..*n }).collect::<Vec<_>>();
-    if r.chance(0.5) {
-        let a = make_cell(r, 16, density, lo, hi, false);
-        let mut a2 = a.clone();
-        let k = a2.len();
-        for n in a2[k.saturating_sub(2)..].iter_mut() {
-            n.deg = (n.deg + r.pick(&[-2, -1, 1, 2, 3])).clamp(lo, hi);
-        }
-        let cad = make_cell(r, 16, density * 0.8, lo, hi, true);
-        let mut v = a.clone();
-        v.extend(shift(&a2, 16));
-        v.extend(shift(&a, 32));
-        v.extend(shift(&cad, 48));
-        v
-    } else {
-        let a = make_cell(r, 32, density, lo, hi, false);
-        let home = make_cell(r, 32, density, lo, hi, true);
-        // the answer: the call's rhythm (until its cadence), its pitches moved
-        let by = r.pick(&[-2, 2, -1, 1, 3]);
-        let mut b: Vec<MNote> =
-            a.iter().filter(|n| n.step < 24).map(|n| MNote { deg: (n.deg + by).clamp(lo, hi), ..*n }).collect();
-        b.extend(home.iter().filter(|n| n.step >= 24).copied());
-        if b.last().is_none_or(|n| n.step < 24) {
-            b.push(MNote { step: 24, len: 8, deg: 0, vel: 0.8 });
-        }
-        let mut v = a;
-        v.extend(shift(&b, 32));
-        v
+/// A cell moved by `by` scale degrees.
+fn moved(v: &[MNote], by: i32, lo: i32, hi: i32) -> Vec<MNote> {
+    v.iter().map(|n| MNote { deg: (n.deg + by).clamp(lo, hi), ..*n }).collect()
+}
+
+/// A sixteen-bar melody, developed from a two-bar motif: the motif (a), its
+/// sequence a step or a third away with a new ending (a'), a contrasting
+/// cell (b), a half cadence (c); then the motif inverted (a''), the
+/// contrast moved (b'), a new cell (d) and the cadence home (e).
+fn make_melody(r: &mut Rng, density: f32, lo: i32, hi: i32) -> Vec<MNote> {
+    let a = make_cell(r, 32, density, lo, hi, false);
+    let mut a2 = moved(&a, r.pick(&[1, -1, 2, -2, 3]), lo, hi);
+    let k = a2.len();
+    for n in a2[k.saturating_sub(2)..].iter_mut() {
+        n.deg = (n.deg + r.pick(&[-2, -1, 1, 2])).clamp(lo, hi);
     }
+    let db = (density * r.range(0.7, 1.4)).min(0.95);
+    let b = make_cell(r, 32, db, lo, hi, false);
+    let mut c = make_cell(r, 32, density * 0.8, lo, hi, true);
+    if let Some(n) = c.last_mut() {
+        // half way: rest on the fifth or the second, not home
+        n.deg = (n.deg + r.pick(&[4, 1, -3])).clamp(lo, hi);
+    }
+    let first = a.first().map_or(0, |n| n.deg);
+    let a3: Vec<MNote> = a.iter().map(|n| MNote { deg: (2 * first - n.deg).clamp(lo, hi), ..*n }).collect();
+    let b2 = moved(&b, r.pick(&[2, -2, 1]), lo, hi);
+    let d = make_cell(r, 32, density, lo, hi, false);
+    let e = make_cell(r, 32, density * 0.7, lo, hi, true);
+    let mut v = Vec::new();
+    for (k, cell) in [&a, &a2, &b, &c, &a3, &b2, &d, &e].iter().enumerate() {
+        v.extend(cell.iter().map(|n| MNote { step: n.step + 32 * k as u16, ..*n }));
+    }
+    v
 }
 
 /// An arpeggio's order: indices into the chord's tones over two octaves.
@@ -2007,6 +2060,8 @@ const L_KEYS: u32 = 1 << 10;
 const L_DRONE: u32 = 1 << 11;
 const L_TEX: u32 = 1 << 12;
 const L_RUMBLE: u32 = 1 << 13;
+/// a second voice: answering the melody, or walking the chords' guide tones
+const L_CTR: u32 = 1 << 14;
 
 const INTRO: u8 = 0;
 const BUILD: u8 = 1;
@@ -2075,8 +2130,16 @@ struct Song {
     root: i32,
     mode: usize,
     /// a chord per half bar, looping: the section's, drawn from the piece's two
-    prog: Vec<Chord>,
-    progs: [Vec<Chord>; 2],
+    prog: Vec<Harm>,
+    progs: Vec<Vec<Harm>>,
+    /// each section's key (semitones from the piece's tonic), and a pivot
+    /// chord (a half bar's index, the new key's dominant) leading into a change
+    lifts: Vec<i32>,
+    pivot: Option<(u32, Harm)>,
+    /// the melody's bar (of sixteen) this bar, and the counter-melody's last note
+    mel_bar: u32,
+    mel_pb: u32,
+    guide: i32,
     /// semitones the whole piece is lifted (synthwave's last chorus)
     lift: i32,
     /// the melody's range, scale degrees about the tonic
@@ -2116,6 +2179,8 @@ struct Song {
     pulse: f32,
     bass_style2: u8,
     stab_shift: usize,
+    /// techno's hook: a bar of melody
+    hook: Vec<MNote>,
     /// an optional layer sitting out this phrase
     mute: u32,
     anticipated: bool,
@@ -2137,8 +2202,13 @@ impl Song {
             human: 0.0,
             root: 0,
             mode: AEOLIAN,
-            prog: vec![Chord { deg: 0, kind: TRIAD }],
-            progs: [vec![Chord { deg: 0, kind: TRIAD }], vec![Chord { deg: 0, kind: TRIAD }]],
+            prog: vec![Harm { root: 0, q: Q_MAJ, inv: 0 }],
+            progs: vec![vec![Harm { root: 0, q: Q_MAJ, inv: 0 }]],
+            lifts: Vec::new(),
+            pivot: None,
+            mel_bar: 0,
+            mel_pb: 0,
+            guide: 0,
             lift: 0,
             prange: (-2, 9),
             plan: Vec::new(),
@@ -2173,6 +2243,7 @@ impl Song {
             pulse: 1.0,
             bass_style2: 0,
             stab_shift: 0,
+            hook: Vec::new(),
             mute: 0,
             anticipated: false,
             bell_motif: false,
@@ -2204,8 +2275,11 @@ impl Song {
         deg_semi(self.mode, deg)
     }
 
-    fn chord(&self, half: u32) -> Chord {
-        self.prog[half as usize % self.prog.len()]
+    fn chord(&self, half: u32) -> Harm {
+        match self.pivot {
+            Some((h, c)) if h == half => c,
+            _ => self.prog[half as usize % self.prog.len()],
+        }
     }
 
     /// The chords of the bar just written, as pitch-class sets (bit k: pitch class k).
@@ -2214,48 +2288,48 @@ impl Song {
             return vec![self.pk.mask];
         }
         let bar = self.sec_bar.saturating_sub(1);
-        (0..2)
-            .map(|h| {
-                let c = self.chord(bar * 2 + h);
-                chord_offsets(c.kind)
-                    .iter()
-                    .fold(0u16, |m, &o| m | 1 << (self.root + self.semi(c.deg + o) + self.lift).rem_euclid(12))
-            })
-            .collect()
+        (0..2).map(|h| self.chord(bar * 2 + h).mask(self.root + self.lift)).collect()
     }
 
-    /// The chord's root in [lo, lo + 12).
-    fn bass_note(&self, c: Chord, lo: i32) -> i32 {
-        let pc = self.root + self.semi(c.deg);
-        lo + (pc - lo).rem_euclid(12)
+    /// The chord's bass (its root, or the chord tone an inversion puts there) in [lo, lo + 12).
+    fn bass_note(&self, c: Harm, lo: i32) -> i32 {
+        lo + (self.root + c.bass() - lo).rem_euclid(12)
     }
 
-    /// Scale degree `deg` moved to the nearest tone of chord `c`.
-    fn snap(&self, deg: i32, c: Chord) -> i32 {
-        let offs = chord_offsets(c.kind);
-        let is_tone = |d: i32| offs.iter().any(|&o| (d - c.deg - o).rem_euclid(7) == 0);
-        for k in [0, -1, 1, -2, 2, -3, 3] {
-            if is_tone(deg + k) {
-                return deg + k;
-            }
-        }
-        deg
+    /// The chord's pitch classes (absolute).
+    fn pcs(&self, c: Harm) -> Vec<i32> {
+        let mut v: Vec<i32> = c.pcs().iter().map(|p| (self.root + p).rem_euclid(12)).collect();
+        v.dedup();
+        v
+    }
+
+    /// A melody note: scale degree `deg` (of the mode), on a strong beat or
+    /// long moved to the nearest tone of chord `c`, otherwise to the nearest
+    /// tone of its chord-scale. Semitones above the tonic.
+    fn mel_pitch(&self, deg: i32, c: Harm, strong: bool) -> i32 {
+        let p = self.semi(deg);
+        let set = if strong { c.pcs() } else { chord_scale(self.mode, c) };
+        (0..7).flat_map(|k| [p - k, p + k]).find(|q| set.contains(&q.rem_euclid(12))).unwrap_or(p)
     }
 
     /// A voicing of `c` within [lo, hi], moving as little as it can from
-    /// `prev` (close position, or drop-2 when `open`).
-    fn voicing(&self, c: Chord, lo: i32, hi: i32, prev: &[i32], open: bool) -> Vec<i32> {
-        let pcs: Vec<i32> =
-            chord_offsets(c.kind).iter().map(|&o| (self.root + self.semi(c.deg + o)).rem_euclid(12)).collect();
+    /// `prev` (close position, or drop-2 when `open`); an eleventh chord
+    /// leaves its fifth out.
+    fn voicing(&self, c: Harm, lo: i32, hi: i32, prev: &[i32], open: bool) -> Vec<i32> {
+        let mut pcs = self.pcs(c);
+        if pcs.len() > 5 {
+            pcs.remove(2);
+        }
         voicing_pcs(&pcs, lo, hi, prev, open)
     }
 
     /// Chord tones from `lo` upward over two octaves.
-    fn arp_tones(&self, c: Chord, lo: i32) -> Vec<i32> {
-        let mut v: Vec<i32> = chord_offsets(c.kind)
+    fn arp_tones(&self, c: Harm, lo: i32) -> Vec<i32> {
+        let mut v: Vec<i32> = self
+            .pcs(c)
             .iter()
-            .flat_map(|&o| {
-                let n = lo + (self.root + self.semi(c.deg + o) - lo).rem_euclid(12);
+            .flat_map(|&pc| {
+                let n = lo + (pc - lo).rem_euclid(12);
                 [n, n + 12]
             })
             .collect();
@@ -2264,58 +2338,61 @@ impl Song {
         v
     }
 
-    /// A progression for the genre: degrees from the mode's pool, chord
-    /// colours and lengths (in half bars) the genre likes.
-    fn draw_prog(&mut self) -> Vec<Chord> {
+    /// A progression from the genre's pool: eight bars, or sixteen with each
+    /// chord held two (ambient, sometimes).
+    fn draw_prog(&mut self) -> Vec<Harm> {
         let r = &mut self.rng;
-        let pool = progressions(self.mode);
-        let (degs, halves, kinds): (Vec<i32>, usize, Vec<u8>) = match self.genre {
-            AMBIENT => {
-                let mut d = r.pick(pool).to_vec();
-                if r.chance(0.3) {
-                    d.truncate(2);
-                }
-                (d, r.pick(&[4, 4, 8]), (0..4).map(|_| r.pick(&[ADD9, ADD9, SUS2, SEV, NINE, TRIAD])).collect())
-            }
-            TECHNO => {
-                let d = if r.chance(0.45) {
-                    vec![0]
-                } else {
-                    let p = r.pick(pool);
-                    p[..r.pick(&[2, p.len()]).min(p.len())].to_vec()
-                };
-                let h = if d.len() == 1 { 8 } else { r.pick(&[4, 8]) };
-                (d, h, vec![r.pick(&[SEV, SEV, NINE, SUS4])])
-            }
-            SYNTHWAVE => (
-                r.pick(pool).to_vec(),
-                r.pick(&[2, 2, 4]),
-                (0..4).map(|_| r.pick(&[TRIAD, TRIAD, TRIAD, ADD9, SUS2, SEV])).collect(),
-            ),
-            _ => {
-                let d = r.pick(pool).to_vec();
-                let h = if d.len() == 2 { 4 } else { r.pick(&[2, 2, 4]) };
-                (d, h, (0..4).map(|_| r.pick(&[SEV, SEV, NINE])).collect())
-            }
-        };
-        degs.iter()
-            .enumerate()
-            .flat_map(|(i, &d)| std::iter::repeat_n(Chord { deg: d, kind: kinds[i % kinds.len()] }, halves))
-            .collect()
+        let v = halves(r.pick(pool(self.genre, self.mode)));
+        if self.genre == AMBIENT && r.chance(0.35) {
+            v.chunks(2).flat_map(|c| [c[0], c[1], c[0], c[1]]).collect()
+        } else {
+            v
+        }
     }
 
-    /// The piece's two progressions (B another than A, when the pool allows).
+    /// The piece's progressions: A (verses), B (choruses), C (bridges and
+    /// breaks), each another than the last when the pool allows.
     fn draw_progs(&mut self) {
-        let a = self.draw_prog();
-        let mut b = self.draw_prog();
-        for _ in 0..6 {
-            if b.iter().map(|c| c.deg).ne(a.iter().map(|c| c.deg)) {
-                break;
+        let mut v: Vec<Vec<Harm>> = Vec::new();
+        for _ in 0..3 {
+            let mut p = self.draw_prog();
+            for _ in 0..6 {
+                if !v.contains(&p) {
+                    break;
+                }
+                p = self.draw_prog();
             }
-            b = self.draw_prog();
+            v.push(p);
         }
-        self.prog = a.clone();
-        self.progs = [a, b];
+        self.prog = v[0].clone();
+        self.progs = v;
+        self.plan_keys();
+    }
+
+    /// Each section's key: home, but two pieces in five move a step, a third
+    /// or a fourth away from a main section on (home again after two sections
+    /// half the time); synthwave's last chorus may lift too.
+    fn plan_keys(&mut self) {
+        let n = self.plan.len();
+        self.lifts = vec![0; n];
+        let r = &mut self.rng;
+        let mains: Vec<usize> = (2..n.saturating_sub(1)).filter(|&k| self.plan[k].kind == MAIN).collect();
+        if !mains.is_empty() && r.chance(0.4) {
+            let k = mains[r.below(mains.len())];
+            let m = r.pick(&[2, -2, 5, -5, 3, -3]);
+            let end = if r.chance(0.5) { (k + 2).min(n - 1) } else { n };
+            for l in self.lifts[k..end].iter_mut() {
+                *l = m;
+            }
+        }
+        if self.genre == SYNTHWAVE && r.chance(0.5) {
+            if let Some(k) = self.plan.iter().rposition(|x| x.kind == MAIN) {
+                let up = r.pick(&[1, 2, 2]);
+                for l in self.lifts[k..].iter_mut() {
+                    *l += up;
+                }
+            }
+        }
     }
 
     /// The next bar: its events into `ev`, starting at sample `t0`; its length in samples.
@@ -2328,9 +2405,17 @@ impl Song {
             }
             self.section_start(s);
         }
+        let sec = self.plan[self.sec];
+        // the last bar before a key change ends on the new key's dominant
+        if self.genre != POLKA && self.sec_bar + 1 == sec.bars {
+            let next = self.lifts.get(self.sec + 1).copied();
+            if let Some(l) = next.filter(|&l| l != self.lift) {
+                let root = (l - self.lift + 7).rem_euclid(12);
+                self.pivot = Some((self.sec_bar * 2 + 1, Harm { root, q: Q_DOM7, inv: 0 }));
+            }
+        }
         let len = self.bar_steps() as f64 * self.step_len();
         let mut b = Bar { t0, step: self.step_len(), swing: self.swing, lift: self.lift, ev };
-        let sec = self.plan[self.sec];
         if self.sec_bar.is_multiple_of(8) && self.sec_bar > 0 && sec.kind == MAIN {
             // now and then an optional layer sits out a phrase
             let opt: &[u32] = match self.genre {
@@ -2411,27 +2496,32 @@ impl Song {
         } else {
             self.rng.pick(&[0, 0b10])
         };
-        // which progression: B for later main sections, choruses, some breaks
+        // which progression: A for verses, B for choruses and later mains,
+        // C for bridges and breaks
         let mains_before = self.plan[..self.sec].iter().filter(|x| x.kind == MAIN).count();
         let r = &mut self.rng;
-        let use_b = match self.genre {
-            AMBIENT => sec.kind != INTRO && self.sec % 2 == 0,
-            TECHNO => (sec.kind == MAIN && mains_before >= 1) || (sec.kind == BREAK && r.chance(0.5)),
-            SYNTHWAVE => sec.mask & L_LEAD != 0 && self.piece % 2 == 0,
-            LOFI => sec.mask & L_LEAD != 0 && r.chance(0.6),
-            _ => false,
+        let which = match (self.genre, sec.kind) {
+            (POLKA, _) => 0,
+            (_, BREAK) => 2,
+            (AMBIENT, MAIN) => self.sec % 2,
+            (TECHNO, MAIN) => (mains_before >= 1) as usize,
+            (SYNTHWAVE, MAIN) => (sec.mask & L_LEAD != 0) as usize,
+            (LOFI, MAIN) => (sec.mask & L_LEAD != 0 || r.chance(0.3)) as usize,
+            _ => 0,
         };
-        self.prog = self.progs[use_b as usize].clone();
-        // synthwave's last chorus, up a step or a half (half the time)
-        let last_main = self.plan.iter().rposition(|x| x.kind == MAIN) == Some(self.sec);
-        if self.genre == SYNTHWAVE && last_main && sec.energy >= 1.0 && r.chance(0.5) {
-            self.lift = r.pick(&[1, 2, 2]);
+        self.prog = self.progs[which.min(self.progs.len() - 1)].clone();
+        self.pivot = None;
+        let lift = self.lifts.get(self.sec).copied().unwrap_or(0);
+        if lift != self.lift {
+            self.lift = lift;
+            self.pad_v.clear();
+            self.keys_v.clear();
         }
         match self.genre {
             AMBIENT => {
                 s.fx.wind_to = if sec.mask & L_TEX != 0 { r.range(0.06, 0.12) } else { 0.0 };
                 if sec.kind == MAIN && r.chance(0.4) {
-                    self.phrase = make_phrase(r, 0.3, 0, 11);
+                    self.phrase = make_melody(r, 0.3, 0, 11);
                 }
                 if r.chance(0.5) {
                     self.arp = make_arp(r);
@@ -2459,12 +2549,12 @@ impl Song {
                 self.arp = make_arp(r);
                 self.arp2 = make_arp(r);
                 if sec.kind == MAIN && r.chance(0.3) {
-                    self.phrase = make_phrase(r, 0.55, -2, 9);
+                    self.phrase = make_melody(r, 0.55, -2, 9);
                 }
             }
             LOFI => {
                 if sec.kind == MAIN && r.chance(0.35) {
-                    self.phrase = make_phrase(r, 0.35, -2, 8);
+                    self.phrase = make_melody(r, 0.35, -2, 8);
                 }
             }
             _ => self.polka_section(),
@@ -2512,49 +2602,121 @@ impl Song {
         }
     }
 
-    /// The melody's bar: the phrase (varied each time round) against the chords.
+    /// The melody's bar: the sixteen-bar melody (varied each time round)
+    /// against the chords.
     fn melody(&mut self, b: &mut Bar, ch: usize, vel: f32, late: f32, legato: f32) {
-        let pb = (self.sec_bar % 4) as u16;
-        if pb == 0 && self.sec_bar > 0 {
+        let pb = self.mel_bar % 16;
+        if pb == 0 && self.mel_bar > 0 {
             self.vary_phrase();
         }
+        self.mel_pb = pb;
+        self.mel_bar += 1;
         let tonic = self.tonic_near(self.lead_center);
         for k in 0..self.phrase.len() {
             let n = self.phrase[k];
-            if n.step / 16 != pb {
+            if n.step as u32 / 16 != pb {
                 continue;
             }
             let st = n.step % 16;
             let c = self.chord(self.sec_bar * 2 + (st >= 8) as u32);
-            let mut d = n.deg + self.ptrans;
-            if st.is_multiple_of(8) || n.len >= 4 {
-                d = self.snap(d, c);
-            }
+            let p = self.mel_pitch(n.deg + self.ptrans, c, st.is_multiple_of(8) || n.len >= 4);
             let j = self.rng.range(0.0, late);
-            b.note(st as f32, j, ch, tonic + self.semi(d), n.vel * vel, n.len as f32 * legato, false);
+            b.note(st as f32, j, ch, tonic + p, n.vel * vel, n.len as f32 * legato, false);
         }
     }
 
-    /// A new turn of the phrase: as it was, moved, rephrased or re-ended.
+    /// A second voice answering the melody: in its rests of a quarter note
+    /// or more, a short figure of chord tones in its own register leading to
+    /// the melody's next note; where no melody plays, a slow line through
+    /// the chords' thirds and sevenths, each a step or so from the last.
+    fn counter(&mut self, b: &mut Bar, ch: usize, center: i32, vel: f32, answering: bool) {
+        let i = self.sec_bar;
+        let base = self.tonic_near(center);
+        if answering {
+            let pb = self.mel_pb;
+            let mut busy = [false; 16];
+            let mut next_pitch = Vec::new();
+            for n in self.phrase.iter().filter(|n| n.step as u32 / 16 == pb) {
+                let st = (n.step % 16) as usize;
+                for x in busy[st..(st + n.len as usize).min(16)].iter_mut() {
+                    *x = true;
+                }
+                next_pitch.push((st, n.deg));
+            }
+            let mut st = 0;
+            let mut figures = 0;
+            while st < 16 && figures < 2 {
+                let run = (st..16).take_while(|&k| !busy[k]).count();
+                if run >= 4 && st % 2 == 0 {
+                    let c = self.chord(i * 2 + (st >= 8) as u32);
+                    let tones: Vec<i32> = self.arp_tones(c, base - 7).into_iter().filter(|&p| p <= base + 7).collect();
+                    let k0 = nearest(&tones, self.guide.clamp(base - 7, base + 7)) as isize;
+                    let up = self.rng.bit_chance();
+                    let sixteenths = run >= 6 && self.rng.chance(0.3);
+                    let (count, gap) = if sixteenths { (4, 1) } else { ((run / 2).min(3), 2) };
+                    for j in 0..count {
+                        let k = (k0 + if up { j as isize } else { -(j as isize) }).clamp(0, tones.len() as isize - 1);
+                        let p = tones[k as usize];
+                        let at = st + j * gap;
+                        let v = vel * if j == 0 { 1.0 } else { 0.85 };
+                        b.note(at as f32, self.rng.range(0.0, self.human), ch, p, v, gap as f32 * 0.9, false);
+                        self.guide = p;
+                    }
+                    figures += 1;
+                    st += run;
+                } else {
+                    st += run.max(1);
+                }
+            }
+        } else {
+            for h in 0..2u32 {
+                let half = i * 2 + h;
+                let c = self.chord(half);
+                if !(half == 0 || self.chord(half - 1) != c || (h == 0 && i % 2 == 0)) {
+                    continue;
+                }
+                let iv = q_iv(c.q);
+                let guides: Vec<i32> = [iv[1], *iv.get(3).unwrap_or(&iv[2])]
+                    .iter()
+                    .map(|x| (self.root + c.root + x).rem_euclid(12))
+                    .collect();
+                let cands = in_range(&guides, base - 5, base + 9);
+                if cands.is_empty() {
+                    continue;
+                }
+                let p = cands[nearest(&cands, if self.guide == 0 { base } else { self.guide })];
+                let mut n = 1;
+                while n < 4 && self.chord(half + n) == c {
+                    n += 1;
+                }
+                b.note(h as f32 * 8.0, 0.0, ch, p, vel * 0.8, n as f32 * 8.0, false);
+                self.guide = p;
+            }
+        }
+    }
+
+    /// A new turn of the melody: as it was, moved, rephrased or re-ended.
     fn vary_phrase(&mut self) {
         let r = &mut self.rng;
-        match r.weighted(&[0.3, 0.25, 0.2, 0.15, 0.1]) {
+        match r.weighted(&[0.25, 0.25, 0.2, 0.15, 0.15]) {
             0 => self.ptrans = 0,
             1 => self.ptrans = r.pick(&[-2, 2, 1, -1, 3]),
             2 => {
-                // a note nudged a 16th
-                let k = r.below(self.phrase.len().max(1));
-                if let Some(n) = self.phrase.get_mut(k)
-                    && n.step % 16 != 0
-                    && n.step % 16 < 15
-                {
-                    n.step += 1;
-                    n.len = n.len.saturating_sub(1).max(1);
+                // a few notes nudged a 16th
+                for _ in 0..3 {
+                    let k = r.below(self.phrase.len().max(1));
+                    if let Some(n) = self.phrase.get_mut(k)
+                        && n.step % 16 != 0
+                        && n.step % 16 < 15
+                    {
+                        n.step += 1;
+                        n.len = n.len.saturating_sub(1).max(1);
+                    }
                 }
             }
             3 => {
-                // a couple of notes moved
-                for _ in 0..2 {
+                // a few notes moved
+                for _ in 0..4 {
                     let k = r.below(self.phrase.len().max(1));
                     if let Some(n) = self.phrase.get_mut(k) {
                         n.deg += r.pick(&[-2, -1, 1, 2]);
@@ -2562,10 +2724,10 @@ impl Song {
                 }
             }
             _ => {
-                // a new last bar, home again
-                let cad = make_cell(r, 16, 0.4, self.prange.0, self.prange.1, true);
-                self.phrase.retain(|n| n.step < 48);
-                self.phrase.extend(cad.iter().map(|n| MNote { step: n.step + 48, ..*n }));
+                // new last two bars, home again
+                let cad = make_cell(r, 32, 0.45, self.prange.0, self.prange.1, true);
+                self.phrase.retain(|n| n.step < 224);
+                self.phrase.extend(cad.iter().map(|n| MNote { step: n.step + 224, ..*n }));
             }
         }
     }
@@ -2592,7 +2754,7 @@ impl Song {
         self.plan = vec![
             Sec { kind: INTRO, bars: 4, mask: core | L_DRONE, energy: 0.35 },
             Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_PERC, energy: 0.5 },
-            Sec { kind: MAIN, bars: 8, mask: core | L_BELL | L_PERC | L_BASS | L_HAT, energy: 0.65 },
+            Sec { kind: MAIN, bars: 8, mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_CTR, energy: 0.65 },
         ];
         if r.chance(0.5) {
             self.plan.push(Sec { kind: BREAK, bars: 4, mask: L_PAD | L_BELL | L_TEX | L_DRONE, energy: 0.4 });
@@ -2605,7 +2767,12 @@ impl Song {
             mask: core | L_BELL | L_PERC | L_BASS | L_HAT | L_KICK | L_TEX,
             energy: 0.75,
         });
-        self.plan.push(Sec { kind: MAIN, bars: 8, mask: core | L_DRONE | L_BELL | L_PERC | L_TEX, energy: 0.6 });
+        self.plan.push(Sec {
+            kind: MAIN,
+            bars: 8,
+            mask: core | L_DRONE | L_BELL | L_PERC | L_TEX | L_CTR,
+            energy: 0.6,
+        });
         if r.chance(0.5) {
             self.plan.push(Sec {
                 kind: MAIN,
@@ -2615,7 +2782,7 @@ impl Song {
             });
         }
         self.plan.push(Sec { kind: OUTRO, bars: 4, mask: core | L_DRONE | L_TEX, energy: 0.35 });
-        self.phrase = make_phrase(r, 0.3, 0, 11);
+        self.phrase = make_melody(r, 0.3, 0, 11);
         self.arp = make_arp(r);
         self.arp2 = make_arp(r);
         self.arp_rate = r.pick(&[2, 2, 1]);
@@ -2684,24 +2851,23 @@ impl Song {
             // the motif in the B groups, loose notes in the A ones
             self.bell_motif = vb;
             if self.bell_motif {
-                let pb = (i % 4) as u16;
-                if pb == 0 && i > 0 {
+                let pb = self.mel_bar % 16;
+                if pb == 0 && self.mel_bar > 0 {
                     self.vary_phrase();
                 }
+                self.mel_pb = pb;
+                self.mel_bar += 1;
                 let tonic = self.tonic_near(self.lead_center);
                 for k in 0..self.phrase.len() {
                     let n = self.phrase[k];
-                    if n.step / 16 != pb || self.rng.chance(0.1) {
+                    if n.step as u32 / 16 != pb || self.rng.chance(0.1) {
                         continue;
                     }
                     let st = n.step % 16;
                     let c = self.chord(i * 2 + (st >= 8) as u32);
-                    let mut d = self.penta(n.deg + self.ptrans);
-                    if st.is_multiple_of(8) {
-                        d = self.snap(d, c);
-                    }
+                    let p = self.mel_pitch(self.penta(n.deg + self.ptrans), c, st.is_multiple_of(8));
                     let j = self.rng.range(0.0, self.human);
-                    b.note(st as f32, j, CH_BELL, tonic + self.semi(d), 0.35 + 0.35 * n.vel, 4.0, false);
+                    b.note(st as f32, j, CH_BELL, tonic + p, 0.35 + 0.35 * n.vel, 4.0, false);
                 }
             } else {
                 for beat in 0..4 {
@@ -2710,13 +2876,17 @@ impl Song {
                     }
                     let st = beat * 4 + self.rng.pick(&[0, 0, 2]);
                     let c = self.chord(i * 2 + (st >= 8) as u32);
-                    let offs = chord_offsets(c.kind);
-                    let d = c.deg + self.rng.pick(offs) + 7 * self.rng.below(2) as i32;
-                    let d = self.penta(d);
-                    let note = self.tonic_near(72) + self.semi(d);
+                    let pc = self.rng.pick(&self.pcs(c));
+                    let base = self.tonic_near(72);
+                    let note = base + (pc - base).rem_euclid(12) + 12 * self.rng.below(2) as i32;
                     let j = self.rng.range(0.0, self.human);
                     b.note(st as f32, j, CH_BELL, note, self.rng.range(0.3, 0.65), 4.0, false);
                 }
+            }
+            if m & L_CTR != 0 {
+                // the ocarina answers the bells' motif, or walks the chords' guide tones
+                let answering = self.bell_motif;
+                self.counter(b, CH_LEAD, 66, 0.55, answering);
             }
         }
         if m & L_ARP != 0 {
@@ -2795,11 +2965,11 @@ impl Song {
             Sec { kind: BUILD, bars: 8, mask: L_KICK | L_HAT | L_OHAT | L_SNARE | L_BASS, energy: 0.6 },
             Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | rumble | stabs, energy: 0.8 },
             Sec { kind: BREAK, bars: 8, mask: brk, energy: 0.35 },
-            Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | L_RUMBLE | L_KEYS, energy: 0.95 },
+            Sec { kind: MAIN, bars: 16, mask: drums | L_BASS | L_RUMBLE | L_KEYS | L_LEAD, energy: 0.95 },
         ];
         if r.chance(0.5) {
             self.plan.push(Sec { kind: BREAK, bars: 4, mask: L_PAD | L_KEYS | L_HAT | L_BASS, energy: 0.45 });
-            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_BASS | rumble | L_KEYS, energy: 0.9 });
+            self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_BASS | rumble | L_KEYS | L_LEAD, energy: 0.9 });
         }
         self.plan.push(Sec { kind: OUTRO, bars: 8, mask: L_KICK | L_HAT | L_PERC | L_BASS, energy: 0.5 });
         // A: four on the floor, claps on two and four, 8ths of hats with 16ths
@@ -2829,6 +2999,8 @@ impl Song {
         self.bass = new_bass(r, self.mode, self.bass_style);
         self.bass2 = mutate_bass(r, &self.bass, self.mode, 3);
         self.period = r.pick(&[8.0, 16.0, 24.0, 32.0]);
+        self.hook = make_cell(r, 16, 0.45, 0, 9, false);
+        self.lead_center = r.pick(&[67, 69, 72]);
         sounds_techno(r, s, self.bass_style);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
@@ -2965,6 +3137,17 @@ impl Song {
         if m & L_PAD != 0 {
             self.pads(b, CH_PAD, 50, 72, 0.6, false, 4.0);
         }
+        if m & L_LEAD != 0 {
+            // the hook: a bar of plucks, moved up in the B groups, the stabs answering
+            let tonic = self.tonic_near(self.lead_center);
+            let by = if vb { 2 } else { 0 };
+            for k in 0..self.hook.len() {
+                let n = self.hook[k];
+                let c = self.chord(i * 2 + (n.step >= 8) as u32);
+                let p = self.mel_pitch(n.deg + by, c, n.step % 8 == 0);
+                b.note(n.step as f32, 0.0, CH_LEAD, tonic + p, n.vel * 0.85, (n.len as f32).min(3.0) * 0.8, false);
+            }
+        }
         if i % 8 == 7 {
             // the 8-bar group's end: the line mutates, and its variant with it
             let r = &mut self.rng;
@@ -2976,6 +3159,15 @@ impl Song {
                 self.hat[k] = if self.hat[k] > 0.0 { 0.0 } else { 0.22 };
             }
             self.stab_shift = r.pick(&[1, 2, 3, 6]);
+            if r.chance(0.4) {
+                // the hook changes a note or two
+                for _ in 0..2 {
+                    let k = r.below(self.hook.len().max(1));
+                    if let Some(n) = self.hook.get_mut(k) {
+                        n.deg += r.pick(&[-2, -1, 1, 2]);
+                    }
+                }
+            }
         }
     }
 
@@ -2987,8 +3179,8 @@ impl Song {
         self.swing = 0.0;
         self.human = 0.002;
         let verse = L_KICK | L_SNARE | L_HAT | L_BASS | L_PAD | L_ARP;
-        let chorus = verse | L_LEAD | L_OHAT;
-        let bridge = L_PAD | L_ARP | L_BASS | if r.chance(0.5) { L_LEAD } else { L_PERC } | L_HAT;
+        let chorus = verse | L_LEAD | L_OHAT | L_CTR;
+        let bridge = L_PAD | L_ARP | L_BASS | L_CTR | if r.chance(0.5) { L_LEAD } else { L_PERC } | L_HAT;
         self.plan = vec![
             Sec { kind: INTRO, bars: 4, mask: L_PAD | L_ARP | if r.chance(0.5) { L_BASS } else { 0 }, energy: 0.35 },
             Sec { kind: MAIN, bars: 8, mask: verse, energy: 0.6 },
@@ -3035,7 +3227,7 @@ impl Song {
         self.arp2 = make_arp(r);
         self.arp_rate = r.pick(&[1, 1, 2]);
         self.lead_center = r.pick(&[72, 74, 76]);
-        self.phrase = make_phrase(r, 0.55, -2, 9);
+        self.phrase = make_melody(r, 0.55, -2, 9);
         self.prange = (-2, 9);
         sounds_synthwave(r, s);
         s.dly.target = (self.step_len() * 3.0) as f32;
@@ -3124,7 +3316,8 @@ impl Song {
                     0 => (root + if st % 4 == 2 { 12 } else { 0 }, 1.6, 0.85),
                     1 => {
                         let n = if st % 8 == 6 && next != c {
-                            root + self.semi(c.deg + 4) - self.semi(c.deg)
+                            let fifth = (self.root + c.root + q_iv(c.q)[2]).rem_euclid(12);
+                            root + (fifth - root).rem_euclid(12)
                         } else {
                             root
                         };
@@ -3159,6 +3352,9 @@ impl Song {
         if m & L_LEAD != 0 {
             self.melody(b, CH_LEAD, 0.9, 0.0, 0.95);
         }
+        if m & L_CTR != 0 {
+            self.counter(b, CH_BELL, self.lead_center - 9, 0.7, m & L_LEAD != 0);
+        }
     }
 
     // -- lo-fi
@@ -3172,15 +3368,15 @@ impl Song {
         self.plan = vec![
             Sec { kind: INTRO, bars: 4, mask: L_KEYS | L_TEX | if r.chance(0.6) { L_BASS } else { 0 }, energy: 0.35 },
             Sec { kind: MAIN, bars: 8, mask: drums, energy: 0.6 },
-            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD, energy: 0.75 },
-            Sec { kind: MAIN, bars: 8, mask: drums | L_PERC, energy: 0.7 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD | L_CTR, energy: 0.75 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_PERC | L_CTR, energy: 0.7 },
             Sec {
                 kind: BREAK,
                 bars: 4,
                 mask: L_KEYS | L_TEX | if r.chance(0.5) { L_LEAD } else { L_BASS | L_HAT },
                 energy: 0.4,
             },
-            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD | L_PERC, energy: 0.8 },
+            Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD | L_PERC | L_CTR, energy: 0.8 },
         ];
         if r.chance(0.5) {
             self.plan.push(Sec { kind: MAIN, bars: 8, mask: drums | L_LEAD, energy: 0.75 });
@@ -3215,7 +3411,7 @@ impl Song {
         self.perc = std::array::from_fn(|i| if i % 2 == 1 { 0.35 } else { 0.0 });
         self.perc2 = std::array::from_fn(|i| [0.0, 0.3, 0.2, 0.35][i % 4]);
         self.lead_center = r.pick(&[72, 74, 76]);
-        self.phrase = make_phrase(r, 0.35, -2, 8);
+        self.phrase = make_melody(r, 0.4, -2, 8);
         self.anticipated = false;
         sounds_lofi(r, s);
         self.prange = (-2, 8);
@@ -3335,6 +3531,9 @@ impl Song {
         }
         if m & L_LEAD != 0 {
             self.melody(b, CH_LEAD, 0.8, h, 0.9);
+        }
+        if m & L_CTR != 0 {
+            self.counter(b, CH_BELL, self.lead_center - 8, 0.6, m & L_LEAD != 0);
         }
     }
 
@@ -3601,7 +3800,7 @@ impl Song {
     }
 
     /// The electric piano's chord, rolled upward.
-    fn strum(&mut self, b: &mut Bar, step: f32, c: Chord, steps: f32, vel: f32) {
+    fn strum(&mut self, b: &mut Bar, step: f32, c: Harm, steps: f32, vel: f32) {
         let v = self.voicing(c, 50, 74, &self.keys_v, true);
         let gap = self.rng.range(0.006, 0.02);
         let late = self.rng.range(0.0, self.human);
@@ -4054,7 +4253,7 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         a: r.range(2.0, 4.0),
         d: 3.0,
         s: 0.9,
-        r: r.range(5.0, 8.0),
+        r: r.range(3.0, 4.5),
         vib: 0.05,
         vib_rate: r.range(0.2, 0.4),
         gain: 0.16,
@@ -4119,6 +4318,25 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         ..PATCH
     };
     ch[CH_BASS].mono = true;
+    // the ocarina: a sine and a little triangle, breathy, its vibrato late
+    ch[CH_LEAD].patch = Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.3,
+        noise: 0.015,
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.04,
+        d: 0.5,
+        s: 0.8,
+        r: 0.4,
+        vib: 0.12,
+        vib_rate: 4.5,
+        gain: 0.35,
+        ..PATCH
+    };
+    ch[CH_LEAD].mono = false;
+    mix(&mut ch[CH_LEAD], 0.3, r.range(-0.3, 0.3), 0.6, 0.3, 0.0);
     ch[CH_KICK].drums = vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)];
     ch[CH_HAT].drums = vec![DrumPatch {
         noise: 1.0,
@@ -4261,6 +4479,24 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.16,
         ..PATCH
     };
+    // the hook: a short bright pluck
+    ch[CH_LEAD].patch = Patch {
+        wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
+        pw: 0.3,
+        cutoff: r.range(900.0, 1600.0),
+        res: 0.35,
+        env_amt: 2.5,
+        fdec: 0.12,
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.2,
+        s: 0.0,
+        r: 0.08,
+        gain: 0.3,
+        ..PATCH
+    };
+    ch[CH_LEAD].mono = false;
+    mix(&mut ch[CH_LEAD], 0.3, r.range(-0.3, 0.3), 0.25, 0.4, 0.3);
     mix(&mut ch[CH_KICK], 0.6, 0.0, 0.0, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.5, 0.0, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.85, 0.15, 0.08, 0.0, 0.0);
@@ -4382,6 +4618,20 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         ..PATCH
     };
     ch[CH_LEAD].mono = true;
+    // the second voice: a glassy FM tone
+    ch[CH_BELL].patch = Patch {
+        filter: false,
+        fm: r.range(0.8, 1.6),
+        ratio: r.pick(&[2.0, 3.0, 1.0]),
+        fm_dec: 0.5,
+        a: 0.003,
+        d: 1.2,
+        s: 0.2,
+        r: 0.3,
+        gain: 0.3,
+        ..PATCH
+    };
+    mix(&mut ch[CH_BELL], 0.3, r.range(-0.4, 0.4), 0.4, 0.35, 0.2);
     mix(&mut ch[CH_KICK], 0.8, 0.0, 0.0, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.4, 0.0, 0.15, 0.0, 0.0);
     ch[CH_SNARE].rev2 = 0.9;
@@ -4512,39 +4762,41 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
         ..PATCH
     };
     ch[CH_BASS].mono = true;
-    ch[CH_LEAD].patch = if r.chance(0.5) {
-        Patch {
-            filter: false,
-            fm: 1.0,
-            ratio: 4.0,
-            fm_dec: 0.4,
-            a: 0.002,
-            d: 1.8,
-            s: 0.0,
-            r: 0.5,
-            trem: 0.3,
-            vib_rate: 5.0,
-            gain: 0.3,
-            ..PATCH
-        }
-    } else {
-        Patch {
-            wave: Wave::Sine,
-            wave2: Wave::Tri,
-            mix2: 0.4,
-            noise: 0.04,
-            cutoff: 2500.0,
-            keytrack: 0.3,
-            a: 0.05,
-            d: 0.5,
-            s: 0.8,
-            r: 0.2,
-            vib: 0.15,
-            vib_rate: 5.0,
-            gain: 0.3,
-            ..PATCH
-        }
+    let vibes = Patch {
+        filter: false,
+        fm: 1.0,
+        ratio: 4.0,
+        fm_dec: 0.4,
+        a: 0.002,
+        d: 1.8,
+        s: 0.0,
+        r: 0.5,
+        trem: 0.3,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
     };
+    let flute = Patch {
+        wave: Wave::Sine,
+        wave2: Wave::Tri,
+        mix2: 0.4,
+        noise: 0.04,
+        cutoff: 2500.0,
+        keytrack: 0.3,
+        a: 0.05,
+        d: 0.5,
+        s: 0.8,
+        r: 0.2,
+        vib: 0.15,
+        vib_rate: 5.0,
+        gain: 0.3,
+        ..PATCH
+    };
+    // the second voice is whichever of vibes and flute the lead is not
+    let (lead, second) = if r.chance(0.5) { (vibes, flute) } else { (flute, vibes) };
+    ch[CH_LEAD].patch = lead;
+    ch[CH_BELL].patch = second;
+    mix(&mut ch[CH_BELL], 0.18, r.range(-0.3, 0.3), 0.3, 0.2, 0.1);
     ch[CH_LEAD].mono = false;
     let dusty = r.range(5000.0, 8000.0);
     mix(&mut ch[CH_KICK], 0.85, 0.0, 0.0, 0.0, 0.0);
@@ -5225,6 +5477,14 @@ mod tests {
 
     #[test]
     fn chord_pools_parse() {
+        for pool in [AMB_MAJ, AMB_MIN, TECH_MIN, SW_MAJ, SW_MIN, LOFI_MAJ, LOFI_MIN] {
+            for plan in pool {
+                assert_eq!(plan.split_whitespace().count(), 8, "{plan}");
+                for tok in plan.split_whitespace().flat_map(|t| t.split('+')) {
+                    assert!(parse_harm(tok).is_some(), "{tok} in {plan}");
+                }
+            }
+        }
         for pool in [POLKA_A, POLKA_B, POLKA_MINOR] {
             for plan in pool {
                 assert_eq!(plan.split_whitespace().count(), 8, "{plan}");
