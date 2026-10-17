@@ -1,7 +1,7 @@
-// Scatters the walkers over [-1, 1]^2 with fresh random streams.
+// Scatters the walkers over [-1, 1]^2 (z = 0) with fresh random streams.
 layout(local_size_x = 256) in;
 layout(std430, binding = 1) buffer Walk { vec4 walk[]; };
-layout(std430, binding = 2) buffer Aux { uint aux[]; };
+layout(std430, binding = 2) buffer Aux { uvec2 aux[]; };
 uniform uint u_seed;
 
 uint hash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -13,5 +13,5 @@ void main() {
     float y = float(hash(h + 2u) >> 8) * (2.0 / 16777216.0) - 1.0;
     float c = float(hash(h + 3u) >> 8) * (1.0 / 16777216.0);
     walk[i] = vec4(x, y, c, uintBitsToFloat(hash(h + 4u) | 1u));
-    aux[i] = FUSE << 8;
+    aux[i] = uvec2(FUSE << 8, 0u);
 }

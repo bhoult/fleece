@@ -5,8 +5,12 @@
 //! per lane (two vpermps over the 16 xforms). The variations are evaluated
 //! once per variation the flame uses, for all eight lanes, weighted by each
 //! lane's xform's weight for it (zero for xforms without it).
+//!
+//! A table that uses the Apophysis plugins, or needs the 3D chaos game (a 3D
+//! camera, 3D or direct-colour variations), runs another instance of the
+//! loop, chosen once per batch: flam3's flames keep a loop of their own.
 
-use crate::cpuvar::{self, VarIn};
+use crate::cpuvar::{self, V3, VarIn};
 use crate::fmath::Rng8;
 use crate::sample::{MAXX, NV, PICKN, Sample};
 use crate::simd::{F8, I8, M8};
@@ -48,6 +52,13 @@ struct FinalXf {
     speed: F8,
 }
 
+/// Which loop a table runs (a const parameter): flam3's variations alone,
+/// with the Apophysis plugins too, or the 3D chaos game (walker z, direct
+/// colour, the 3D camera).
+const FLAM3: u8 = 0;
+const PLUGINS: u8 = 1;
+const D3: u8 = 2;
+
 /// One time sample, laid out for the lanes.
 pub struct Table {
     c: [Lanes; 6],
@@ -62,6 +73,10 @@ pub struct Table {
     fin: Option<FinalXf>,
     pick: Vec<u8>,
     xaos: bool,
+    /// FLAM3, PLUGINS or D3
+    path: u8,
+    /// Sample::proj splatted, if the camera projects
+    proj: Option<[F8; 16]>,
     cam: [f32; 6],
     pal: [u32; 256],
     /// colour index -> RGBA8 in 1/16 steps between entries (palette_mode linear)
@@ -119,6 +134,15 @@ impl Table {
         });
         let mut pick = s.pick.to_vec();
         pick.extend_from_slice(&[0; 4]);
+        // the new variations are numbered from 99 (THREE_D among the ids too)
+        let all = crate::sample::variation_ids(core::slice::from_ref(s));
+        let path = if all.contains(&crate::sample::THREE_D) {
+            D3
+        } else if all.iter().any(|&id| id >= 99) {
+            PLUGINS
+        } else {
+            FLAM3
+        };
         Table {
             c,
             color: col(&|k| s.xf[k].c[6]),
@@ -131,6 +155,8 @@ impl Table {
             fin,
             pick,
             xaos: s.info[2] != 0,
+            path,
+            proj: (s.proj[13] != 0.0).then(|| s.proj.map(F8::splat)),
             cam: [s.cam[0], s.cam[1], s.cam[2], s.cam[4], s.cam[5], s.cam[6]],
             pal: s.pal,
             pal_fine: (s.info[3] != 0).then(|| {
@@ -155,6 +181,8 @@ struct Walk {
     c: F8,
     prev: I8,
     fuse: I8,
+    /// the 3D chaos game's only
+    z: F8,
 }
 
 const FUSE: i32 = 20;
@@ -168,6 +196,7 @@ impl Walk {
             c: rng.f01(),
             prev: I8::zero(),
             fuse: I8::splat(FUSE),
+            z: F8::zero(),
         }
     }
 }
@@ -183,9 +212,10 @@ unsafe impl Send for Hist {}
 unsafe impl Sync for Hist {}
 
 /// One chaos-game step of eight walkers. Returns the points to plot (after
-/// the final xform), their colour indices, and which lanes plot.
+/// the final xform), their z (in the 3D chaos game), their colour indices,
+/// and which lanes plot.
 #[inline(always)]
-fn step(t: &Table, w: &mut Walk, rng: &mut Rng8) -> (F8, F8, F8, M8) {
+fn step<const P: u8>(t: &Table, w: &mut Walk, rng: &mut Rng8) -> (F8, F8, F8, F8, M8) {
     // pick: the table row of the previous xform (with xaos), a random column
     let r = rng.next();
     let mut e = r.shr::<22>();
@@ -198,16 +228,27 @@ fn step(t: &Table, w: &mut Walk, rng: &mut Rng8) -> (F8, F8, F8, M8) {
         (t.c[0].at(k, hi), t.c[1].at(k, hi), t.c[2].at(k, hi), t.c[3].at(k, hi), t.c[4].at(k, hi), t.c[5].at(k, hi));
     let mut tx = c00.mul_add(w.x, c10.mul_add(w.y, c20));
     let mut ty = c01.mul_add(w.x, c11.mul_add(w.y, c21));
+    // the affine passes z on
+    let mut tz = w.z;
     if let Some(pb) = &t.preblur {
         let pw = pb.at(k, hi);
         if !pw.eq(F8::zero()).all() {
             (tx, ty) = cpuvar::pre_blur(tx, ty, pw, rng);
+            if P == D3 {
+                // Fractorium's pre_blur is its pre_gaussian_blur, which sums w z into z
+                tz = pw.mul_add(tz, tz);
+            }
         }
     }
     let sumsq = tx.mul_add(tx, ty * ty);
     let sq = sumsq.sqrt();
     let mut px = F8::zero();
     let mut py = F8::zero();
+    let mut pz = F8::zero();
+    let mut e3 = V3 { tz, sx: F8::zero(), sy: F8::zero(), col: F8::zero(), c00, c01 };
+    if P == D3 {
+        e3.col = (t.color.at(k, hi) - w.c).mul_add(t.speed.at(k, hi), w.c);
+    }
     for sl in &t.slots {
         let wt = sl.w.at(k, hi);
         let used = wt.ne(F8::zero());
@@ -226,74 +267,151 @@ fn step(t: &Table, w: &mut Walk, rng: &mut Rng8) -> (F8, F8, F8, M8) {
             c20,
             c21,
         };
-        let (dx, dy) = cpuvar::eval(sl.id, &v, rng);
-        px += dx.and(used);
-        py += dy.and(used);
+        if P == D3 {
+            (e3.sx, e3.sy) = (px, py);
+            let col = e3.col;
+            let (dx, dy, dz) = cpuvar::eval3(sl.id, &v, &mut e3, rng);
+            e3.col = F8::select(used, e3.col, col);
+            pz += dz.and(used);
+            px += dx.and(used);
+            py += dy.and(used);
+        } else {
+            let (dx, dy) = if P == PLUGINS { cpuvar::eval_ext(sl.id, &v, rng) } else { cpuvar::eval(sl.id, &v, rng) };
+            px += dx.and(used);
+            py += dy.and(used);
+        }
     }
+    // the post transform: x and y only
     if let Some(p) = &t.post {
         let (a, b) = (px, py);
         px = p[0].at(k, hi).mul_add(a, p[2].at(k, hi).mul_add(b, p[4].at(k, hi)));
         py = p[1].at(k, hi).mul_add(a, p[3].at(k, hi).mul_add(b, p[5].at(k, hi)));
     }
-    let c = (t.color.at(k, hi) - w.c).mul_add(t.speed.at(k, hi), w.c);
-    let bad = px.bad() | py.bad();
-    // bad lanes restart from a random point and fuse again
+    // D3: the colour a dc_ variation set, else the blend (Fractorium's blend
+    // + direct_color (1) (set - blend), a NaN as 0); a bad z restarts the
+    // walker too (Fractorium tests x and y only, but a NaN z would stay)
+    let (c, bad) = if P == D3 {
+        (F8::select(e3.col.is_nan(), F8::zero(), e3.col), px.bad() | py.bad() | pz.bad())
+    } else {
+        ((t.color.at(k, hi) - w.c).mul_add(t.speed.at(k, hi), w.c), px.bad() | py.bad())
+    };
+    // bad lanes restart from a random point (Fractorium's with z = 0) and fuse again
     let fuse_on = w.fuse.gt(I8::zero());
     w.x = F8::select(bad, rng.f01() * 2.0 - 1.0, px);
     w.y = F8::select(bad, rng.f01() * 2.0 - 1.0, py);
+    if P == D3 {
+        w.z = F8::select(bad, F8::zero(), pz);
+    }
     w.c = c;
     w.prev = I8::select(bad, w.prev, k);
     w.fuse = I8::select(bad, I8::splat(FUSE), I8::select(fuse_on, w.fuse - 1, w.fuse));
     let mut plot = !(bad | fuse_on);
     if plot.none() {
-        return (w.x, w.y, w.c, plot);
+        return (w.x, w.y, w.z, w.c, plot);
     }
-    let (mut fx, mut fy, mut fc) = (w.x, w.y, w.c);
+    let (mut fx, mut fy, mut fz, mut fc) = (w.x, w.y, w.z, w.c);
     if let Some(f) = &t.fin {
         let mut tx = f.c[0].mul_add(fx, f.c[2].mul_add(fy, f.c[4]));
         let mut ty = f.c[1].mul_add(fx, f.c[3].mul_add(fy, f.c[5]));
+        let mut tz = fz;
         for &(id, wt, _) in &f.vars {
             if id == 67 {
                 (tx, ty) = cpuvar::pre_blur(tx, ty, wt, rng);
+                if P == D3 {
+                    tz = wt.mul_add(tz, tz);
+                }
             }
         }
         let sumsq = tx.mul_add(tx, ty * ty);
         let sq = sumsq.sqrt();
-        let (mut ox, mut oy) = (F8::zero(), F8::zero());
+        let (mut ox, mut oy, mut oz) = (F8::zero(), F8::zero(), F8::zero());
+        let mut e3 = V3 { tz, sx: F8::zero(), sy: F8::zero(), col: F8::zero(), c00: f.c[0], c01: f.c[1] };
+        if P == D3 {
+            e3.col = (f.color - fc).mul_add(f.speed, fc);
+        }
         for &(id, wt, p) in &f.vars {
             let v = VarIn { tx, ty, sumsq, sq, w: wt, p, c10: f.c[2], c11: f.c[3], c20: f.c[4], c21: f.c[5] };
-            let (dx, dy) = cpuvar::eval(id, &v, rng);
-            ox += dx;
-            oy += dy;
+            if P == D3 {
+                (e3.sx, e3.sy) = (ox, oy);
+                let (dx, dy, dz) = cpuvar::eval3(id, &v, &mut e3, rng);
+                ox += dx;
+                oy += dy;
+                oz += dz;
+            } else {
+                let (dx, dy) = if P == PLUGINS { cpuvar::eval_ext(id, &v, rng) } else { cpuvar::eval(id, &v, rng) };
+                ox += dx;
+                oy += dy;
+            }
         }
         if let Some(p) = &f.post {
             let (a, b) = (ox, oy);
             ox = p[0].mul_add(a, p[2].mul_add(b, p[4]));
             oy = p[1].mul_add(a, p[3].mul_add(b, p[5]));
         }
-        fc = (f.color - fc).mul_add(f.speed, fc);
-        plot &= !(ox.bad() | oy.bad());
+        if P == D3 {
+            fc = F8::select(e3.col.is_nan(), F8::zero(), e3.col);
+            plot &= !(ox.bad() | oy.bad() | oz.bad());
+        } else {
+            fc = (f.color - fc).mul_add(f.speed, fc);
+            plot &= !(ox.bad() | oy.bad());
+        }
         fx = ox;
         fy = oy;
+        fz = oz;
     }
     if t.any_opacity {
         plot &= rng.f01().lt(t.opacity.at(k, hi));
     }
-    (fx, fy, fc, plot)
+    (fx, fy, fz, fc, plot)
+}
+
+/// Fractorium's 3D camera (Ember::ProjectPitchYawDepthBlur; its other
+/// Project* functions are this with terms left out) with Sample::proj,
+/// turned about the view's centre: the projected points, and which are in
+/// front of the camera (where Fractorium's divisor is > 0). Fleece has no
+/// blur curve, so the depth blur's scale is 1.
+#[inline(always)]
+fn project(p: &[F8; 16], x: F8, y: F8, z: F8, rng: &mut Rng8) -> (F8, F8, M8) {
+    let (x, y, z) = (x - p[2], y - p[3], z - p[7]);
+    let mut px = p[0].mul_add(x, p[1] * y);
+    let mut py = p[4].mul_add(x, p[5].mul_add(y, p[6] * z));
+    let pz = p[8].mul_add(x, p[9].mul_add(y, p[10] * z));
+    let zr = p[11].neg_mul_add(pz, F8::one());
+    if p[12].lane(0) != 0.0 {
+        let (sn, cs) = (rng.f01() * (2.0 * core::f32::consts::PI)).sin_cos();
+        let dr = rng.f01() * p[12] * pz;
+        px = dr.mul_add(cs, px);
+        py = dr.mul_add(sn, py);
+    }
+    (px / zr + p[2], py / zr + p[3], zr.gt(F8::zero()))
+}
+
+/// The points `step` returns through the 3D camera, if there is one: what
+/// the 2D camera takes.
+#[inline(always)]
+fn view<const P: u8>(t: &Table, x: F8, y: F8, z: F8, plot: M8, rng: &mut Rng8) -> (F8, F8, M8) {
+    match &t.proj {
+        Some(p) if P == D3 => {
+            let (x, y, front) = project(p, x, y, z, rng);
+            (x, y, plot & front)
+        }
+        _ => (x, y, plot),
+    }
 }
 
 /// `n` steps of the walkers in `wk` with table `t`, plotting into `h`.
 #[inline(never)]
-fn run(t: &Table, wk: &mut [Walk; GROUPS], rng: &mut Rng8, h: Hist, n: usize) {
+fn run<const P: u8>(t: &Table, wk: &mut [Walk; GROUPS], rng: &mut Rng8, h: Hist, n: usize) {
     let hist = h.ptr as *const AtomicU32;
     let (wf, hf) = (F8::splat(h.w as f32), F8::splat(h.h as f32));
     let cam = t.cam.map(F8::splat);
     for _ in 0..n {
         for w in wk.iter_mut() {
-            let (fx, fy, fc, plot) = step(t, w, rng);
+            let (fx, fy, fz, fc, plot) = step::<P>(t, w, rng);
             if plot.none() {
                 continue;
             }
+            let (fx, fy, plot) = view::<P>(t, fx, fy, fz, plot, rng);
             let sx = cam[0].mul_add(fx, cam[1].mul_add(fy, cam[2]));
             let sy = cam[3].mul_add(fx, cam[4].mul_add(fy, cam[5]));
             let inside = plot & sx.ge(F8::zero()) & sy.ge(F8::zero()) & sx.lt(wf) & sy.lt(hf);
@@ -480,7 +598,11 @@ fn worker(id: usize, sh: Arc<Shared>) {
         }
         let t = &job.tables[batch % job.tables.len()];
         batch = batch.wrapping_add(1);
-        run(t, &mut wk, &mut rng, job.hist, BATCH);
+        match t.path {
+            D3 => run::<D3>(t, &mut wk, &mut rng, job.hist, BATCH),
+            PLUGINS => run::<PLUGINS>(t, &mut wk, &mut rng, job.hist, BATCH),
+            _ => run::<FLAM3>(t, &mut wk, &mut rng, job.hist, BATCH),
+        }
         count += (BATCH * GROUPS * 8) as u64;
     }
 }
@@ -498,14 +620,26 @@ fn lower_priority() {
 }
 
 /// Runs the chaos game on this thread alone: `n` iterations of `s`, the
-/// plotted points (after the final xform, before the camera) into `out`
-/// with their colour indices (genome tests and framing).
+/// plotted points (after the final xform and the 3D camera, before the 2D
+/// one) into `out` with their colour indices (genome tests and framing).
 pub fn sample_points(s: &Sample, n: usize, seed: u32, out: &mut Vec<[f32; 3]>) {
     let t = Table::new(s);
+    match t.path {
+        D3 => points::<D3>(&t, n, seed, out),
+        PLUGINS => points::<PLUGINS>(&t, n, seed, out),
+        _ => points::<FLAM3>(&t, n, seed, out),
+    }
+}
+
+fn points<const P: u8>(t: &Table, n: usize, seed: u32, out: &mut Vec<[f32; 3]>) {
     let mut rng = Rng8::new(seed);
     let mut w = Walk::scatter(&mut rng);
     for _ in 0..n / 8 {
-        let (fx, fy, fc, plot) = step(&t, &mut w, &mut rng);
+        let (fx, fy, fz, fc, plot) = step::<P>(t, &mut w, &mut rng);
+        if plot.none() {
+            continue;
+        }
+        let (fx, fy, plot) = view::<P>(t, fx, fy, fz, plot, &mut rng);
         let mut bits = plot.bits();
         if bits == 0 {
             continue;

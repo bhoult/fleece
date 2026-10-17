@@ -10,7 +10,7 @@
 //! the merge pass reads over the bus, so nothing is copied per frame.
 
 use crate::gl::*;
-use crate::sample::{MAX_SAMPLES, MAXX, NV, PICKN, Sample};
+use crate::sample::{MAX_SAMPLES, MAXX, NV, PICKN, Sample, THREE_D};
 use std::ffi::c_void;
 
 /// Chaos-game walkers on the GPU (256 per work group).
@@ -333,7 +333,8 @@ impl Gpu {
             gl.glCreateBuffers(1, &mut g.walk);
             gl.glNamedBufferStorage(g.walk, WALKERS as isize * 16, std::ptr::null(), 0);
             gl.glCreateBuffers(1, &mut g.aux);
-            gl.glNamedBufferStorage(g.aux, WALKERS as isize * 4, std::ptr::null(), 0);
+            // prev | fuse << 8, and z
+            gl.glNamedBufferStorage(g.aux, WALKERS as isize * 8, std::ptr::null(), 0);
             gl.glCreateVertexArrays(1, &mut g.vao);
             // density estimation kernels: the sum of gauss(1.5 d / h) over the
             // buckets within h (and within ceil(h) - 1 on each axis), h = i / 16
@@ -378,7 +379,12 @@ impl Gpu {
     }
 
     fn iter_source(&self, ids: Option<&[i32]>) -> String {
-        self.iter_src.replace("#include \"variations.glsl\"", &specialize(VARIATIONS, ids))
+        let src = self.iter_src.replace("#include \"variations.glsl\"", &specialize(VARIATIONS, ids));
+        // the 3D variant (walker z, the 3D camera, direct colour)
+        match ids {
+            Some(k) if k.contains(&THREE_D) => src.replacen('\n', &format!("\n{}", crate::var::three_d_glsl()), 1),
+            _ => src,
+        }
     }
 
     fn iter_prog(gl: &Gl, src: &str, ids: Option<&[i32]>) -> Result<IterProg, String> {
@@ -389,6 +395,11 @@ impl Gpu {
 
     fn key(ids: &[i32]) -> Vec<i32> {
         let mut key = ids.to_vec();
+        // 3D and dc_ variations need the 3D variant (a 3D camera alone is
+        // marked by sample::variation_ids)
+        if ids.iter().any(|&id| crate::var::needs_3d(id)) {
+            key.push(THREE_D);
+        }
         key.sort();
         key.dedup();
         key
@@ -426,7 +437,8 @@ impl Gpu {
         }
         let entry = self.progs.get_mut(&key).unwrap();
         if let Prog::Pending(p, s) = *entry {
-            if wait || !self.parallel || self.gl.ready(p) {
+            // the general program is flat: a 3D flame waits for its own
+            if wait || key.contains(&THREE_D) || !self.parallel || self.gl.ready(p) {
                 let t = std::time::Instant::now();
                 *entry = match self.gl.finish_program(p, s) {
                     Ok(p) => Prog::Ready(IterProg::of(&self.gl, p)),

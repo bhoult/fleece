@@ -35,6 +35,10 @@ pub struct Sample {
     /// world to histogram pixels: px = cam[0] x + cam[1] y + cam[2],
     /// py = cam[4] x + cam[5] y + cam[6]
     pub cam: [f32; 8],
+    /// the 3D camera, applied before `cam` (Fractorium's projection, turned
+    /// about the view's centre): m00 m10 cx cy, m01 m11 m21 zpos, m02 m12 m22
+    /// perspective, dof blur (0.1 cam_dof), 1 if it projects, unused x2
+    pub proj: [f32; 16],
     /// xforms, 1 if there is a final xform, 1 if the choice depends on the
     /// previous xform (xaos), unused
     pub info: [i32; 4],
@@ -48,7 +52,14 @@ pub struct Sample {
 
 impl Default for Sample {
     fn default() -> Sample {
-        Sample { cam: [0.0; 8], info: [0; 4], xf: [XfGpu::default(); MAXX + 1], pick: [0; MAXX * PICKN], pal: [0; 256] }
+        Sample {
+            cam: [0.0; 8],
+            proj: [0.0; 16],
+            info: [0; 4],
+            xf: [XfGpu::default(); MAXX + 1],
+            pick: [0; MAXX * PICKN],
+            pal: [0; 256],
+        }
     }
 }
 
@@ -61,9 +72,16 @@ impl Sample {
     }
 }
 
-/// The variations the samples use (for a shader specialised to them).
+/// In a program key: the 3D variant (walker z, the 3D camera, direct colour).
+pub const THREE_D: i32 = 1 << 16;
+
+/// The variations the samples use (for a shader specialised to them), and
+/// THREE_D if they need the 3D variant.
 pub fn variation_ids(samples: &[Sample]) -> Vec<i32> {
     let mut ids = Vec::new();
+    if samples.iter().any(|s| s.proj[13] != 0.0) {
+        ids.push(THREE_D);
+    }
     for s in samples {
         let n = (s.info[0] as usize).min(MAXX);
         let fin = if s.info[1] != 0 { Some(MAXX) } else { None };
@@ -74,6 +92,9 @@ pub fn variation_ids(samples: &[Sample]) -> Vec<i32> {
                 }
             }
         }
+    }
+    if !ids.contains(&THREE_D) && ids.iter().any(|&id| crate::var::needs_3d(id)) {
+        ids.push(THREE_D);
     }
     ids.sort();
     ids
