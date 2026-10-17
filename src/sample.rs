@@ -75,12 +75,6 @@ impl Sample {
 /// In a program key: the 3D variant (walker z, the 3D camera, direct colour).
 pub const THREE_D: i32 = 1 << 16;
 
-/// Whether this sample needs the 3D chaos game: a 3D camera, or a 3D or
-/// direct-colour variation.
-pub fn three_d(s: &Sample) -> bool {
-    variation_ids(core::slice::from_ref(s)).contains(&THREE_D)
-}
-
 /// The variations the samples use (for a shader specialised to them), and
 /// THREE_D if they need the 3D variant.
 pub fn variation_ids(samples: &[Sample]) -> Vec<i32> {

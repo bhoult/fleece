@@ -16,9 +16,7 @@ pub struct VarIn {
     pub sq: F8,
     pub w: F8,
     pub p: [F8; 8],
-    /// the xform's affine (waves, popcorn, rings, fan, dc_carpet)
-    pub c00: F8,
-    pub c01: F8,
+    /// the xform's c10, c11, c20, c21 (waves, popcorn, rings, fan)
     pub c10: F8,
     pub c11: F8,
     pub c20: F8,
@@ -599,6 +597,17 @@ pub fn eval(id: i32, v: &VarIn, rng: &mut Rng8) -> (F8, F8) {
             let rad = w / (rev * rev + imv * imv);
             (rad * (reu * rev + imu * imv), rad * (imu * rev - reu * imv))
         }
+        _ => (F8::zero(), F8::zero()),
+    }
+}
+
+/// Variation `id`'s contribution, the Apophysis plugins (ids 112-125)
+/// included: a separate match, as their arms in `eval` would cost flam3's
+/// variations some 6 % (cpu.rs runs this only for flames that use them).
+#[inline(always)]
+pub fn eval_ext(id: i32, v: &VarIn, rng: &mut Rng8) -> (F8, F8) {
+    let (tx, ty, w, sq, sumsq, p) = (v.tx, v.ty, v.w, v.sq, v.sumsq, &v.p);
+    match id {
         // the plugins, after Fractorium's EclipseVariation, EpispiralVariation,
         // CirclizeVariation, GlynniaVariation and SphericalNVariation (both in
         // their flam3-compatible form, Fractorium's default), XHeartVariation,
@@ -689,23 +698,25 @@ pub fn eval(id: i32, v: &VarIn, rng: &mut Rng8) -> (F8, F8) {
             let neg = -(alt * p[1] + (k - a).fmod(p[1]));
             polar(w * sq, sel(a.ge(F8::zero()), pos, neg))
         }
-        _ => (F8::zero(), F8::zero()),
+        _ => eval(id, v, rng),
     }
 }
 
 /// What the 3D chaos game adds to a variation's inputs: its input z, the
-/// sum of the variations before it (the dc_ ones read it) and the colour
-/// index (the xform's blend, or what a dc_ variation before it set), which
-/// the dc_ ones set.
+/// sum of the variations before it (the dc_ ones read it), the colour index
+/// (the xform's blend, or what a dc_ variation before it set), which the dc_
+/// ones set, and the xform's c00, c01 (dc_carpet).
 pub struct V3 {
     pub tz: F8,
     pub sx: F8,
     pub sy: F8,
     pub col: F8,
+    pub c00: F8,
+    pub c01: F8,
 }
 
 /// Variation `id` in the 3D chaos game: x, y and z (Fractorium's z rules;
-/// flam3's and the plugins through `eval`), the dc_ ones setting `e.col`.
+/// flam3's and the plugins through `eval_ext`), the dc_ ones setting `e.col`.
 #[inline(always)]
 pub fn eval3(id: i32, v: &VarIn, e: &mut V3, rng: &mut Rng8) -> (F8, F8, F8) {
     let (tx, ty, tz, w, sq, sumsq, p) = (v.tx, v.ty, e.tz, v.w, v.sq, v.sumsq, &v.p);
@@ -786,7 +797,7 @@ pub fn eval3(id: i32, v: &VarIn, e: &mut V3, rng: &mut Rng8) -> (F8, F8, F8) {
             let xr = sel(x0.eq(y0), zero, s(-2.0));
             let h = (F8::one() - xr) * p[0] - p[0];
             e.col = (e.col * 0.5 * (h + 1.0) + xr * (F8::one() - h) * 0.5).abs().fract();
-            (w * (v.c00 * x + v.c10 * y + v.c11), w * (v.c20 * x + v.c01 * y + v.c21), zero)
+            (w * (e.c00 * x + v.c10 * y + v.c11), w * (v.c20 * x + e.c01 * y + v.c21), zero)
         }
         129 => {
             let (sn, cs) = (rng.f01() * (2.0 * PI)).sin_cos();
@@ -803,7 +814,7 @@ pub fn eval3(id: i32, v: &VarIn, e: &mut V3, rng: &mut Rng8) -> (F8, F8, F8) {
             (w * tx, w * ty, sel(p[3].eq(zero), w * tz * zf, w * zf))
         }
         _ => {
-            let (x, y) = eval(id, v, rng);
+            let (x, y) = eval_ext(id, v, rng);
             (x, y, zdef(id, v, tz))
         }
     }
