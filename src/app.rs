@@ -237,7 +237,11 @@ impl App {
         let ids = crate::sample::variation_ids(&self.samples);
         self.r.gpu.use_variations(&ids, fixed.is_some());
         if self.frame.is_multiple_of(15) {
-            for set in self.show.upcoming() {
+            for mut set in self.show.upcoming() {
+                // the look's 3D camera tilts every sheep
+                if self.fx.tilt > 0 {
+                    set.push(crate::sample::THREE_D);
+                }
                 self.r.gpu.prepare(&set);
             }
         }

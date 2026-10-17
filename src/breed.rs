@@ -232,6 +232,8 @@ pub fn frame(g: &mut Genome, r: &mut Rng) {
     probe.center = [0.0, 0.0];
     probe.scale = 0.25;
     probe.rotate = 0.0;
+    // framed flat: the 3D camera pivots about the centre this picks
+    probe.cam = genome::Cam3::default();
     probe.sample(0.0, 128, 128, &mut s);
     let mut pts = Vec::with_capacity(100_000);
     cpu::sample_points(&s, 100_000, r.next_u32(), &mut pts);

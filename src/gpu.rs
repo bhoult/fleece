@@ -157,6 +157,9 @@ pub struct Gpu {
     /// the widest density estimation kernel's reach, in buckets
     de_reach: u32,
     p_iter: IterProg,
+    /// the general program's 3D variant (every variation), compiled in the
+    /// background: what a 3D flame uses until its own program is ready
+    p_iter3: Prog,
     /// iterate programs specialised to a set of variations
     progs: std::collections::HashMap<Vec<i32>, Prog>,
     parallel: bool,
@@ -280,6 +283,7 @@ impl Gpu {
             bh: 0,
             de_reach,
             p_iter,
+            p_iter3: Prog::Failed,
             progs: std::collections::HashMap::new(),
             parallel: false,
             iter_src,
@@ -374,6 +378,10 @@ impl Gpu {
         if g.gl.has_extension("GL_KHR_parallel_shader_compile") {
             unsafe { g.gl.glMaxShaderCompilerThreadsKHR(4) };
             g.parallel = true;
+            let src = g.iter_src.replace("#include \"variations.glsl\"", VARIATIONS);
+            let src = src.replacen('\n', &format!("\n{}", crate::var::three_d_glsl()), 1);
+            let (p, s) = g.gl.program_async(&src);
+            g.p_iter3 = Prog::Pending(p, s);
         }
         Ok(g)
     }
@@ -435,10 +443,12 @@ impl Gpu {
         if !self.progs.contains_key(&key) {
             self.prepare(&key);
         }
+        // the general program is flat: a 3D flame uses the general 3D one
+        // meanwhile, or waits for its own if that isn't ready either
+        let fallback = !key.contains(&THREE_D) || self.general3_ready();
         let entry = self.progs.get_mut(&key).unwrap();
         if let Prog::Pending(p, s) = *entry {
-            // the general program is flat: a 3D flame waits for its own
-            if wait || key.contains(&THREE_D) || !self.parallel || self.gl.ready(p) {
+            if wait || !fallback || !self.parallel || self.gl.ready(p) {
                 let t = std::time::Instant::now();
                 *entry = match self.gl.finish_program(p, s) {
                     Ok(p) => Prog::Ready(IterProg::of(&self.gl, p)),
@@ -450,10 +460,27 @@ impl Gpu {
                 self.compile_ms = t.elapsed().as_secs_f32() * 1000.0;
             }
         }
-        self.cur = match self.progs[&key] {
-            Prog::Ready(p) => p,
+        self.cur = match (&self.progs[&key], &self.p_iter3) {
+            (Prog::Ready(p), _) => *p,
+            (_, Prog::Ready(p3)) if key.contains(&THREE_D) => *p3,
             _ => self.p_iter,
         };
+    }
+
+    /// Whether the general 3D program is compiled (finishing it if it just was).
+    fn general3_ready(&mut self) -> bool {
+        if let Prog::Pending(p, s) = self.p_iter3 {
+            if self.gl.ready(p) {
+                self.p_iter3 = match self.gl.finish_program(p, s) {
+                    Ok(p) => Prog::Ready(IterProg::of(&self.gl, p)),
+                    Err(e) => {
+                        eprintln!("fleece: the general 3D shader failed: {e}");
+                        Prog::Failed
+                    }
+                };
+            }
+        }
+        matches!(self.p_iter3, Prog::Ready(_))
     }
 
     /// Whether the specialised program is the one in use.

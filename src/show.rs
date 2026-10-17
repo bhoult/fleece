@@ -377,7 +377,13 @@ impl Show {
     /// current one (its edge) and alone (its loops).
     pub fn upcoming(&self) -> Vec<Vec<i32>> {
         let ids = |g: &Genome| -> Vec<i32> {
-            g.xforms.iter().chain(g.fin.iter()).flat_map(|x| x.vars.iter().filter(|v| v.w != 0.0).map(|v| v.id)).collect()
+            let mut v: Vec<i32> =
+                g.xforms.iter().chain(g.fin.iter()).flat_map(|x| x.vars.iter().filter(|v| v.w != 0.0).map(|v| v.id)).collect();
+            // a 3D camera needs the 3D variant too
+            if !g.cam.is_flat() {
+                v.push(crate::sample::THREE_D);
+            }
+            v
         };
         let q = self.ready.lock().unwrap();
         let Some(n) = q.front() else { return Vec::new() };
@@ -437,16 +443,21 @@ fn dress(g: &mut Genome, t: f64, look: &Look) {
         g.brightness *= 1.0 + 0.25 * loud;
     }
     if look.tilt > 0 {
-        // the flame as a plane leaning back, swaying a little; the zoom keeps it filling the frame
+        // the flame as a plane leaning back, swaying a little; the zoom keeps
+        // it filling the frame
         let pitch = 0.75 + 0.12 * wave(43.0, 0.5);
+        g.scale *= 1.0 / pitch.cos().max(0.3);
+        // the perspective in units of the picture, whatever the sheep's own
+        // zoom: the top edge a third further, the bottom a third nearer
+        // (the depth blur grows with the same distance, so it needs no such scaling)
+        let edge = 0.37 / g.scale * pitch.sin();
         g.cam = crate::genome::Cam3 {
             pitch,
             yaw: 0.15 * wave(53.0, 2.5),
-            persp: 0.35,
+            persp: 0.35 / edge,
             zpos: 0.0,
-            dof: if look.tilt > 1 { 0.25 } else { 0.0 },
+            dof: if look.tilt > 1 { 0.4 } else { 0.0 },
         };
-        g.scale *= 1.0 / pitch.cos().max(0.3);
     }
 }
 
