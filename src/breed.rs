@@ -370,17 +370,17 @@ pub fn add_wobble(g: &mut Genome, seed: u32) {
             match r.below(4) {
                 0 if !x.vars.is_empty() => {
                     let v = x.vars[r.below(x.vars.len() as u32) as usize];
-                    m.vars.push(genome::VarUse { id: v.id, w: 0.4 * amp * v.w, p: [0.0; genome::NP] });
+                    m.vars.push(genome::VarUse { id: v.id, w: 0.6 * amp * v.w, p: [0.0; genome::NP] });
                 }
                 1 => {
                     for i in 0..2 {
                         for j in 0..2 {
-                            m.c[i][j] = 0.15 * amp * x.c[i][j];
+                            m.c[i][j] = 0.2 * amp * x.c[i][j];
                         }
                     }
                 }
-                2 => m.c[2] = [0.25 * amp * r.signed(), 0.25 * amp * r.signed()],
-                _ => m.color = 0.3 * amp,
+                2 => m.c[2] = [0.35 * amp * r.signed(), 0.35 * amp * r.signed()],
+                _ => m.color = 0.4 * amp,
             }
             x.motion.push(m);
         }

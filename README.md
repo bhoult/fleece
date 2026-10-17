@@ -12,6 +12,34 @@ target/release/fleece 2k              # render at a size instead: 1080p, 2k (256
 
 By default fleece renders Electric Sheep's standard frame, 800x592, and scales it to the window with black bars, as the Electric Sheep player shows its 800x592 videos. At that size this machine gets roughly 700–2,500 samples per pixel per frame at 30 fps; the server renders each frame at 2,000. `--quality N` holds every frame at N samples per pixel (2,000 runs at about 14–20 fps here). `--es-hd` renders the HD flock's 1280x720, `--render WxH` any fixed size, and `--native` the window's own size.
 
+## Version 2
+
+v2 adds ten things to the show. Electric Sheep's show as it was is still there: `V` switches between the two, and `--classic` starts without them.
+
+| | key | flag | default | what it does |
+| --- | --- | --- | --- | --- |
+| Supersampling | X | `--supersample N` | automatic | The histogram holds 2x2 or 4x4 buckets a pixel, and flam3's gaussian spatial filter brings them down to pixels, as the Electric Sheep server rendered (its sheep say `supersample="4" filter="1"`). Thin lines come out smooth instead of stair-stepped. Automatic means 2x while the histogram fits the GPU's cache (800x592 does) and 1x above that, where the scattered atomics slow to memory speed. Stills (`--shot`) use the sheep's own setting. |
+| Glow | O | `--glow 0-2` | soft | The bright parts blurred wide, through six half-size levels, and added back with a screen blend, like light scattering in a lens. |
+| Trails | T | `--trails 0-2` | short | Frame blending: each frame keeps a fading share of the ones before. Short trails (60 ms) mostly smooth the picture; long ones (350 ms) smear the motion into streaks. A paused picture still refines forever, and a cut starts afresh. |
+| Levels | L | `--levels on/off` | on | Auto-exposure. The GPU counts each frame's lit pixels by brightness. A dim or blown-out sheep is moved towards the real sheep's typical level, measured on 80 genebank sheep. Sheep near it are left alone, and only the most saturated are pulled down. |
+| Drift | D | `--drift on/off` | on | A slow camera move: zoom in by up to a third, pan a tenth of the frame and turn a few degrees, on periods of 29 to 61 seconds that never line up. |
+| Hue | U | `--hue on/off` | off | Palette drift: the palette's hues turn once every 96 seconds. |
+| Wobble | W | `--wobble on/off` | on | Motion for every sheep. Each new sheep, real or bred, gets one or two of fleece's own `<motion>` elements: a variation's weight, an xform's size, position or colour swinging one or two times a loop, so the loop still closes. They are tested at four phases of the loop like any new sheep, and dropped if they make it go dark. They are saved with the flock (marked `fleece_extra`) and play only while wobble is on. |
+| 3D | 3 | `--tilt 0-2` | off | A 3D camera: the flame tilted back in perspective, swaying slowly, and with depth of field at 2. See "3D" below. |
+| Audio | A | `--audio [MUSIC]` | off | The music drives the show (see below). |
+| Taste | | `--taste on/off` | on | New sheep are the best of three candidates by a taste score (see below). |
+
+**Taste.** Each candidate is measured on a small render of its first frame: colourfulness (Hasler and Süsstrunk), coverage, brightness entropy, detail, symmetry, distinct colours and mean brightness. A linear score of those says how much it looks like a real Electric Sheep. `fleece --tastefit` fitted the score to 3,000 genebank sheep against 3,000 random sheep that pass flam3's tests, with a cross-validated correlation of 0.58. Real sheep are more colourful and more detailed and use more distinct colours. The HUD shows each sheep's score. Every Up or Down vote nudges the score towards what you like, and the window keeps it in `~/.local/share/fleece/taste.txt`. (Fitted to the genebank's own Electric Sheep ratings instead, `--tastefit --breed 1`, the same measures predict little: r 0.12. Those sheep had all survived the flock already.)
+
+**Audio.** `A` (or `--audio`) listens to what the speakers play: PulseAudio or PipeWire's monitor of the default output, through `parec`, which runs only while audio is on. No microphone is used. Each hop of 512 samples (about 94 a second) gives the loudness, four bands (bass, low mid, mid, high, each with its own automatic gain) and beats (onsets from spectral flux). Bass and beats push the camera in. Each band swells some of the xforms. Loudness brightens the picture and turns the sheep faster, and the mid band shifts the hues. `--audio MUSIC` on a video makes a music video. The track (any format ffmpeg reads) is analysed ahead, the frames follow it exactly, it goes into the file, and the video runs as long as the music unless `--seconds` says otherwise:
+
+```
+target/release/fleece --video dance.mp4 --audio song.mp3
+target/release/fleece --audiocheck song.wav      # the analysis as text meters (no file: live, for --seconds)
+```
+
+**Faithfulness.** With supersampling, fleece's renders of real sheep match flam3-render's at 37–40 dB PSNR (v1: 20–28), and v2 still renders the same picture 60–110 times faster than flam3. The density estimation gathers up to 16 buckets away, the most the GPU's shared memory allows. flam3's kernels at 4x reach further, so the faintest haze is a little noisier than flam3's.
+
 ## What Electric Sheep does, and what fleece does
 
 Electric Sheep's pictures are ordinary flam3 renders: the chaos game, log-density tone mapping and density estimation. What makes it Electric Sheep is everything around the renders. fleece follows flam3 and the Electric Sheep sources (scottdraves/flam3 and scottdraves/electricsheep, plus the 2005 server code) for each part.
@@ -112,6 +140,12 @@ At 1280x720 and 30 Hz that is about 150-350 samples per pixel per frame. Electri
 | S | save the frame (PNG) and its genome (flam3 XML) to ~/Pictures/fleece |
 | R | start / stop recording the show to ~/Videos/fleece-TIME.mp4 (see below) |
 | K | the credit burned into recordings on / off (it is in the file's metadata either way) |
+| V | v2's effects off (classic Electric Sheep) / back on |
+| O / T | glow (off, soft, strong) / trails (off, short, long) |
+| X | supersampling: automatic, 1x, 2x, 4x |
+| L / D / U / W | auto levels / camera drift / palette (hue) drift / wobble (motion for every sheep) |
+| 3 | 3D camera: flat, tilted, tilted with depth of field |
+| A | audio: the music drives the show |
 | H | hide the text |
 | F, F11 | fullscreen |
 | Esc, Q | quit |
@@ -127,6 +161,8 @@ target/release/fleece --frames 300 --out DIR --every 30 --keys "100: ,200:m"   #
 target/release/fleece --bench                       # chaos-game rate of each side alone
 target/release/fleece --varcheck                    # CPU against GPU for every variation
 target/release/fleece --mutcheck                    # how often mutations go dark, untested and tested
+target/release/fleece --tastefit                    # refit the taste score (real sheep against random ones)
+target/release/fleece --audiocheck [song.wav]       # the audio analysis as text meters
 target/release/fleece --video sheep.mp4 --seconds 60 --credit   # a video file (headless): ES frame and quality
 target/release/fleece --video sheep.webm 1080p --quality 500     # any size / quality; the format follows the extension
 target/release/fleece --video sheep.y4m --seconds 10             # .y4m: uncompressed, written without ffmpeg
@@ -155,13 +191,15 @@ The headless modes use SDL's offscreen driver, so the context is made on the GPU
 | --- | --- |
 | `src/app.rs` | the window, frame loop, adaptive GPU budget, HUD, keys, headless and video modes |
 | `src/show.rs` | the playback: loops, edges, motion-blur samples, the breeder thread |
-| `src/breed.rs` | the flock, mutation, crossover, framing, the fitness test |
+| `src/breed.rs` | the flock, mutation, crossover, framing, the fitness test, wobble |
+| `src/taste.rs` | the taste measures and score |
+| `src/audio.rs` | listening (parec), the FFT bands and beats, soundtracks |
 | `src/genome.rs` | genomes, flam3_random, symmetry, rotation, the flattening for the chaos game, XML output |
 | `src/interp.rs` | edges: padding, log-polar affines, HSV palettes |
 | `src/var.rs` | the variation table, random parameters, precalcs |
 | `src/flam3.rs` | reading flam3 XML; the flock file |
 | `src/render.rs` | one frame on both sides: publish, merge, tone |
-| `src/gpu.rs`, `src/shaders/` | buffers, specialised shaders, the passes (iterate, merge, tone with density estimation, present) |
+| `src/gpu.rs`, `src/shaders/` | buffers, specialised shaders, the passes (iterate, merge with frame blending, de: log density and density estimation per bucket, finish: flam3's spatial filter, gamma and the brightness counts, glow, present) |
 | `src/cpu.rs`, `src/cpuvar.rs` | the AVX2 chaos game, the worker pool, the variations in eight lanes |
 | `src/fmath.rs`, `src/simd.rs` | eight-lane math (simd.rs from FRAKTAL256's Rust port) |
 | `src/gl.rs`, `src/sdl.rs` | the OpenGL loader and the SDL2 calls |
