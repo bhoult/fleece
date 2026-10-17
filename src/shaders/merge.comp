@@ -1,9 +1,11 @@
-// acc = (keep ? acc : 0) + the GPU's histogram + the CPU's.
+// acc = acc * decay + the GPU's histogram + the CPU's. Decay 1 keeps adding
+// (a still refining), 0 starts afresh, in between blends frames over time.
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, binding = 3) readonly buffer Hist { uvec4 hist[]; };
 layout(std430, binding = 4) readonly buffer Cpu { uvec4 cpu[]; };
 layout(rgba32f, binding = 0) uniform image2D acc;
-uniform int u_keep;
+uniform int u_cpu;
+uniform float u_decay;
 uniform ivec2 u_size;
 
 void main() {
@@ -11,7 +13,7 @@ void main() {
     if (p.x >= u_size.x || p.y >= u_size.y) return;
     uint i = uint(p.y * u_size.x + p.x);
     vec4 v = vec4(hist[i]);
-    if ((u_keep & 2) != 0) v += vec4(cpu[i]);
-    if ((u_keep & 1) != 0) v += imageLoad(acc, p);
+    if (u_cpu != 0) v += vec4(cpu[i]);
+    if (u_decay > 0.0) v += u_decay * imageLoad(acc, p);
     imageStore(acc, p, v);
 }

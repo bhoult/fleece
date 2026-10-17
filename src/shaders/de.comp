@@ -1,0 +1,97 @@
+// flam3's log density and density estimation (rect.c, filters.c) for every
+// bucket of the (supersampled) histogram:
+// - log density: each bucket's t = k1 ln(1 + hits k2), colour = average
+//   palette colour * t;
+// - density estimation: every bucket is spread with a gaussian whose width
+//   shrinks with its hit count (cmax / (k + 1)^curve), done here as a gather
+//   over a shared-memory tile. The widths are in buckets: flam3 scales them
+//   by the supersampling (cmax = radius * ss + 1).
+// The result (rgb * t, t) goes to finish.comp, which filters it down to
+// pixels and applies gamma.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D acc;
+layout(rgba32f, binding = 1) uniform writeonly image2D dens;
+layout(std430, binding = 5) readonly buffer Norm { float knorm[]; };
+
+uniform ivec2 u_size;    // buckets
+uniform vec2 u_k;        // k1 = brightness * 268 / 256, k2 = (ppu ss)^2 / samples
+uniform vec4 u_de;       // cmax (0 = off), cmin, curve, unused
+
+// DE_R: the widest reach (from the shared memory there is)
+#define T (16 + 2 * DE_R)
+shared vec4 sv[T * T];
+shared float sh[T * T];
+shared uint smax;
+
+// flam3_create_de_filters: kernel k has width cmax / (k + 1)^curve; past 100
+// hits the kernels are spaced by (hits - 100)^curve
+float kernel_width(float f) {
+    float k;
+    if (f <= 100.0) {
+        k = ceil(f) - 1.0;
+    } else {
+        k = pow(floor(pow(f - 100.0, u_de.z)), 1.0 / u_de.z) + 100.0;
+    }
+    return max(u_de.x / pow(k + 1.0, u_de.z), u_de.y);
+}
+
+// rgb (average palette colour * t) and t of a bucket
+vec4 tone_value(ivec2 p) {
+    if (p.x < 0 || p.y < 0 || p.x >= u_size.x || p.y >= u_size.y) return vec4(0.0);
+    vec4 a = texelFetch(acc, p, 0);
+    if (a.w <= 0.0) return vec4(0.0);
+    float t = u_k.x * log(1.0 + a.w * u_k.y);
+    return vec4(a.rgb / (255.0 * a.w) * t, t);
+}
+
+void main() {
+    ivec2 base = ivec2(gl_WorkGroupID.xy) * 16 - DE_R;
+    bool de = u_de.x > 0.0;
+    if (de) {
+        uint li = gl_LocalInvocationIndex;
+        if (li == 0u) smax = 0u;
+        barrier();
+        float hmax = 0.0;
+        for (uint i = li; i < uint(T * T); i += 256u) {
+            ivec2 q = base + ivec2(int(i) % T, int(i) / T);
+            vec4 v = tone_value(q);
+            float h = 0.0;
+            if (v.w > 0.0) {
+                float f = texelFetch(acc, q, 0).w;
+                h = kernel_width(f);
+                v /= knorm[min(int(h * 16.0 + 0.5), 1023)];
+            }
+            sv[i] = v;
+            sh[i] = h;
+            hmax = max(hmax, h);
+        }
+        // the tile's widest kernel bounds the gather (dense tiles reach little)
+        atomicMax(smax, floatBitsToUint(hmax));
+        barrier();
+    }
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= u_size.x || p.y >= u_size.y) return;
+    vec4 c = vec4(0.0);
+    if (de) {
+        ivec2 l = ivec2(gl_LocalInvocationID.xy) + DE_R;
+        // a kernel of width h reaches ceil(h) - 1 buckets
+        int reach = min(int(ceil(uintBitsToFloat(smax))) - 1, DE_R);
+        for (int dy = -reach; dy <= reach; dy++) {
+            int row = (l.y + dy) * T + l.x;
+            for (int dx = -reach; dx <= reach; dx++) {
+                int i = row + dx;
+                float h = sh[i];
+                float d2 = float(dx * dx + dy * dy);
+                float hr = ceil(h) - 1.0;
+                if (h > 0.0 && d2 <= h * h && float(max(abs(dx), abs(dy))) <= hr) {
+                    // gauss(1.5 d / h) = e^(-2 (1.5 d / h)^2)
+                    c += sv[i] * exp(-4.5 * d2 / (h * h));
+                }
+            }
+        }
+    } else {
+        c = tone_value(p);
+    }
+    imageStore(dens, p, c);
+}

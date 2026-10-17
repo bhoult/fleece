@@ -1,0 +1,53 @@
+// Glow: the bright parts of the picture, blurred wide and added back, as
+// light scattering in a lens would. A chain of half-size levels: the first
+// takes the picture (soft-thresholded), each next one a 4-tap filtered half
+// of the last (MODE 1); then back up, each level adding the tent-filtered
+// level below (MODE 2); last the widest blur is added to the picture with a
+// screen blend (MODE 3).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D src;   // the level read (or the picture)
+layout(binding = 1) uniform sampler2D pic;   // the picture (MODE 3)
+layout(rgba16f, binding = 0) uniform image2D dst;
+layout(rgba8, binding = 1) uniform writeonly image2D outimg;
+uniform int u_mode;       // 0 first level, 1 down, 2 up, 3 composite
+uniform ivec2 u_size;     // of what is written
+uniform vec2 u_texel;     // 1 / the size of what is read
+uniform float u_thresh;   // where glow starts (luma)
+uniform float u_strength;
+
+vec3 soft(vec3 c) {
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float k = 0.5 * u_thresh;
+    // a soft knee around the threshold
+    float s = clamp(l - u_thresh + k, 0.0, 2.0 * k);
+    s = s * s / (4.0 * k + 1e-5);
+    return c * max(s, l - u_thresh) / max(l, 1e-4);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= u_size.x || p.y >= u_size.y) return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(u_size);
+    vec2 o = u_texel;
+    if (u_mode <= 1) {
+        // four bilinear taps: a 4 x 4 box of what is read
+        vec3 c = texture(src, uv + vec2(-o.x, -o.y)).rgb + texture(src, uv + vec2(o.x, -o.y)).rgb
+               + texture(src, uv + vec2(-o.x, o.y)).rgb + texture(src, uv + vec2(o.x, o.y)).rgb;
+        c *= 0.25;
+        if (u_mode == 0) c = soft(c);
+        imageStore(dst, p, vec4(c, 1.0));
+    } else if (u_mode == 2) {
+        // a 3 x 3 tent of the smaller level, added to this one
+        vec3 c = 4.0 * texture(src, uv).rgb
+               + 2.0 * (texture(src, uv + vec2(o.x, 0)).rgb + texture(src, uv - vec2(o.x, 0)).rgb
+                      + texture(src, uv + vec2(0, o.y)).rgb + texture(src, uv - vec2(0, o.y)).rgb)
+               + texture(src, uv + o).rgb + texture(src, uv - o).rgb
+               + texture(src, uv + vec2(o.x, -o.y)).rgb + texture(src, uv + vec2(-o.x, o.y)).rgb;
+        imageStore(dst, p, vec4(imageLoad(dst, p).rgb + c / 16.0, 1.0));
+    } else {
+        vec3 b = texture(src, uv).rgb * u_strength;
+        vec3 a = texelFetch(pic, p, 0).rgb;
+        imageStore(outimg, p, vec4(1.0 - (1.0 - a) * (1.0 - clamp(b, 0.0, 1.0)), 1.0));
+    }
+}

@@ -79,6 +79,9 @@ pub struct Opts {
     pub credit: bool,
     /// seconds the burned-in credit shows before fading (--credit-secs)
     pub credit_secs: f64,
+    /// buckets per pixel on each axis (--supersample; None: the genome's own
+    /// for stills and videos, the live setting in the window)
+    pub supersample: Option<u32>,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -129,6 +132,7 @@ fn parse() -> Opts {
         crf: 17,
         credit: true,
         credit_secs: 10.0,
+        supersample: None,
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -238,6 +242,10 @@ fn parse() -> Opts {
             "--credit-secs" => {
                 i += 1;
                 o.credit_secs = num(i).max(0.0);
+            }
+            "--supersample" => {
+                i += 1;
+                o.supersample = Some((num(i) as u32).clamp(1, 4));
             }
             "--crf" => {
                 i += 1;
@@ -402,6 +410,8 @@ pub fn tone_of(g: &Genome) -> Tone {
         de_min: g.de[1],
         de_curve: g.de[2],
         density: 0.0,
+        filter: g.filter,
+        exposure: 1.0,
     }
 }
 
@@ -455,10 +465,17 @@ fn shot(o: &Opts) {
     if g.has_motion() {
         g = g.moved(o.angle.rem_euclid(360.0) / 360.0);
     }
+    // flam3's supersampling: the genome's own (the server's sheep say 4) unless asked
+    let os = o.supersample.unwrap_or(g.supersample).clamp(1, 4);
+    r.gpu.resize(o.w, o.h, os).unwrap_or_else(|e| {
+        eprintln!("fleece: {e}");
+        std::process::exit(1)
+    });
+    let (bw, bh) = (r.gpu.bw, r.gpu.bh);
     let mut s = vec![Sample::default()];
-    g.sample(o.angle.to_radians(), o.w, o.h, &mut s[0]);
+    g.sample(o.angle.to_radians(), bw, bh, &mut s[0]);
     let tone = tone_of(&g);
-    let ppu = g.scale * o.w as f32;
+    let ppu = g.scale * bw as f32;
     // the shader tuned to this flame, as the live show uses (compiled before the clock starts)
     r.gpu.use_variations(&sample::variation_ids(&s), true);
     let target = o.quality as f64 * o.w as f64 * o.h as f64;
@@ -489,7 +506,7 @@ fn shot(o: &Opts) {
     r.gpu.finish();
     let secs = t1.elapsed().as_secs_f64();
     println!(
-        "{:.0} M iterations ({:.1} per pixel) in {:.2} s: GPU {:.0} M/s, CPU {:.0} M/s ({} threads)",
+        "{:.0} M iterations ({:.1} per pixel, supersample {os}) in {:.2} s: GPU {:.0} M/s, CPU {:.0} M/s ({} threads)",
         (gi + ci) as f64 / 1e6,
         (gi + ci) as f64 / (o.w as f64 * o.h as f64),
         secs,

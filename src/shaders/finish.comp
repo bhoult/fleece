@@ -1,0 +1,115 @@
+// flam3's last steps for each output pixel (rect.c): its spatial filter (a
+// gaussian of flam3's filter radius, over the pixel's supersampled buckets
+// and their neighbours), then gamma with the linear range near zero,
+// vibrancy, highlight power and the background. Also counts the frame's
+// brightness for auto-exposure.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D dens;
+layout(rgba8, binding = 1) uniform writeonly image2D outimg;
+// 64 bins of lit pixels' luma, then lit and saturated pixel counts
+layout(std430, binding = 6) buffer Stats { uint stats[]; };
+
+uniform ivec2 u_size;     // pixels
+uniform ivec2 u_bsize;    // buckets
+uniform int u_os;         // buckets per pixel on each axis
+uniform int u_fw;         // filter width in buckets
+uniform float u_filt[32]; // its 1D weights (they sum to 1)
+uniform float u_gamma;    // 1 / gamma
+uniform float u_vib;
+uniform vec4 u_bg;
+uniform float u_highlight;
+uniform float u_lin;      // gamma threshold
+uniform float u_exposure; // brightness multiplier (auto-exposure)
+
+shared uint sbins[66];
+
+vec3 rgb2hsv(vec3 c) {
+    float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+    float d = mx - mn;
+    float s = mx != 0.0 ? d / mx : 0.0;
+    float h = 0.0;
+    if (s != 0.0) {
+        vec3 q = (vec3(mx) - c) / d;
+        h = c.r == mx ? q.b - q.g : (c.g == mx ? 2.0 + q.r - q.b : 4.0 + q.g - q.r);
+        if (h < 0.0) h += 6.0;
+    }
+    return vec3(h, s, mx);
+}
+
+vec3 hsv2rgb(vec3 c) {
+    float h = mod(c.x, 6.0), s = c.y, v = c.z;
+    float j = floor(h), f = h - j;
+    float p = v * (1.0 - s), q = v * (1.0 - s * f), t = v * (1.0 - s * (1.0 - f));
+    if (j < 1.0) return vec3(v, t, p);
+    if (j < 2.0) return vec3(q, v, p);
+    if (j < 3.0) return vec3(p, v, t);
+    if (j < 4.0) return vec3(p, q, v);
+    if (j < 5.0) return vec3(t, p, v);
+    return vec3(v, p, q);
+}
+
+void main() {
+    uint li = gl_LocalInvocationIndex;
+    if (li < 66u) sbins[li] = 0u;
+    barrier();
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    bool inside = p.x < u_size.x && p.y < u_size.y;
+    vec4 c = vec4(0.0);
+    if (inside) {
+        // the filter window is centred on the pixel's os x os buckets
+        ivec2 b0 = p * u_os - (u_fw - u_os) / 2;
+        for (int j = 0; j < u_fw; j++) {
+            int by = b0.y + j;
+            if (by < 0 || by >= u_bsize.y) continue;
+            vec4 row = vec4(0.0);
+            for (int i = 0; i < u_fw; i++) {
+                int bx = b0.x + i;
+                if (bx < 0 || bx >= u_bsize.x) continue;
+                row += u_filt[i] * texelFetch(dens, ivec2(bx, by), 0);
+            }
+            c += u_filt[j] * row;
+        }
+        c *= u_exposure;
+    }
+    vec3 rgb = vec3(0.0);
+    float t = c.w;
+    float alpha = 0.0;
+    if (t > 0.0) {
+        alpha = t < u_lin ? (1.0 - t / u_lin) * t * pow(u_lin, u_gamma) / u_lin + (t / u_lin) * pow(t, u_gamma)
+                          : pow(t, u_gamma);
+        float ls = u_vib * 256.0 * alpha / t;
+        // flam3_calc_newrgb
+        vec3 cb = c.rgb;
+        float maxa = -1.0, maxc = 0.0;
+        for (int i = 0; i < 3; i++) {
+            float a = ls * cb[i];
+            if (a > maxa) { maxa = a; maxc = cb[i]; }
+        }
+        if (maxc > 0.0) {
+            float newls = 255.0 / maxc;
+            if (maxa > 255.0 && u_highlight >= 0.0) {
+                vec3 hsv = rgb2hsv(newls * cb / 255.0);
+                hsv.y *= pow(newls / ls, u_highlight);
+                rgb = hsv2rgb(hsv) * 255.0;
+            } else {
+                float adj = maxa <= 255.0 ? 1.0 : min(-u_highlight, 1.0);
+                rgb = ((1.0 - adj) * newls + adj * ls) * cb;
+            }
+        }
+        rgb += (1.0 - u_vib) * 256.0 * pow(max(cb, vec3(0.0)), vec3(u_gamma));
+    }
+    rgb += (1.0 - clamp(alpha, 0.0, 1.0)) * u_bg.rgb * 256.0;
+    rgb = clamp(rgb / 255.0, 0.0, 1.0);
+    if (inside) {
+        imageStore(outimg, p, vec4(rgb, 1.0));
+        if (alpha > 0.02) {
+            float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+            atomicAdd(sbins[min(int(luma * 64.0), 63)], 1u);
+            atomicAdd(sbins[64], 1u);
+            if (max(rgb.r, max(rgb.g, rgb.b)) >= 0.995) atomicAdd(sbins[65], 1u);
+        }
+    }
+    barrier();
+    if (li < 66u && sbins[li] != 0u) atomicAdd(stats[li], sbins[li]);
+}

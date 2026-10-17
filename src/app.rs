@@ -148,10 +148,11 @@ impl App {
         let n = if self.blur { BLUR_SAMPLES } else { 1 };
         let shutter = SHUTTER_FRAMES / show::ES_FPS;
         let t_build = Instant::now();
-        let mid = self.show.samples(n, shutter, self.rw, self.rh, &mut self.samples);
+        let (bw, bh) = (self.r.gpu.bw, self.r.gpu.bh);
+        let mid = self.show.samples(n, shutter, bw, bh, &mut self.samples);
         self.build_ms += (t_build.elapsed().as_secs_f64() * 1000.0 - self.build_ms) * 0.1;
         let tone = tone_of(&mid);
-        let ppu = mid.scale * self.rw as f32;
+        let ppu = mid.scale * bw as f32;
         // a shader with just this frame's variations (once compiled), and
         // the ones coming up compiling in the background
         let ids = crate::sample::variation_ids(&self.samples);
@@ -393,7 +394,11 @@ impl App {
             }
             // no worker may still be writing into the histograms being freed
             self.r.quiesce();
-            self.r.gpu.resize(rw, rh);
+            let os = self.r.gpu.os;
+            if let Err(e) = self.r.gpu.resize(rw, rh, os) {
+                eprintln!("fleece: {e}");
+                std::process::exit(1)
+            }
             self.rw = rw;
             self.rh = rh;
         }

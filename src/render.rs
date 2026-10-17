@@ -43,6 +43,9 @@ pub struct Renderer {
     pub use_gpu: bool,
     pub use_cpu: bool,
     pub last: Stats,
+    /// frame blending: how much of the frames before stays in this one (0:
+    /// none; a cut always starts afresh, a refining still keeps all)
+    pub decay: f32,
 }
 
 impl Renderer {
@@ -58,6 +61,7 @@ impl Renderer {
             total: 0.0,
             use_gpu: true,
             last: Stats::default(),
+            decay: 0.0,
         }
     }
 
@@ -82,7 +86,7 @@ impl Renderer {
                 let job = Job {
                     epoch: self.epoch,
                     tables: samples.iter().map(cpu::Table::new).collect(),
-                    hist: Hist { ptr, w: self.gpu.w, h: self.gpu.h },
+                    hist: Hist { ptr, w: self.gpu.bw, h: self.gpu.bh },
                     reset,
                 };
                 pool.publish(Some(job));
@@ -121,10 +125,17 @@ impl Renderer {
     /// Merges and tone-maps the pending frame.
     fn close(&mut self, cpu_iters: u64, keep: bool) -> Option<Stats> {
         let p = self.pending.take()?;
-        let keep = keep && !p.reset;
+        let decay = if p.reset {
+            0.0
+        } else if keep {
+            1.0
+        } else {
+            self.decay
+        };
         let iters = p.gpu_iters as f64 + cpu_iters as f64;
-        self.total = if keep { self.total + iters } else { iters };
-        self.gpu.merge(p.cpu_hist, keep);
+        // the iterations behind acc, for the density: they fade with it
+        self.total = self.total * decay as f64 + iters;
+        self.gpu.merge(p.cpu_hist, decay);
         let mut tone = p.tone;
         tone.density = (p.ppu2 as f64 / self.total.max(1.0)) as f32;
         self.gpu.tone(&tone);

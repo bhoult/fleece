@@ -105,6 +105,7 @@ gl_fns! {
     glGetQueryObjectui64v(q: GLuint, p: GLenum, out: *mut u64);
     glMaxShaderCompilerThreadsKHR(count: GLuint);
     glReadPixels(x: GLint, y: GLint, w: GLsizei, h: GLsizei, fmt: GLenum, kind: GLenum, px: *mut c_void);
+    glProgramUniform1fv(p: GLuint, l: GLint, n: GLsizei, v: *const f32);
 }
 
 pub const GL_VENDOR: GLenum = 0x1F00;
@@ -169,6 +170,8 @@ pub const GL_TIMESTAMP: GLenum = 0x8E28;
 pub const GL_QUERY_RESULT: GLenum = 0x8866;
 pub const GL_QUERY_RESULT_AVAILABLE: GLenum = 0x8867;
 pub const GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX: GLenum = 0x9049;
+pub const GL_MAX_COMPUTE_SHARED_MEMORY_SIZE: GLenum = 0x8262;
+pub const GL_OUT_OF_MEMORY: GLenum = 0x0505;
 
 impl Gl {
     pub fn string(&self, name: GLenum) -> String {
