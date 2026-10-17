@@ -46,8 +46,13 @@ impl Fx {
 const TRAILS: [f64; 3] = [0.0, 0.06, 0.35];
 /// Glow strengths (soft, strong).
 const GLOW: [f32; 3] = [0.0, 1.2, 2.4];
-/// Auto-exposure aims the 90th percentile of the lit pixels' luma here.
-const LEVEL_TARGET: f64 = 0.62;
+/// Auto-exposure aims the 90th percentile of the lit pixels' luma at the
+/// real sheep's median (80 genebank sheep: 0.56, quartiles 0.43 and 0.70),
+/// leaves alone sheep within 15 % of it, and pulls down those saturating
+/// more than a tenth of their lit pixels (the top quarter).
+const LEVEL_TARGET: f64 = 0.56;
+const LEVEL_DEADBAND: f64 = 0.15;
+const LEVEL_MAX_SATURATED: f64 = 0.10;
 /// Supersampling choices (X cycles them; 0 is automatic: 2x while the
 /// histogram stays small enough to sit in the GPU's cache, else 1x).
 const SUPERSAMPLES: [u32; 4] = [0, 1, 2, 4];
@@ -258,8 +263,8 @@ impl App {
     }
 
     /// Auto-exposure: moves the brightness so the lit pixels' 90th
-    /// percentile sits at LEVEL_TARGET, without saturating more than 4 % of
-    /// them, settling over a second or two.
+    /// percentile comes near LEVEL_TARGET, without saturating more than
+    /// LEVEL_MAX_SATURATED of them, settling over a second or two.
     fn levels(&mut self, dt: f64, gamma: f32) {
         let Some(st) = self.r.gpu.frame_stats.take() else { return };
         if !self.fx.levels {
@@ -272,12 +277,17 @@ impl App {
         }
         let p90 = st.quantile(0.9).max(0.02) as f64;
         let sat = st.saturated as f64 / st.lit as f64;
-        let mut err = (LEVEL_TARGET / p90).ln();
-        if sat > 0.04 {
-            err = err.min(-0.5 * (sat / 0.04).ln());
+        // brightness b moves the picture about as b^(1 / gamma): the sheep's
+        // own level, without the exposure, and the exposure that would take
+        // it to the target (none inside the dead band)
+        let g = gamma.max(1.0) as f64;
+        let own = p90 * (-self.exposure / g).exp();
+        let e = (LEVEL_TARGET / own).ln();
+        let mut want = g * e.signum() * (e.abs() - LEVEL_DEADBAND).max(0.0);
+        if sat > LEVEL_MAX_SATURATED {
+            want = want.min(self.exposure - g * 0.5 * (sat / LEVEL_MAX_SATURATED).ln());
         }
-        // brightness b moves the picture about as b^(1 / gamma)
-        let step = (err * gamma.max(1.0) as f64 * dt * 1.5).clamp(-0.3, 0.3);
+        let step = ((want - self.exposure) * dt * 2.0).clamp(-0.3, 0.3);
         self.exposure = (self.exposure + step).clamp(-(8f64.ln()), 16f64.ln());
     }
 
