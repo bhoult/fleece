@@ -100,6 +100,8 @@ pub struct Opts {
     pub optimize: bool,
     /// --musicwav: genre, seconds, file
     pub musicwav: Vec<String>,
+    /// generated music (music::GENRES): played in the window, the soundtrack of a video
+    pub music: Option<usize>,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -111,9 +113,11 @@ fn usage() -> ! {
     eprintln!("              [--es | --es-hd | --render WxH | --native | --scale F] [--quality N]");
     eprintln!("              [--load FILE.flam3]... [--fresh] [--cpu-only | --gpu-only] [--threads N]");
     eprintln!("              [--classic] [--glow 0-3] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
-    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--audio-strength 0-3] [--sound-delay MS] [--optimize on|off] [--supersample 1-4] [--taste on|off]");
+    eprintln!("              [--tilt 0-2] [--audio [MUSIC]] [--audio-strength 0-3] [--music GENRE] [--sound-delay MS]");
+    eprintln!("              [--optimize on|off] [--supersample 1-4] [--taste on|off]");
     eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
     eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
+    eprintln!("       --music GENRE: generated music the show follows ({}); a video's soundtrack", music::GENRES.join(", ").to_lowercase());
     eprintln!("       fleece --shot OUT.png [--quality Q] [--angle DEG] [--breed N] [size]   one still");
     eprintln!("       fleece --frames N [--fps F] [--out DIR --every K] [--keys F:K,...]   headless run");
     eprintln!("       fleece --video OUT.mp4 [--seconds S | --frames N] [--fps F] [--quality Q] [--crf N] [size]");
@@ -163,6 +167,7 @@ fn parse() -> Opts {
         sound_delay: None,
         optimize: true,
         musicwav: Vec::new(),
+        music: None,
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -325,6 +330,23 @@ fn parse() -> Opts {
                 if let Some(f) = args.get(i + 1).filter(|f| !f.starts_with("--") && std::path::Path::new(f.as_str()).is_file()) {
                     o.soundtrack = Some(f.clone());
                     i += 1;
+                }
+            }
+            "--music" => {
+                i += 1;
+                let want = args.get(i).map(|s| s.to_uppercase()).unwrap_or_default();
+                let found = music::GENRES.iter().position(|g| g.replace(' ', "") == want.replace([' ', '-', '_'], "")).or_else(|| want.parse().ok().filter(|&n: &usize| n < music::GENRES.len()));
+                match found {
+                    Some(g) => {
+                        o.music = Some(g);
+                        if o.fx.audio == 0 {
+                            o.fx.audio = 2;
+                        }
+                    }
+                    None => {
+                        eprintln!("fleece: --music: one of {}", music::GENRES.join(", ").to_lowercase());
+                        std::process::exit(2)
+                    }
                 }
             }
             "--taste" => match args.get(i + 1).map(|s| s.as_str()) {

@@ -27,6 +27,7 @@ v2 adds ten things to the show. Electric Sheep's show as it was is still there: 
 | Wobble | W | `--wobble on/off` | on | Motion for every sheep. Each new sheep, real or bred, gets one or two of fleece's own `<motion>` elements: a variation's weight, an xform's size, position or colour swinging one or two times a loop, so the loop still closes. They are tested at four phases of the loop like any new sheep, and dropped if they make it go dark. They are saved with the flock (marked `fleece_extra`) and play only while wobble is on. |
 | 3D | 3 | `--tilt 0-2` | off | A 3D camera: the flame tilted back in perspective, swaying slowly, and with depth of field at 2. See "3D" below. |
 | Audio | A | `--audio [MUSIC]`, `--audio-strength 0-3` | off | The music drives the show (see below): off, low, medium (what `--audio` gives) or high. |
+| Music | N | `--music GENRE` | off | Experimental: music fleece makes up as it plays, which the show then follows (see below). |
 | Taste | | `--taste on/off` | on | New sheep are the best of three candidates by a taste score (see below). |
 | New variations | | | on | Half of the random new sheep ("random+") draw from 31 more variations: 3D, direct-colour and Apophysis plugins (see "3D" below). Classic breeds from flam3's 99 alone. |
 
@@ -47,6 +48,13 @@ v2 adds ten things to the show. Electric Sheep's show as it was is still there: 
 ```
 target/release/fleece --video dance.mp4 --audio song.mp3
 target/release/fleece --audiocheck song.wav      # the analysis as text meters (no file: live, for --seconds)
+```
+
+**Music (experimental).** `N` plays music fleece makes up as it goes, and turns audio on so the show follows it: off, then ambient, techno, synthwave and lo-fi in turn, then off. A composer writes pieces of two to five minutes, each with its own key, mode, tempo, chord progressions, drum patterns, bassline, arpeggio and melody, laid out in sections (intro, build, main, breakdown, outro) with instruments entering and leaving; within a piece the bass mutates at phrase ends, the melody comes back varied, and filters drift; the next piece usually moves to a neighbouring key. It never loops, though each genre keeps its style. A small synthesiser plays it (band-limited oscillators, resonant filters, FM bells and electric piano, synthesised drums, reverb, delay, sidechain, a limiter) through `pacat`, at well under 1 % of one core. A genre switch waits for the next bar and crossfades. Recordings carry it like any other sound. On a video, `--music GENRE` is the soundtrack: rendered first (the same genre and `--seed` always give the same music), followed like `--audio MUSIC`, and put in the file. `--musicwav GENRE SECONDS OUT.wav` writes it to a file alone.
+
+```
+target/release/fleece --music ambient
+target/release/fleece --video dance.mp4 --music techno --seconds 60
 ```
 
 **Faithfulness.** With supersampling, fleece's renders of real sheep match flam3-render's at 37–40 dB PSNR (v1: 20–28). At the server's own settings (4x, quality 2,000) a frame takes 0.8–0.9 s against flam3's 4.7–8.6 s. Both were timed while another program kept the GPU busy and the machine loaded. 4x is the slow case: its histogram no longer fits in the GPU's cache. The density estimation gathers up to 16 buckets away, the most the GPU's shared memory allows. flam3's kernels at 4x reach further, so the faintest haze is a little noisier than flam3's.
@@ -157,6 +165,7 @@ At 1280x720 and 30 Hz that is about 150-350 samples per pixel per frame. Electri
 | L / D / U / W | auto levels / camera drift / palette (hue) drift / wobble (motion for every sheep) |
 | 3 | 3D camera: flat, tilted, tilted with depth of field |
 | A | audio: the music drives the show, off / low / medium / high |
+| N | music: fleece's own, off / ambient / techno / synthwave / lo-fi |
 | Z | optimize: find settings that keep up with the display's refresh rate (below) |
 | H | hide the text and buttons / show them again (a recording's REC line stays) |
 | F, F11, double click | fullscreen |
@@ -213,6 +222,7 @@ The headless modes use SDL's offscreen driver, so the context is made on the GPU
 | `src/breed.rs` | the flock, mutation, crossover, framing, the fitness test, wobble |
 | `src/taste.rs` | the taste measures and score |
 | `src/audio.rs` | listening (parec), the FFT bands and beats, soundtracks |
+| `src/music.rs` | generated music (experimental): the composer, the synthesiser, the player |
 | `src/genome.rs` | genomes, flam3_random, symmetry, rotation, the flattening for the chaos game, XML output |
 | `src/interp.rs` | edges: padding, log-polar affines, HSV palettes |
 | `src/var.rs` | the variation table (flam3's 99, then fleece's 3D, plugin and direct-colour ones), random parameters, precalcs |

@@ -176,6 +176,9 @@ pub struct App {
     audio: Option<crate::audio::Audio>,
     track: Option<(Vec<crate::audio::Levels>, f64)>,
     track_t: f64,
+    /// music fleece makes and plays (N), and its seed
+    music: Option<crate::music::Player>,
+    music_seed: u64,
 }
 
 impl App {
@@ -289,6 +292,8 @@ impl App {
             audio: None,
             track: None,
             track_t: 0.0,
+            music: None,
+            music_seed: o.seed as u64,
         }
     }
 
@@ -297,8 +302,9 @@ impl App {
     /// overrides the adaptive budget (video).
     pub fn frame(&mut self, dt: f64, fixed: Option<u32>) -> Option<Stats> {
         let audio = self.audio_levels();
-        // a recording takes the sound from when audio is on
-        if let Some(rec) = self.rec.as_mut().filter(|r| !r.has_sound() && self.fx.audio > 0 && self.track.is_none()) {
+        // a recording takes the sound from when audio or music is on
+        let sound = (self.fx.audio > 0 || self.music.is_some()) && self.track.is_none();
+        if let Some(rec) = self.rec.as_mut().filter(|r| !r.has_sound() && sound) {
             if let Err(e) = rec.capture_sound() {
                 eprintln!("fleece: recording without sound: {e}");
             }
@@ -625,6 +631,15 @@ impl App {
                 Item::button("W", "WOBBLE", 'w', f.wobble),
                 Item::button("3", ["3D", "3D TILT", "3D TILT+DOF"][f.tilt as usize % 3], '3', f.tilt > 0),
                 Item::button("A", format!("AUDIO {}", ["OFF", "LOW", "MEDIUM", "HIGH"][f.audio as usize % 4]), 'a', f.audio > 0),
+                Item::button(
+                    "N",
+                    match &self.music {
+                        Some(p) => format!("MUSIC {}", crate::music::GENRES[p.genre()]),
+                        None => "MUSIC".into(),
+                    },
+                    'n',
+                    self.music.is_some(),
+                ),
             ],
             vec![
                 Item::button("C", "CPU", 'c', self.r.use_cpu && self.r.workers() > 0),
@@ -915,6 +930,33 @@ impl App {
         self.opt_note = Some((note, Instant::now()));
     }
 
+    /// N: music off, then each genre in turn, then off.
+    fn cycle_music(&mut self) {
+        match &self.music {
+            None => self.start_music(0),
+            Some(p) if p.genre() + 1 < crate::music::GENRES.len() => p.set_genre(p.genre() + 1),
+            Some(_) => self.music = None,
+        }
+    }
+
+    /// Plays generated music of `genre`, and turns audio on so the show follows it.
+    pub fn start_music(&mut self, genre: usize) {
+        if self.headless {
+            // never sound from a run without a window
+            eprintln!("fleece: no music without a window (a video takes --music as its soundtrack)");
+            return;
+        }
+        match crate::music::Player::start(genre, self.music_seed) {
+            Ok(p) => {
+                self.music = Some(p);
+                if self.fx.audio == 0 {
+                    self.fx.audio = 2;
+                }
+            }
+            Err(e) => eprintln!("fleece: no music: {e}"),
+        }
+    }
+
     /// X: the next supersampling setting (automatic, 1x, 2x, 4x).
     fn cycle_supersample(&mut self) {
         let i = SUPERSAMPLES.iter().position(|&s| s == self.supersample).unwrap_or(0);
@@ -980,6 +1022,7 @@ impl App {
             '3' => self.fx.tilt = next(self.fx.tilt, 3),
             'a' => self.fx.audio = next(self.fx.audio, 4),
             'z' => self.optimize(),
+            'n' => self.cycle_music(),
             _ => {}
         }
         true
@@ -1205,6 +1248,9 @@ pub fn window(o: &Opts) {
     if o.optimize {
         app.auto_optimize = Some(Instant::now() + std::time::Duration::from_secs(3));
     }
+    if let Some(g) = o.music {
+        app.start_music(g);
+    }
     let mut last = Instant::now();
     while app.events() {
         let now = Instant::now();
@@ -1302,7 +1348,22 @@ pub fn video(o: &Opts) {
     let per_round = gpu::WALKERS as f64 * gpu::ITERS as f64;
     let rounds = ((o.quality as f64 * app.rw as f64 * app.rh as f64) / per_round).ceil().max(1.0) as u32;
     let mut frames = o.frames;
-    if let Some(f) = &o.soundtrack {
+    // generated music: rendered first (a second longer than the video), then
+    // made to like any soundtrack, and deleted once in the file
+    let made = o.music.filter(|_| o.soundtrack.is_none()).map(|g| {
+        let dir = std::env::var("HOME").map(|h| format!("{h}/.cache/fleece")).unwrap_or_else(|_| ".".into());
+        let _ = std::fs::create_dir_all(&dir);
+        let path = format!("{dir}/music-{}.wav", std::process::id());
+        let secs = frames as f64 / o.fps + 1.0;
+        eprintln!("fleece: making {:.0} s of {} music", secs, crate::music::GENRES[g].to_lowercase());
+        if let Err(e) = crate::music::render_wav(g, o.seed as u64, secs, &path) {
+            eprintln!("fleece: music: {e}");
+            std::process::exit(1)
+        }
+        path
+    });
+    let soundtrack = o.soundtrack.clone().or(made.clone());
+    if let Some(f) = &soundtrack {
         match crate::audio::timeline(f) {
             Ok((tl, hop)) => {
                 if frames == 0 {
@@ -1317,7 +1378,7 @@ pub fn video(o: &Opts) {
             }
         }
     }
-    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow", o.soundtrack.as_deref()).unwrap_or_else(|e| {
+    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow", soundtrack.as_deref()).unwrap_or_else(|e| {
         eprintln!("fleece: {e}");
         std::process::exit(1)
     });
@@ -1385,7 +1446,11 @@ pub fn video(o: &Opts) {
     }
     eprintln!();
     app.r.idle();
-    match sink.finish().and_then(|_| credits.embed(&o.out)) {
+    let done = sink.finish().and_then(|_| credits.embed(&o.out));
+    if let Some(m) = &made {
+        let _ = std::fs::remove_file(m);
+    }
+    match done {
         Ok(()) if o.out != "-" => eprintln!(
             "fleece: wrote {} in {:.0} s (credits in its metadata and {}.credits.txt)",
             o.out,

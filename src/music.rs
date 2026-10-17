@@ -3761,18 +3761,16 @@ fn to_i16(x: f32) -> i16 {
 // ---------------------------------------------------------------- the outside
 
 /// Music playing through the speakers (pacat), generated on a thread of its own.
-// (the app wires these in; this branch only renders WAVs)
-#[allow(dead_code)]
 pub struct Player {
     want: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-    /// frames written so far
+    /// frames written so far (the tests watch it)
+    #[cfg_attr(not(test), allow(dead_code))]
     frames: Arc<AtomicU64>,
     child: Option<Child>,
     thread: Option<JoinHandle<()>>,
 }
 
-#[allow(dead_code)]
 impl Player {
     /// Starts playing `GENRES[genre]` (index wraps), seeded. Error if pacat is missing / exits at once.
     pub fn start(genre: usize, seed: u64) -> Result<Player, String> {
