@@ -7,6 +7,7 @@ use crate::cpu;
 use crate::genome::{self, Genome};
 use crate::interp;
 use crate::rng::Rng;
+use crate::taste::{self, Taste};
 use crate::sample::{MAXX, Sample};
 
 /// flam3_mutate: one of seven mutations (flam3.c's probabilities).
@@ -327,8 +328,67 @@ pub fn first_good(mut make: impl FnMut() -> (Genome, u32), tested: &mut u32, rej
 /// genome's own tone settings.
 pub fn view_brightness(g: &Genome, seed: u32) -> f32 {
     (0..4u32)
-        .map(|q| test_render(g, 160, 90, q as f32 * std::f32::consts::FRAC_PI_2, 3.0, g.highlight, seed.wrapping_add(q)).0)
+        .map(|q| {
+            // motion elements swing with the loop: test them at the same phase
+            let moved;
+            let gq = if g.has_motion() {
+                moved = g.moved(q as f32 / 4.0, true);
+                &moved
+            } else {
+                g
+            };
+            test_render(gq, 160, 90, q as f32 * std::f32::consts::FRAC_PI_2, 3.0, g.highlight, seed.wrapping_add(q)).0
+        })
         .fold(f32::MAX, f32::min)
+}
+
+/// Motion for every sheep: fleece's extra motion elements (played while
+/// wobble is on). One or two animated xforms get a slow swing, a whole
+/// number of times a loop so the loop still closes: a variation's weight,
+/// the xform's size, its position or its colour. Up to four tries, each
+/// tested at four phases of the loop; none if all of them go dark.
+pub fn add_wobble(g: &mut Genome, seed: u32) {
+    if g.xforms.iter().any(|x| x.motion.iter().any(|m| m.extra)) {
+        return;
+    }
+    let animated: Vec<usize> = (0..g.xforms.len()).filter(|&i| g.xforms[i].animate && !g.xforms[i].padding && g.xforms[i].weight > 0.0).collect();
+    if animated.is_empty() {
+        return;
+    }
+    let mut r = Rng::new(seed ^ 0x0b0b_1e55);
+    for _ in 0..4 {
+        let mut t = g.clone();
+        for _ in 0..1 + r.below(2) {
+            let x = &mut t.xforms[animated[r.below(animated.len() as u32) as usize]];
+            let mut m = genome::Motion {
+                freq: if r.f01() < 0.3 { 2.0 } else { 1.0 },
+                func: if r.f01() < 0.25 { 1 } else { 0 },
+                extra: true,
+                ..Default::default()
+            };
+            let amp = r.range(0.5, 1.0) * if r.bit() { 1.0 } else { -1.0 };
+            match r.below(4) {
+                0 if !x.vars.is_empty() => {
+                    let v = x.vars[r.below(x.vars.len() as u32) as usize];
+                    m.vars.push(genome::VarUse { id: v.id, w: 0.4 * amp * v.w, p: [0.0; genome::NP] });
+                }
+                1 => {
+                    for i in 0..2 {
+                        for j in 0..2 {
+                            m.c[i][j] = 0.15 * amp * x.c[i][j];
+                        }
+                    }
+                }
+                2 => m.c[2] = [0.25 * amp * r.signed(), 0.25 * amp * r.signed()],
+                _ => m.color = 0.3 * amp,
+            }
+            x.motion.push(m);
+        }
+        if view_brightness(&t, r.next_u32()) >= MIN_VIEW {
+            *g = t;
+            return;
+        }
+    }
 }
 
 /// A `w` x `h` render on the CPU at `quality` samples per pixel through the
@@ -351,7 +411,7 @@ fn test_render(g: &Genome, w: usize, h: usize, angle: f32, quality: f32, highpow
 }
 
 /// The pixels of that render.
-fn render_small(g: &Genome, w: usize, h: usize, angle: f32, quality: f32, highpow: f32, seed: u32) -> Vec<[u8; 3]> {
+pub fn render_small(g: &Genome, w: usize, h: usize, angle: f32, quality: f32, highpow: f32, seed: u32) -> Vec<[u8; 3]> {
     let mut s = Box::new(Sample::default());
     g.sample(angle, w as u32, h as u32, &mut s);
     let samples = ((w * h) as f32 * quality) as usize;
@@ -495,6 +555,25 @@ pub struct Sheep {
     pub genome: Genome,
     pub rating: i32,
     pub id: u32,
+    /// its taste measures and score, once measured
+    pub taste: Option<([f32; taste::NF], f32)>,
+}
+
+impl Sheep {
+    pub fn new(genome: Genome, rating: i32, id: u32) -> Sheep {
+        Sheep { genome, rating, id, taste: None }
+    }
+
+    /// Takes the taste measures of its first frame and scores them.
+    pub fn measure(&mut self, t: &Taste, seed: u32) {
+        let f = taste::features(&self.genome, seed);
+        self.taste = Some((f, t.score(&f)));
+    }
+
+    /// Its taste score (0 if not measured).
+    pub fn score(&self) -> f32 {
+        self.taste.map_or(0.0, |t| t.1)
+    }
 }
 
 /// The local flock: Electric Sheep's server, in miniature. New sheep are
@@ -511,7 +590,13 @@ pub struct Flock {
     next_id: u32,
     pub tested: u32,
     pub rejected: u32,
+    /// the taste new sheep are chosen by (votes teach it), and whether to use it
+    pub taste: Taste,
+    pub use_taste: bool,
 }
+
+/// Candidates bred for each new sheep when the taste chooses.
+pub const TASTE_CANDIDATES: usize = 3;
 
 pub const FLOCK_MAX: usize = 32;
 
@@ -525,6 +610,8 @@ impl Flock {
             next_id: 1,
             tested: 0,
             rejected: 0,
+            taste: Taste::prior(),
+            use_taste: true,
         }
     }
 
@@ -633,23 +720,41 @@ impl Flock {
         );
         (self.tested, self.rejected) = (tested, rejected);
         let id = self.next_id();
-        Sheep { genome: g, rating: 0, id }
+        let mut g = g;
+        add_wobble(&mut g, self.r.next_u32());
+        let mut s = Sheep::new(g, 0, id);
+        let seed = self.r.next_u32();
+        s.measure(&self.taste, seed);
+        s
     }
 
-    /// A new sheep that passed the tests (or the best of ten tries).
+    /// A new sheep that passed the tests (or the best of ten tries); with
+    /// the taste on, the best scoring of a few such.
     pub fn breed(&mut self) -> Sheep {
-        let (mut tested, mut rejected) = (self.tested, self.rejected);
-        let g = first_good(
-            || {
-                let g = self.conceive();
-                (g, self.r.next_u32())
-            },
-            &mut tested,
-            &mut rejected,
-        );
-        (self.tested, self.rejected) = (tested, rejected);
-        let id = self.next_id();
-        Sheep { genome: g, rating: 0, id }
+        let n = if self.use_taste { TASTE_CANDIDATES } else { 1 };
+        let mut best: Option<Sheep> = None;
+        for _ in 0..n {
+            let (mut tested, mut rejected) = (self.tested, self.rejected);
+            let g = first_good(
+                || {
+                    let g = self.conceive();
+                    (g, self.r.next_u32())
+                },
+                &mut tested,
+                &mut rejected,
+            );
+            (self.tested, self.rejected) = (tested, rejected);
+            let mut s = Sheep::new(g, 0, 0);
+            let seed = self.r.next_u32();
+            s.measure(&self.taste, seed);
+            if best.as_ref().is_none_or(|b| s.score() > b.score()) {
+                best = Some(s);
+            }
+        }
+        let mut s = best.unwrap();
+        s.id = self.next_id();
+        add_wobble(&mut s.genome, self.r.next_u32());
+        s
     }
 
     pub fn add(&mut self, s: Sheep) {
@@ -666,9 +771,14 @@ impl Flock {
         self.sheep.iter().map(|s| (s.genome.clone(), s.rating)).collect()
     }
 
-    pub fn vote(&mut self, id: u32, v: i32) {
+    /// A vote for sheep `id`; `measures` are its taste measures, which the
+    /// taste learns from.
+    pub fn vote(&mut self, id: u32, v: i32, measures: Option<[f32; taste::NF]>) {
         if let Some(s) = self.sheep.iter_mut().find(|s| s.id == id) {
             s.rating += v;
+        }
+        if let Some(f) = measures {
+            self.taste.learn(&f, v);
         }
         if v < 0 {
             self.sheep.retain(|s| s.id != id || s.rating >= 0);

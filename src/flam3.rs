@@ -137,6 +137,7 @@ fn motions(inner: &str) -> Vec<Motion> {
             let f = v.trim().parse::<f32>().ok();
             match k {
                 "motion_frequency" => m.freq = f.unwrap_or(1.0),
+                "fleece_extra" => m.extra = v.trim() == "1",
                 "motion_function" => {
                     m.func = match v.trim() {
                         "triangle" => 1,

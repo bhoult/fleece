@@ -21,6 +21,7 @@ mod sample;
 mod sdl;
 mod show;
 mod simd;
+mod taste;
 mod var;
 mod video;
 
@@ -38,6 +39,7 @@ enum Mode {
     Frames,
     Video,
     Bench,
+    TasteFit,
 }
 
 pub struct Opts {
@@ -80,8 +82,12 @@ pub struct Opts {
     /// seconds the burned-in credit shows before fading (--credit-secs)
     pub credit_secs: f64,
     /// buckets per pixel on each axis (--supersample; None: the genome's own
-    /// for stills and videos, the live setting in the window)
+    /// for stills, automatic for the show and videos)
     pub supersample: Option<u32>,
+    /// v2's effects to start with (--classic: none)
+    pub fx: app::Fx,
+    /// new sheep are the taste's pick of a few candidates (--taste off: the first)
+    pub taste: bool,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -92,7 +98,10 @@ fn usage() -> ! {
     eprintln!("usage: fleece [WxH | 720p | 1080p | 2k | 4k] [--fullscreen] [--seed N] [--no-hud]");
     eprintln!("              [--es | --es-hd | --render WxH | --native | --scale F] [--quality N]");
     eprintln!("              [--load FILE.flam3]... [--fresh] [--cpu-only | --gpu-only] [--threads N]");
-    eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps)");
+    eprintln!("              [--classic] [--glow 0-2] [--trails 0-2] [--levels|--drift|--hue|--wobble on|off]");
+    eprintln!("              [--tilt 0-2] [--audio] [--supersample 1-4] [--taste on|off]");
+    eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
+    eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
     eprintln!("       fleece --shot OUT.png [--quality Q] [--angle DEG] [--breed N] [size]   one still");
     eprintln!("       fleece --frames N [--fps F] [--out DIR --every K] [--keys F:K,...]   headless run");
     eprintln!("       fleece --video OUT.mp4 [--seconds S | --frames N] [--fps F] [--quality Q] [--crf N] [size]");
@@ -133,6 +142,8 @@ fn parse() -> Opts {
         credit: true,
         credit_secs: 10.0,
         supersample: None,
+        fx: app::Fx::V2,
+        taste: true,
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -189,6 +200,7 @@ fn parse() -> Opts {
             }
             "--varcheck" => o.mode = Mode::VarCheck,
             "--mutcheck" => o.mode = Mode::MutCheck,
+            "--tastefit" => o.mode = Mode::TasteFit,
             "--out" => {
                 i += 1;
                 o.out = args.get(i).cloned().unwrap_or_else(|| usage());
@@ -242,6 +254,48 @@ fn parse() -> Opts {
             "--credit-secs" => {
                 i += 1;
                 o.credit_secs = num(i).max(0.0);
+            }
+            "--classic" => o.fx = app::Fx::CLASSIC,
+            "--glow" => {
+                i += 1;
+                o.fx.glow = (num(i) as u8).min(2);
+            }
+            "--trails" => {
+                i += 1;
+                o.fx.trails = (num(i) as u8).min(2);
+            }
+            "--tilt" => {
+                i += 1;
+                o.fx.tilt = (num(i) as u8).min(2);
+            }
+            "--audio" => o.fx.audio = true,
+            "--taste" => match args.get(i + 1).map(|s| s.as_str()) {
+                Some("off") => {
+                    o.taste = false;
+                    i += 1;
+                }
+                Some("on") => i += 1,
+                _ => {}
+            },
+            "--levels" | "--drift" | "--hue" | "--wobble" => {
+                let flag = args[i].clone();
+                let on = match args.get(i + 1).map(|s| s.as_str()) {
+                    Some("off") => {
+                        i += 1;
+                        false
+                    }
+                    Some("on") => {
+                        i += 1;
+                        true
+                    }
+                    _ => true,
+                };
+                match flag.as_str() {
+                    "--levels" => o.fx.levels = on,
+                    "--drift" => o.fx.drift = on,
+                    "--hue" => o.fx.hue = on,
+                    _ => o.fx.wobble = on,
+                }
             }
             "--supersample" => {
                 i += 1;
@@ -313,6 +367,11 @@ fn parse() -> Opts {
         }
     }
     o
+}
+
+/// Where the window keeps the taste its votes have taught.
+pub fn taste_path() -> String {
+    flock_path().replace("flock.flam3", "taste.txt")
 }
 
 /// Where the window keeps its flock between runs.
@@ -463,7 +522,7 @@ fn shot(o: &Opts) {
     }
     // the loop's phase: motion elements first, then the turn (flam3's sheep_loop)
     if g.has_motion() {
-        g = g.moved(o.angle.rem_euclid(360.0) / 360.0);
+        g = g.moved(o.angle.rem_euclid(360.0) / 360.0, true);
     }
     // flam3's supersampling: the genome's own (the server's sheep say 4) unless asked
     let os = o.supersample.unwrap_or(g.supersample).clamp(1, 4);
@@ -738,6 +797,125 @@ fn mutcheck(o: &Opts) {
     println!("mutations, tested:   {dark_tested} dark ({:.1} %); {tested} tried, {rejected} rejected", pc(dark_tested));
 }
 
+/// Fits taste::Taste's prior by ridge regression and prints it (with its
+/// cross-validated correlation) to paste into taste.rs: the measures of the
+/// genebank's real sheep (1) against new random sheep that passed the tests
+/// (0), so the score says how much a candidate looks like a survivor of
+/// Electric Sheep's flock. With --breed 1: against ln(1 + rating) among the
+/// rated real sheep instead.
+fn tastefit(o: &Opts) {
+    let (bank, weight) = load_genebank();
+    let threads = o.workers.max(1);
+    let t0 = std::time::Instant::now();
+    let rated: Vec<(Genome, f32)> = if o.breed == 1 {
+        bank.into_iter().zip(weight).filter(|(_, w)| *w > 1.0).map(|(g, w)| (g, ((w - 1.0) * (w - 1.0)).ln_1p())).collect()
+    } else {
+        let m = bank.len().min(3000);
+        let per = m.div_ceil(threads);
+        let bred: Vec<Genome> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..threads)
+                .map(|t| {
+                    sc.spawn(move || {
+                        let mut f = breed::Flock::new(o.seed ^ (t as u32 * 7919 + 1));
+                        (0..per).map(|_| f.breed().genome).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        println!("{} random sheep bred in {:.1} s", bred.len(), t0.elapsed().as_secs_f64());
+        let step = (bank.len() / m).max(1);
+        bank.into_iter().step_by(step).take(m).map(|g| (g, 1.0)).chain(bred.into_iter().map(|g| (g, 0.0))).collect()
+    };
+    let n = rated.len();
+    let feats: Vec<[f32; taste::NF]> = std::thread::scope(|sc| {
+        let chunks: Vec<_> = rated
+            .chunks(n.div_ceil(threads).max(1))
+            .enumerate()
+            .map(|(c, ch)| {
+                sc.spawn(move || ch.iter().enumerate().map(|(i, (g, _))| taste::features(g, (c * 100_000 + i) as u32 ^ o.seed)).collect::<Vec<_>>())
+            })
+            .collect();
+        chunks.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    let ys: Vec<f64> = rated.iter().map(|r| r.1 as f64).collect();
+    println!("{n} rated sheep measured in {:.1} s", t0.elapsed().as_secs_f64());
+    let nf = taste::NF;
+    let mut mean = [0f32; taste::NF];
+    let mut std = [0f32; taste::NF];
+    for i in 0..nf {
+        let m = feats.iter().map(|f| f[i] as f64).sum::<f64>() / n as f64;
+        let v = feats.iter().map(|f| (f[i] as f64 - m).powi(2)).sum::<f64>() / n as f64;
+        mean[i] = m as f32;
+        std[i] = v.sqrt().max(1e-6) as f32;
+    }
+    let z = |f: &[f32; taste::NF]| -> Vec<f64> { (0..nf).map(|i| (((f[i] - mean[i]) / std[i]) as f64).clamp(-4.0, 4.0)).collect() };
+    // ridge regression on rows `idx`: (Z'Z + lambda I) w = Z'y, with the bias unpenalised
+    let fit = |idx: &[usize]| -> (Vec<f64>, f64) {
+        let ym = idx.iter().map(|&i| ys[i]).sum::<f64>() / idx.len() as f64;
+        let mut a = vec![vec![0f64; nf + 1]; nf];
+        for &r in idx {
+            let zr = z(&feats[r]);
+            for i in 0..nf {
+                for j in 0..nf {
+                    a[i][j] += zr[i] * zr[j];
+                }
+                a[i][nf] += zr[i] * (ys[r] - ym);
+            }
+        }
+        for (i, row) in a.iter_mut().enumerate() {
+            row[i] += 0.05 * idx.len() as f64;
+        }
+        // Gauss-Jordan
+        for c in 0..nf {
+            let p = (c..nf).max_by(|&x, &y| a[x][c].abs().total_cmp(&a[y][c].abs())).unwrap();
+            a.swap(c, p);
+            let d = a[c][c];
+            for v in a[c].iter_mut() {
+                *v /= d;
+            }
+            for r in 0..nf {
+                if r != c {
+                    let k = a[r][c];
+                    let row_c = a[c].clone();
+                    for (v, rc) in a[r].iter_mut().zip(row_c) {
+                        *v -= k * rc;
+                    }
+                }
+            }
+        }
+        ((0..nf).map(|i| a[i][nf]).collect(), ym)
+    };
+    let corr = |p: &[f64], y: &[f64]| {
+        let (mp, my) = (p.iter().sum::<f64>() / p.len() as f64, y.iter().sum::<f64>() / y.len() as f64);
+        let num: f64 = p.iter().zip(y).map(|(a, b)| (a - mp) * (b - my)).sum();
+        let den = (p.iter().map(|a| (a - mp).powi(2)).sum::<f64>() * y.iter().map(|b| (b - my).powi(2)).sum::<f64>()).sqrt();
+        num / den.max(1e-12)
+    };
+    // five-fold cross-validation
+    let (mut pred, mut truth) = (Vec::new(), Vec::new());
+    for k in 0..5 {
+        let train: Vec<usize> = (0..n).filter(|i| i % 5 != k).collect();
+        let (w, b) = fit(&train);
+        for i in (0..n).filter(|i| i % 5 == k) {
+            pred.push(b + z(&feats[i]).iter().zip(&w).map(|(a, b)| a * b).sum::<f64>());
+            truth.push(ys[i]);
+        }
+    }
+    let all: Vec<usize> = (0..n).collect();
+    let (w, b) = fit(&all);
+    println!("cross-validated correlation with ln(1 + rating): {:.3}", corr(&pred, &truth));
+    for i in 0..nf {
+        let single: Vec<f64> = feats.iter().map(|f| f[i] as f64).collect();
+        println!("  {:11} mean {:7.4} std {:7.4} weight {:+.4}  (alone: r {:+.3})", taste::NAMES[i], mean[i], std[i], w[i], corr(&single, &ys));
+    }
+    let f = |v: &[f32]| v.iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>().join(", ");
+    println!("mean: [{}],", f(&mean));
+    println!("std: [{}],", f(&std));
+    println!("w: [{}],", f(&w.iter().map(|&x| x as f32).collect::<Vec<_>>()));
+    println!("bias: {b:.4}");
+}
+
 fn main() {
     if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
         eprintln!("fleece: this CPU lacks AVX2 / FMA");
@@ -752,5 +930,6 @@ fn main() {
         Mode::Frames => app::headless(&o),
         Mode::Bench => bench(&o),
         Mode::Video => app::video(&o),
+        Mode::TasteFit => tastefit(&o),
     }
 }

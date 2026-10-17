@@ -26,7 +26,6 @@ pub const SDL_MOUSEWHEEL: u32 = 0x403;
 pub const SDL_WINDOWEVENT_SIZE_CHANGED: u8 = 6;
 
 pub const K_ESCAPE: i32 = 27;
-pub const K_SPACE: i32 = 32;
 pub const K_RIGHT: i32 = 0x4000_004F;
 pub const K_LEFT: i32 = 0x4000_0050;
 pub const K_DOWN: i32 = 0x4000_0051;

@@ -729,7 +729,7 @@ impl Gpu {
         let n = self.glow_levels.len();
         unsafe {
             gl.glUseProgram(p);
-            gl.glProgramUniform1f(p, l[3], 0.35);
+            gl.glProgramUniform1f(p, l[3], 0.18);
             // the chain sums every level: share the strength among them
             gl.glProgramUniform1f(p, l[4], self.glow * 1.5 / n as f32);
             let (mut src, mut sw, mut sh) = (self.out, self.w, self.h);

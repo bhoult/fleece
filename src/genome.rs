@@ -56,6 +56,8 @@ pub struct Motion {
     pub vars: Vec<VarUse>,
     pub c: Affine,
     pub post: Affine,
+    /// added by fleece (motion for every sheep), played only while that is on
+    pub extra: bool,
 }
 
 impl Motion {
@@ -80,10 +82,11 @@ impl Motion {
 }
 
 impl Xform {
-    /// The xform with its motion applied at loop phase `blend` (0..1).
-    pub fn moved(&self, blend: f32) -> Xform {
+    /// The xform with its motion applied at loop phase `blend` (0..1); the
+    /// extra (fleece's own) motion only with `extra`.
+    pub fn moved(&self, blend: f32, extra: bool) -> Xform {
         let mut x = self.clone();
-        for m in &self.motion {
+        for m in self.motion.iter().filter(|m| extra || !m.extra) {
             let k = m.amount(blend);
             x.weight += m.weight * k;
             x.color += m.color * k;
@@ -127,14 +130,15 @@ impl Genome {
         self.xforms.iter().chain(self.fin.iter()).any(|x| !x.motion.is_empty())
     }
 
-    /// The genome with every motion element applied at loop phase `blend`.
-    pub fn moved(&self, blend: f32) -> Genome {
+    /// The genome with its motion elements applied at loop phase `blend`
+    /// (fleece's extra ones only with `extra`).
+    pub fn moved(&self, blend: f32, extra: bool) -> Genome {
         let mut g = self.clone();
         for x in g.xforms.iter_mut() {
-            *x = x.moved(blend);
+            *x = x.moved(blend, extra);
         }
         if let Some(f) = g.fin.as_mut() {
-            *f = f.moved(blend);
+            *f = f.moved(blend, extra);
         }
         g
     }
@@ -665,6 +669,9 @@ impl Genome {
                 for m in &x.motion {
                     let func = ["sin", "triangle", "hill"][m.func.min(2) as usize];
                     let _ = write!(s, "      <motion motion_frequency=\"{}\" motion_function=\"{func}\"", f(m.freq));
+                    if m.extra {
+                        let _ = write!(s, " fleece_extra=\"1\"");
+                    }
                     for (k, v) in [("weight", m.weight), ("color", m.color), ("color_speed", m.speed), ("opacity", m.opacity)] {
                         if v != 0.0 {
                             let _ = write!(s, " {k}=\"{}\"", f(v));

@@ -26,6 +26,26 @@ pub const LOOPS: u32 = 2;
 /// Sheep remembered for going back.
 const HISTORY: usize = 500;
 
+/// What fleece adds to the sheep as they play (all off: Electric Sheep's
+/// show). Each is a function of the show's own clock, so it runs on across
+/// loops and edges without a jump.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Look {
+    /// camera drift: a slow zoom, pan and turn
+    pub drift: bool,
+    /// palette drift: the hues turn
+    pub hue: bool,
+    /// play fleece's extra motion elements (motion for every sheep)
+    pub wobble: bool,
+    /// a 3D camera: 0 flat, 1 tilted in perspective, 2 that with depth of field
+    pub tilt: u8,
+    /// the music (all 0 without): loudness, bass, low mid, mid, high, beat
+    pub audio: [f32; 6],
+}
+
+/// Seconds (of animation time) for the palette's hues to turn once.
+const HUE_TURN: f64 = 96.0;
+
 #[derive(Clone)]
 enum Phase {
     Loop,
@@ -73,6 +93,8 @@ pub struct Status {
     pub flock: usize,
     pub tested: u32,
     pub rejected: u32,
+    /// its taste score, if measured
+    pub taste: Option<f32>,
 }
 
 impl Show {
@@ -83,13 +105,13 @@ impl Show {
         (flock.genebank, flock.bank_weight) = genebank;
         for (g, rating) in saved {
             let id = flock.next_id();
-            flock.add(Sheep { genome: g, rating, id });
+            flock.add(Sheep::new(g, rating, id));
         }
         let mut queued: VecDeque<Sheep> = play
             .into_iter()
             .map(|g| {
                 let id = flock.next_id();
-                let s = Sheep { genome: g, rating: 1, id };
+                let s = Sheep::new(g, 1, id);
                 flock.add(s.clone());
                 s
             })
@@ -274,7 +296,14 @@ impl Show {
         };
         s.rating += v;
         let id = s.id;
-        self.flock.lock().unwrap().vote(id, v);
+        // the taste learns from the vote (sheep from the flock file get measured now)
+        let mut f = self.flock.lock().unwrap();
+        if s.taste.is_none() {
+            let seed = f.seed();
+            s.measure(&f.taste, seed);
+        }
+        f.vote(id, v, s.taste.map(|t| t.0));
+        drop(f);
         if v < 0 {
             if matches!(self.phase, Phase::Edge { .. }) {
                 self.pending = Some(1);
@@ -284,12 +313,13 @@ impl Show {
         }
     }
 
-    /// The genome `off` seconds from now, and the angle to turn it by.
-    fn genome_at(&self, off: f64) -> (Genome, f32) {
+    /// The genome `off` seconds from now, and the angle to turn it by
+    /// (fleece's extra motion played with `wobble`).
+    fn genome_at(&self, off: f64, wobble: bool) -> (Genome, f32) {
         let phase = ((self.turn + off) / LOOP_SECS).fract();
         let angle = (2.0 * std::f64::consts::PI * phase) as f32;
         // flam3's sheep_loop / sheep_edge: motion elements first, at the loop's phase
-        let moved = |g: &Genome| if g.has_motion() { g.moved(phase as f32) } else { g.clone() };
+        let moved = |g: &Genome| if g.has_motion() { g.moved(phase as f32, wobble) } else { g.clone() };
         match &self.phase {
             Phase::Loop => (moved(&self.cur.genome), angle),
             Phase::Edge { a, b } => {
@@ -304,13 +334,15 @@ impl Show {
     }
 
     /// `n` time samples spread over `shutter` seconds around now, for a
-    /// `w` x `h` histogram; returns the middle genome too (for the tone map).
-    pub fn samples(&self, n: usize, shutter: f64, w: u32, h: u32, out: &mut Vec<Sample>) -> Genome {
+    /// `w` x `h` histogram, dressed in `look`; returns the middle genome too
+    /// (for the tone map).
+    pub fn samples(&self, n: usize, shutter: f64, w: u32, h: u32, look: &Look, out: &mut Vec<Sample>) -> Genome {
         out.resize(n.max(1), Sample::default());
         let mut mid = None;
         for (i, s) in out.iter_mut().enumerate() {
             let off = if n > 1 { (i as f64 / (n - 1) as f64 - 0.5) * shutter } else { 0.0 };
-            let (g, angle) = self.genome_at(off);
+            let (mut g, angle) = self.genome_at(off, look.wobble);
+            dress(&mut g, self.turn + off, look);
             g.sample(angle, w, h, s);
             if i == n / 2 {
                 mid = Some(g);
@@ -321,13 +353,11 @@ impl Show {
 
     pub fn status(&self) -> Status {
         let f = self.flock.lock().unwrap();
-        let (g, id, rating, edge) = match &self.phase {
-            Phase::Loop => (&self.cur.genome, self.cur.id, self.cur.rating, None),
-            Phase::Edge { .. } => {
-                let n = self.next.as_ref().unwrap();
-                (&n.genome, n.id, n.rating, Some((self.seg / LOOP_SECS) as f32))
-            }
+        let (s, edge) = match &self.phase {
+            Phase::Loop => (&self.cur, None),
+            Phase::Edge { .. } => (self.next.as_ref().unwrap(), Some((self.seg / LOOP_SECS) as f32)),
         };
+        let (g, id, rating) = (&s.genome, s.id, s.rating);
         Status {
             name: g.name.clone(),
             nick: g.nick.clone(),
@@ -339,6 +369,7 @@ impl Show {
             flock: f.sheep.len(),
             tested: f.tested,
             rejected: f.rejected,
+            taste: s.taste.map(|t| t.1),
         }
     }
 
@@ -355,9 +386,11 @@ impl Show {
         vec![both, ids(&n.genome)]
     }
 
-    /// The genome on screen now (for saving).
-    pub fn current(&self) -> Genome {
-        self.genome_at(0.0).0
+    /// The genome on screen now (for saving), as `look` shows it.
+    pub fn current(&self, look: &Look) -> Genome {
+        let (mut g, _) = self.genome_at(0.0, look.wobble);
+        dress(&mut g, self.turn, look);
+        g
     }
 }
 
@@ -370,7 +403,57 @@ impl Drop for Show {
     }
 }
 
-/// Keeps a tested sheep ready, and breeds mutations on request (first).
+/// The look's changes to a genome `t` seconds into the show.
+fn dress(g: &mut Genome, t: f64, look: &Look) {
+    use std::f64::consts::TAU;
+    let wave = |period: f64, phase: f64| (TAU * t / period + phase).sin() as f32;
+    if look.drift {
+        // zoom in by up to a third and back, pan by a tenth of the picture,
+        // turn a few degrees: periods that never line up, slower than a loop
+        let zoom = 0.5 * (1.0 - wave(29.0, 1.3));
+        g.scale *= (0.28 * zoom).exp();
+        let (px, py) = (0.10 * wave(47.0, 0.0), 0.07 * wave(37.0, 1.0));
+        g.center[0] += px / g.scale;
+        g.center[1] += py / g.scale;
+        g.rotate += 5.0 * wave(61.0, 2.0);
+    }
+    let [loud, bass, _lowmid, mid, high, beat] = look.audio;
+    if look.hue || mid > 0.0 {
+        let turn = if look.hue { (t / HUE_TURN).fract() as f32 } else { 0.0 };
+        let dh = 6.0 * (turn + 0.04 * mid);
+        for c in g.palette.iter_mut() {
+            let mut v = crate::genome::rgb2hsv(*c);
+            v[0] = (v[0] + dh).rem_euclid(6.0);
+            *c = crate::genome::hsv2rgb(v);
+        }
+    }
+    if look.audio != [0.0; 6] {
+        // the bass and the beats push the camera in; each band swells some xforms
+        g.scale *= 1.0 + 0.05 * bass + 0.07 * beat;
+        let bands = [bass, look.audio[2], mid, high];
+        for (i, x) in g.xforms.iter_mut().enumerate().filter(|(_, x)| x.animate) {
+            x.weight *= 1.0 + 0.6 * (bands[i % 4] - 0.4);
+        }
+        g.brightness *= 1.0 + 0.25 * loud;
+    }
+    if look.tilt > 0 {
+        // the flame as a plane leaning back, swaying a little; the zoom keeps it filling the frame
+        let pitch = 0.75 + 0.12 * wave(43.0, 0.5);
+        g.cam = crate::genome::Cam3 {
+            pitch,
+            yaw: 0.15 * wave(53.0, 2.5),
+            persp: 0.35,
+            zpos: 0.0,
+            dof: if look.tilt > 1 { 0.25 } else { 0.0 },
+        };
+        g.scale *= 1.0 / pitch.cos().max(0.3);
+    }
+}
+
+/// New sheep the breeder keeps ready (a few skips in a row need no wait).
+const READY: usize = 2;
+
+/// Keeps tested sheep ready, and breeds mutations on request (first).
 fn breed_loop(
     flock: Arc<Mutex<Flock>>,
     ready: Arc<Mutex<VecDeque<Sheep>>>,
@@ -380,32 +463,50 @@ fn breed_loop(
 ) {
     while !quit.load(Ordering::Acquire) {
         let parent = mut_req.lock().unwrap().take();
-        if parent.is_none() && !ready.lock().unwrap().is_empty() {
+        if parent.is_none() && ready.lock().unwrap().len() >= READY {
             std::thread::sleep(std::time::Duration::from_millis(20));
             continue;
         }
-        // conceive under the lock, test outside it (votes stay responsive)
+        // conceive under the lock, test outside it (votes stay responsive);
+        // a new sheep is the taste's pick of a few, a mutation the one asked for
         let (mut tested, mut rejected) = (0, 0);
-        let mut r = Rng::new(flock.lock().unwrap().seed());
-        let g = first_good(
-            || match &parent {
-                Some(p) => {
-                    let g = mutate(p, &mut r);
-                    (g, r.next_u32())
-                }
-                None => {
-                    let mut f = flock.lock().unwrap();
-                    (f.conceive(), f.seed())
-                }
-            },
-            &mut tested,
-            &mut rejected,
-        );
+        let (mut r, taste, use_taste) = {
+            let mut f = flock.lock().unwrap();
+            (Rng::new(f.seed()), f.taste.clone(), f.use_taste)
+        };
+        let n = if parent.is_none() && use_taste { crate::breed::TASTE_CANDIDATES } else { 1 };
+        let mut best: Option<Sheep> = None;
+        for _ in 0..n {
+            let g = first_good(
+                || match &parent {
+                    Some(p) => {
+                        let g = mutate(p, &mut r);
+                        (g, r.next_u32())
+                    }
+                    None => {
+                        let mut f = flock.lock().unwrap();
+                        (f.conceive(), f.seed())
+                    }
+                },
+                &mut tested,
+                &mut rejected,
+            );
+            let mut s = Sheep::new(g, 0, 0);
+            s.measure(&taste, r.next_u32());
+            if best.as_ref().is_none_or(|b| s.score() > b.score()) {
+                best = Some(s);
+            }
+            if quit.load(Ordering::Acquire) {
+                return;
+            }
+        }
+        let mut s = best.unwrap();
+        crate::breed::add_wobble(&mut s.genome, r.next_u32());
         let sheep = {
             let mut f = flock.lock().unwrap();
             f.tested += tested;
             f.rejected += rejected;
-            let s = Sheep { genome: g, rating: 0, id: f.next_id() };
+            s.id = f.next_id();
             f.add(s.clone());
             s
         };

@@ -7,7 +7,7 @@ use crate::hud::Hud;
 use crate::render::{Renderer, Stats};
 use crate::sample::Sample;
 use crate::sdl::{self, Window};
-use crate::show::{self, Show};
+use crate::show::{self, Look, Show};
 use crate::{Opts, png, tone_of};
 use std::time::Instant;
 
@@ -16,6 +16,41 @@ const BLUR_SAMPLES: usize = 64;
 const SHUTTER_FRAMES: f64 = 1.0;
 /// Animation speeds (Left / Right).
 const SPEEDS: [f64; 9] = [0.0625, 0.125, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
+
+/// fleece's own additions to the show (v2). `CLASSIC` is Electric Sheep's
+/// show as it was; `V2` the recommended set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fx {
+    /// glow: 0 off, 1 soft, 2 strong
+    pub glow: u8,
+    /// frames blended over time: 0 off, 1 short (a smoother picture), 2 long (trails)
+    pub trails: u8,
+    /// auto-exposure
+    pub levels: bool,
+    /// camera drift, palette drift, motion for every sheep
+    pub drift: bool,
+    pub hue: bool,
+    pub wobble: bool,
+    /// 3D camera: 0 flat, 1 tilted, 2 tilted with depth of field
+    pub tilt: u8,
+    /// the music drives the show
+    pub audio: bool,
+}
+
+impl Fx {
+    pub const CLASSIC: Fx = Fx { glow: 0, trails: 0, levels: false, drift: false, hue: false, wobble: false, tilt: 0, audio: false };
+    pub const V2: Fx = Fx { glow: 1, trails: 1, levels: true, drift: true, hue: false, wobble: true, tilt: 0, audio: false };
+}
+
+/// Frame blending's time constants (animation seconds) for short and long trails.
+const TRAILS: [f64; 3] = [0.0, 0.06, 0.35];
+/// Glow strengths (soft, strong).
+const GLOW: [f32; 3] = [0.0, 1.2, 2.4];
+/// Auto-exposure aims the 90th percentile of the lit pixels' luma here.
+const LEVEL_TARGET: f64 = 0.62;
+/// Supersampling choices (X cycles them; 0 is automatic: 2x while the
+/// histogram stays small enough to sit in the GPU's cache, else 1x).
+const SUPERSAMPLES: [u32; 4] = [0, 1, 2, 4];
 
 pub struct App {
     pub win: Window,
@@ -56,6 +91,14 @@ pub struct App {
     credit_secs: f64,
     /// milliseconds spent building the frame's samples (smoothed)
     pub build_ms: f64,
+    /// v2's effects, and the set V brings back after classic
+    pub fx: Fx,
+    fx_saved: Fx,
+    look: Look,
+    /// supersampling: 0 automatic, else buckets per pixel on each axis
+    supersample: u32,
+    /// auto-exposure: ln of the brightness multiplier
+    exposure: f64,
 }
 
 impl App {
@@ -70,10 +113,12 @@ impl App {
         });
         let (dw, dh) = if headless { (o.w, o.h) } else { win.drawable_size() };
         let (rw, rh) = o.render.unwrap_or_else(|| render_size(dw, dh, o.scale));
-        let gpu = Gpu::new(g, rw, rh).unwrap_or_else(|e| {
+        let mut gpu = Gpu::new(g, rw, rh).unwrap_or_else(|e| {
             eprintln!("fleece: shader: {e}");
             std::process::exit(1)
         });
+        let supersample = o.supersample.unwrap_or(0);
+        fit_histogram(&mut gpu, rw, rh, supersample);
         let vsync = !headless && win.set_vsync(true);
         let period = if headless { 1.0 / o.fps } else { 1.0 / win.refresh_hz().unwrap_or(60.0) };
         let mut r = Renderer::new(gpu, o.workers);
@@ -93,6 +138,14 @@ impl App {
             eprintln!("fleece: {} real sheep in the genebank ({})", genebank.0.len(), crate::genebank_source());
         }
         let show = Show::new(o.seed, saved, crate::load_files(&o.load), genebank);
+        {
+            let mut f = show.flock.lock().unwrap();
+            f.use_taste = o.taste;
+            // the window's taste carries on from last time; tests start from the prior
+            if !headless && !o.fresh {
+                f.taste = crate::taste::Taste::load(&crate::taste_path());
+            }
+        }
         // stderr: stdout carries the frames in --video
         eprintln!(
             "fleece: {} driver, {}x{} render ({:.0} Hz{}), {} MB video memory free, {} CPU workers, first sheep in {:.2} s: {}",
@@ -135,6 +188,11 @@ impl App {
             burn_credit: o.credit,
             credit_secs: o.credit_secs,
             build_ms: 0.0,
+            fx: o.fx,
+            fx_saved: if o.fx == Fx::CLASSIC { Fx::V2 } else { o.fx },
+            look: Look::default(),
+            supersample,
+            exposure: 0.0,
         }
     }
 
@@ -142,16 +200,22 @@ impl App {
     /// CPU on it, finish (tone-map) the previous one. Fixed `dispatches`
     /// overrides the adaptive budget (video).
     pub fn frame(&mut self, dt: f64, fixed: Option<u32>) -> Option<Stats> {
+        let dt_show = if self.paused { 0.0 } else { dt * SPEEDS[self.speed] };
         if !self.paused {
-            self.show.advance(dt * SPEEDS[self.speed]);
+            self.show.advance(dt_show);
         }
+        self.look = Look { drift: self.fx.drift, hue: self.fx.hue, wobble: self.fx.wobble, tilt: self.fx.tilt, audio: self.audio_levels() };
+        let tau = TRAILS[self.fx.trails as usize % 3];
+        self.r.decay = if tau > 0.0 { (-dt_show / tau).exp() as f32 } else { 0.0 };
+        self.r.gpu.glow = GLOW[self.fx.glow as usize % 3];
         let n = if self.blur { BLUR_SAMPLES } else { 1 };
         let shutter = SHUTTER_FRAMES / show::ES_FPS;
         let t_build = Instant::now();
         let (bw, bh) = (self.r.gpu.bw, self.r.gpu.bh);
-        let mid = self.show.samples(n, shutter, bw, bh, &mut self.samples);
+        let mid = self.show.samples(n, shutter, bw, bh, &self.look, &mut self.samples);
         self.build_ms += (t_build.elapsed().as_secs_f64() * 1000.0 - self.build_ms) * 0.1;
-        let tone = tone_of(&mid);
+        let mut tone = tone_of(&mid);
+        tone.exposure = if self.fx.levels { self.exposure.exp() as f32 } else { 1.0 };
         let ppu = mid.scale * bw as f32;
         // a shader with just this frame's variations (once compiled), and
         // the ones coming up compiling in the background
@@ -170,6 +234,7 @@ impl App {
         if fixed.is_none() && self.target_q.is_none() {
             self.adapt();
         }
+        self.levels(dt, mid.gamma);
         self.frame += 1;
         if let Some(s) = st {
             let k = 0.1;
@@ -180,6 +245,35 @@ impl App {
             self.quality = self.r.total_iters() / (self.rw as f64 * self.rh as f64);
         }
         st
+    }
+
+    /// Auto-exposure: moves the brightness so the lit pixels' 90th
+    /// percentile sits at LEVEL_TARGET, without saturating more than 4 % of
+    /// them, settling over a second or two.
+    fn levels(&mut self, dt: f64, gamma: f32) {
+        let Some(st) = self.r.gpu.frame_stats.take() else { return };
+        if !self.fx.levels {
+            self.exposure = 0.0;
+            return;
+        }
+        // a nearly black frame (an edge through darkness) says little
+        if st.lit < st.pixels / 500 {
+            return;
+        }
+        let p90 = st.quantile(0.9).max(0.02) as f64;
+        let sat = st.saturated as f64 / st.lit as f64;
+        let mut err = (LEVEL_TARGET / p90).ln();
+        if sat > 0.04 {
+            err = err.min(-0.5 * (sat / 0.04).ln());
+        }
+        // brightness b moves the picture about as b^(1 / gamma)
+        let step = (err * gamma.max(1.0) as f64 * dt * 1.5).clamp(-0.3, 0.3);
+        self.exposure = (self.exposure + step).clamp(-(8f64.ln()), 16f64.ln());
+    }
+
+    /// The music's levels for the look (zeros unless audio is on).
+    fn audio_levels(&mut self) -> [f32; 6] {
+        [0.0; 6]
     }
 
     /// Keeps the GPU's iterations at about 85 % of the display's frame time.
@@ -237,6 +331,10 @@ impl App {
             None => format!("LOOP {}/{}", st.loop_no.min(show::LOOPS), show::LOOPS),
         };
         let rating = if st.rating != 0 { format!("  RATING {:+}", st.rating) } else { String::new() };
+        let rating = match st.taste {
+            Some(t) => format!("{rating}  TASTE {:.0}%", t * 100.0),
+            None => rating,
+        };
         let g = |v: f64| if v >= 1e9 { format!("{:.2} G", v / 1e9) } else { format!("{:.0} M", v / 1e6) };
         vec![
             format!("SHEEP {}  {}  {}{}", st.id, st.name, phase, rating),
@@ -278,8 +376,35 @@ impl App {
                 ),
                 None => "~LEFT/RIGHT PREVIOUS/NEXT   UP LIKE   DOWN DISLIKE   M MUTATE   P PAUSE   R RECORD   -/+ SPEED".into(),
             },
+            self.fx_line(),
             "~C CPU   G GPU   B BLUR   E/1/2/4 ES 800X592/1080P/2K/4K   S SAVE   K CREDIT IN RECORDINGS   F FULLSCREEN   H HIDE   ESC QUIT".into(),
+            "~V CLASSIC/V2   O GLOW   T TRAILS   X SUPERSAMPLE   L LEVELS   D DRIFT   U HUE   W WOBBLE   3 3D   A AUDIO".into(),
         ]
+    }
+
+    /// The HUD line naming v2's effects and their state.
+    fn fx_line(&self) -> String {
+        let f = &self.fx;
+        if *f == Fx::CLASSIC {
+            return format!("CLASSIC (ELECTRIC SHEEP AS IT WAS)   SUPERSAMPLE {}", self.ss_label());
+        }
+        let on = |b: bool| if b { "ON" } else { "OFF" };
+        format!(
+            "V2   GLOW {}   TRAILS {}   SUPERSAMPLE {}   LEVELS {}   DRIFT {}   HUE {}   WOBBLE {}   3D {}   AUDIO {}",
+            ["OFF", "SOFT", "STRONG"][f.glow as usize % 3],
+            ["OFF", "SHORT", "LONG"][f.trails as usize % 3],
+            self.ss_label(),
+            if f.levels { format!("{:+.1}", self.exposure / 2f64.ln()) } else { "OFF".into() },
+            on(f.drift),
+            on(f.hue),
+            on(f.wobble),
+            ["OFF", "TILT", "TILT+DOF"][f.tilt as usize % 3],
+            on(f.audio),
+        )
+    }
+
+    fn ss_label(&self) -> String {
+        format!("{}X{}", self.r.gpu.os, if self.supersample == 0 { " (AUTO)" } else { "" })
     }
 
     /// Handles the window's events; false to quit.
@@ -303,8 +428,6 @@ impl App {
                     }
                     match k {
                         sdl::K_ESCAPE => return false,
-                        k if k == b'q' as i32 => return false,
-                        sdl::K_SPACE => self.show.skip(),
                         sdl::K_UP => {
                             self.show.vote(1);
                             self.save_flock();
@@ -315,31 +438,14 @@ impl App {
                         }
                         sdl::K_LEFT => self.show.back(),
                         sdl::K_RIGHT => self.show.skip(),
-                        k if k == b'-' as i32 || k == sdl::K_KP_MINUS => self.speed = self.speed.saturating_sub(1),
-                        k if k == b'=' as i32 || k == b'+' as i32 || k == sdl::K_KP_PLUS => {
-                            self.speed = (self.speed + 1).min(SPEEDS.len() - 1)
-                        }
+                        sdl::K_KP_MINUS => self.speed = self.speed.saturating_sub(1),
+                        sdl::K_KP_PLUS => self.speed = (self.speed + 1).min(SPEEDS.len() - 1),
                         sdl::K_F11 => self.toggle_fullscreen(),
-                        k if k == b'f' as i32 => self.toggle_fullscreen(),
-                        k if k == b'm' as i32 => self.show.mutate_next(),
-                        k if k == b'p' as i32 => self.paused = !self.paused,
-                        k if k == b'b' as i32 => self.blur = !self.blur,
-                        k if k == b'h' as i32 => self.hud = !self.hud,
-                        k if k == b'c' as i32 => {
-                            if self.r.workers() > 0 {
-                                self.r.use_cpu = !self.r.use_cpu || !self.r.use_gpu;
+                        // letters, digits and the rest arrive as their ASCII codes
+                        k if (32..127).contains(&k) => {
+                            if !self.key(k as u8 as char) {
+                                return false;
                             }
-                        }
-                        k if k == b'g' as i32 => self.r.use_gpu = !self.r.use_gpu || (!self.r.use_cpu || self.r.workers() == 0),
-                        k if k == b's' as i32 => self.save(),
-                        k if k == b'r' as i32 => self.toggle_recording(),
-                        k if k == b'k' as i32 => self.burn_credit = !self.burn_credit,
-                        k if k == b'1' as i32 => self.render_lines(1080),
-                        k if k == b'2' as i32 => self.render_lines(1440),
-                        k if k == b'4' as i32 => self.render_lines(2160),
-                        k if k == b'e' as i32 => {
-                            self.fixed = Some(crate::ES_SIZE);
-                            self.set_render(crate::ES_SIZE.0, crate::ES_SIZE.1);
                         }
                         _ => {}
                     }
@@ -394,14 +500,70 @@ impl App {
             }
             // no worker may still be writing into the histograms being freed
             self.r.quiesce();
-            let os = self.r.gpu.os;
-            if let Err(e) = self.r.gpu.resize(rw, rh, os) {
-                eprintln!("fleece: {e}");
-                std::process::exit(1)
-            }
+            fit_histogram(&mut self.r.gpu, rw, rh, self.supersample);
             self.rw = rw;
             self.rh = rh;
         }
+    }
+
+    /// X: the next supersampling setting (automatic, 1x, 2x, 4x).
+    fn cycle_supersample(&mut self) {
+        let i = SUPERSAMPLES.iter().position(|&s| s == self.supersample).unwrap_or(0);
+        self.supersample = SUPERSAMPLES[(i + 1) % SUPERSAMPLES.len()];
+        self.r.quiesce();
+        fit_histogram(&mut self.r.gpu, self.rw, self.rh, self.supersample);
+    }
+
+    /// A key, in the window or from --keys: false to quit.
+    pub fn key(&mut self, c: char) -> bool {
+        let next = |v: u8, n: u8| (v + 1) % n;
+        match c {
+            'q' => return false,
+            ' ' => self.show.skip(),
+            '-' => self.speed = self.speed.saturating_sub(1),
+            '=' | '+' => self.speed = (self.speed + 1).min(SPEEDS.len() - 1),
+            'f' => self.toggle_fullscreen(),
+            'm' => self.show.mutate_next(),
+            'p' => self.paused = !self.paused,
+            'b' => self.blur = !self.blur,
+            'h' => self.hud = !self.hud,
+            'c' => {
+                if self.r.workers() > 0 {
+                    self.r.use_cpu = !self.r.use_cpu || !self.r.use_gpu;
+                }
+            }
+            'g' => self.r.use_gpu = !self.r.use_gpu || (!self.r.use_cpu || self.r.workers() == 0),
+            's' => self.save(),
+            'r' => self.toggle_recording(),
+            'k' => self.burn_credit = !self.burn_credit,
+            '1' => self.render_lines(1080),
+            '2' => self.render_lines(1440),
+            '4' => self.render_lines(2160),
+            'e' => {
+                self.fixed = Some(crate::ES_SIZE);
+                self.set_render(crate::ES_SIZE.0, crate::ES_SIZE.1);
+            }
+            // v2's effects
+            'v' => {
+                if self.fx == Fx::CLASSIC {
+                    self.fx = self.fx_saved;
+                } else {
+                    self.fx_saved = self.fx;
+                    self.fx = Fx::CLASSIC;
+                }
+            }
+            'o' => self.fx.glow = next(self.fx.glow, 3),
+            't' => self.fx.trails = next(self.fx.trails, 3),
+            'x' => self.cycle_supersample(),
+            'l' => self.fx.levels = !self.fx.levels,
+            'd' => self.fx.drift = !self.fx.drift,
+            'u' => self.fx.hue = !self.fx.hue,
+            'w' => self.fx.wobble = !self.fx.wobble,
+            '3' => self.fx.tilt = next(self.fx.tilt, 3),
+            'a' => self.fx.audio = !self.fx.audio,
+            _ => {}
+        }
+        true
     }
 
     /// R: starts recording the show (the picture without the controls, with
@@ -465,9 +627,15 @@ impl App {
         if self.headless {
             return;
         }
-        let snap = self.show.flock.lock().unwrap().snapshot();
+        let (snap, taste) = {
+            let f = self.show.flock.lock().unwrap();
+            (f.snapshot(), f.taste.clone())
+        };
         if let Err(e) = crate::flam3::write_flock(&crate::flock_path(), &snap) {
             eprintln!("fleece: could not save the flock: {e}");
+        }
+        if let Err(e) = taste.save(&crate::taste_path()) {
+            eprintln!("fleece: could not save the taste: {e}");
         }
     }
 
@@ -479,7 +647,7 @@ impl App {
         let base = format!("{dir}/sheep-{t}-{}", self.show.cur.id);
         let rgb = self.r.gpu.read_rgb();
         let ok = std::fs::write(format!("{base}.png"), png::encode(self.rw, self.rh, &rgb)).is_ok()
-            && std::fs::write(format!("{base}.flam3"), self.show.current().to_flam3(self.rw, self.rh)).is_ok();
+            && std::fs::write(format!("{base}.flam3"), self.show.current(&self.look).to_flam3(self.rw, self.rh)).is_ok();
         println!("{} {base}.png / .flam3", if ok { "saved" } else { "could not save" });
     }
 }
@@ -571,6 +739,31 @@ fn stamp(rgb: &mut [u8], w: usize, h: usize, lines: &[String], fade: f32) {
     }
 }
 
+/// Sizes the histogram for a `rw` x `rh` picture at supersampling `ss` (0:
+/// automatic), stepping down when the video memory runs short.
+pub fn fit_histogram(gpu: &mut Gpu, rw: u32, rh: u32, ss: u32) {
+    let mut os = match ss {
+        // 2x while the histogram (16 bytes a bucket) fits the GPU's cache;
+        // past that the scattered atomics slow to memory speed
+        0 if (rw * 2) as u64 * (rh * 2) as u64 * 16 <= 40 << 20 => 2,
+        0 => 1,
+        s => s.clamp(1, 4),
+    };
+    loop {
+        match gpu.resize(rw, rh, os) {
+            Ok(()) => return,
+            Err(e) if os > 1 => {
+                eprintln!("fleece: {e}; trying {}x supersampling", os / 2);
+                os /= 2;
+            }
+            Err(e) => {
+                eprintln!("fleece: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
+}
+
 fn render_size(dw: u32, dh: u32, scale: f32) -> (u32, u32) {
     let s = if scale > 0.0 { scale } else { (1080.0 / dh as f32).min(1.0) };
     (((dw as f32 * s).round() as u32).max(64), ((dh as f32 * s).round() as u32).max(36))
@@ -613,15 +806,10 @@ pub fn headless(o: &Opts) {
                         let (w, h) = (app.rw, app.rh);
                         app.set_render(w * 3 / 4, h * 3 / 4);
                     }
-                    '1' => app.render_lines(1080),
-                    '2' => app.render_lines(1440),
-                    '4' => app.render_lines(2160),
-                    'e' => {
-                        app.fixed = Some(crate::ES_SIZE);
-                        app.set_render(crate::ES_SIZE.0, crate::ES_SIZE.1);
-                    }
                     'R' => app.toggle_recording(),
-                    _ => {}
+                    c => {
+                        app.key(c);
+                    }
                 }
             }
         }
@@ -697,6 +885,10 @@ pub fn video(o: &Opts) {
                     ' ' | '>' => app.show.skip(),
                     '<' => app.show.back(),
                     'm' => app.show.mutate_next(),
+                    // v2's effects (not sizes: the video keeps its frame)
+                    c if "votldu3aw".contains(c) => {
+                        app.key(c);
+                    }
                     _ => {}
                 }
             }
