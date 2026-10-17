@@ -6,6 +6,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 pub const SDL_INIT_VIDEO: u32 = 0x20;
 pub const SDL_INIT_EVENTS: u32 = 0x4000;
+const SDL_INIT_AUDIO: u32 = 0x10;
+const AUDIO_S16LSB: u16 = 0x8010;
 pub const SDL_WINDOW_FULLSCREEN_DESKTOP: u32 = 0x1001;
 pub const SDL_WINDOW_OPENGL: u32 = 0x2;
 pub const SDL_WINDOW_HIDDEN: u32 = 0x8;
@@ -80,6 +82,12 @@ impl Event {
 
 unsafe extern "C" {
     fn SDL_Init(flags: u32) -> c_int;
+    fn SDL_InitSubSystem(flags: u32) -> c_int;
+    fn SDL_QuitSubSystem(flags: u32);
+    fn SDL_OpenAudioDevice(device: *const c_char, iscapture: c_int, desired: *const AudioSpec, obtained: *mut AudioSpec, allowed: c_int) -> u32;
+    fn SDL_PauseAudioDevice(dev: u32, pause: c_int);
+    fn SDL_CloseAudioDevice(dev: u32);
+    fn SDL_GetCurrentAudioDriver() -> *const c_char;
     fn SDL_Quit();
     fn SDL_GetError() -> *const c_char;
     fn SDL_SetHint(name: *const c_char, value: *const c_char) -> c_int;
@@ -100,6 +108,84 @@ unsafe extern "C" {
     fn SDL_ShowCursor(toggle: c_int) -> c_int;
     fn SDL_GetWindowDisplayIndex(win: *mut c_void) -> c_int;
     fn SDL_GetCurrentDisplayMode(index: c_int, mode: *mut DisplayMode) -> c_int;
+}
+
+/// SDL's audio callback: fill `len` bytes at `stream`.
+pub type AudioCallback = unsafe extern "C" fn(user: *mut c_void, stream: *mut u8, len: c_int);
+
+#[repr(C)]
+struct AudioSpec {
+    freq: c_int,
+    format: u16,
+    channels: u8,
+    silence: u8,
+    samples: u16,
+    padding: u16,
+    size: u32,
+    callback: Option<AudioCallback>,
+    userdata: *mut c_void,
+}
+
+/// A sound output: SDL calls the callback for 16-bit stereo on its own audio
+/// thread, which it runs at real-time priority where the system allows
+/// (RealtimeKit), ahead of everything else on a busy machine.
+pub struct AudioOut {
+    id: u32,
+}
+
+impl AudioOut {
+    /// Opens the default output at `rate`, `frames` per callback, playing at once.
+    ///
+    /// # Safety
+    /// `user` must stay valid, and `callback` safe to call with it from
+    /// another thread, until the AudioOut is dropped.
+    pub unsafe fn open(rate: u32, frames: u16, callback: AudioCallback, user: *mut c_void) -> Result<AudioOut, String> {
+        unsafe {
+            SDL_SetHint(c"SDL_THREAD_FORCE_REALTIME_TIME_CRITICAL".as_ptr(), c"1".as_ptr());
+            SDL_SetHint(c"SDL_AUDIO_DEVICE_APP_NAME".as_ptr(), c"fleece".as_ptr());
+            SDL_SetHint(c"SDL_AUDIO_DEVICE_STREAM_NAME".as_ptr(), c"music".as_ptr());
+            if SDL_InitSubSystem(SDL_INIT_AUDIO) != 0 {
+                return Err(error("SDL audio"));
+            }
+            let want = AudioSpec {
+                freq: rate as c_int,
+                format: AUDIO_S16LSB,
+                channels: 2,
+                silence: 0,
+                samples: frames,
+                padding: 0,
+                size: 0,
+                callback: Some(callback),
+                userdata: user,
+            };
+            let mut have = AudioSpec { callback: None, userdata: std::ptr::null_mut(), ..want };
+            // no allowed changes: SDL converts to the device's format itself
+            let id = SDL_OpenAudioDevice(std::ptr::null(), 0, &want, &mut have, 0);
+            if id == 0 {
+                let e = error("SDL_OpenAudioDevice");
+                SDL_QuitSubSystem(SDL_INIT_AUDIO);
+                return Err(e);
+            }
+            SDL_PauseAudioDevice(id, 0);
+            Ok(AudioOut { id })
+        }
+    }
+
+    /// The audio driver in use (pipewire, pulseaudio, alsa...).
+    pub fn driver(&self) -> String {
+        let d = unsafe { SDL_GetCurrentAudioDriver() };
+        if d.is_null() { "?".into() } else { unsafe { CStr::from_ptr(d) }.to_string_lossy().into_owned() }
+    }
+}
+
+impl Drop for AudioOut {
+    /// Closes the device (SDL waits for a callback under way), then the subsystem.
+    fn drop(&mut self) {
+        unsafe {
+            SDL_CloseAudioDevice(self.id);
+            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        }
+    }
 }
 
 #[repr(C)]

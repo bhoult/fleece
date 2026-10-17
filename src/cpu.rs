@@ -607,15 +607,16 @@ fn worker(id: usize, sh: Arc<Shared>) {
     }
 }
 
-/// Nice 5: the workers take every idle cycle but yield to the render thread
-/// and to the desktop.
+/// Nice 10: the workers take every idle cycle but yield to the render thread,
+/// the sound (the music's player, the sound server's client threads) and the
+/// desktop.
 fn lower_priority() {
     unsafe extern "C" {
         fn setpriority(which: i32, who: u32, prio: i32) -> i32;
         fn gettid() -> i32;
     }
     unsafe {
-        setpriority(0, gettid() as u32, 5);
+        setpriority(0, gettid() as u32, 10);
     }
 }
 

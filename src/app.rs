@@ -1259,6 +1259,8 @@ pub fn window(o: &Opts) {
         app.frame(app.step_time(dt), None);
         app.present();
     }
+    // the music's sound device closes before the window takes SDL down
+    app.music = None;
     app.stop_recording();
     app.r.idle();
     app.save_flock();

@@ -3760,25 +3760,71 @@ fn to_i16(x: f32) -> i16 {
 
 // ---------------------------------------------------------------- the outside
 
-/// Music playing through the speakers (pacat), generated on a thread of its own.
+/// Music playing through the speakers: made in the sound device's own
+/// callback (SDL's real-time audio thread), or failing that on a thread of
+/// its own writing to pacat.
 pub struct Player {
     want: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-    /// frames written so far (the tests watch it)
+    /// frames made so far (the tests watch it)
     #[cfg_attr(not(test), allow(dead_code))]
     frames: Arc<AtomicU64>,
     child: Option<Child>,
     thread: Option<JoinHandle<()>>,
+    /// the sound device and what its callback plays from
+    device: Option<(crate::sdl::AudioOut, Box<Live>)>,
+}
+
+/// What the device's callback plays: the mix (and its float buffer), and
+/// what the app asks of it.
+struct Live {
+    mix: std::sync::Mutex<(Mix, Vec<f32>)>,
+    want: Arc<AtomicUsize>,
+    frames: Arc<AtomicU64>,
+}
+
+/// SDL's callback: the next `len` bytes of 16-bit stereo, made now.
+unsafe extern "C" fn fill(user: *mut std::ffi::c_void, stream: *mut u8, len: std::ffi::c_int) {
+    // SAFETY: `user` is the Live the Player keeps boxed until the device is
+    // closed; SDL hands a buffer of `len` bytes, aligned for its samples
+    let (live, out) = unsafe { (&*(user as *const Live), std::slice::from_raw_parts_mut(stream as *mut i16, len.max(0) as usize / 2)) };
+    let mut g = live.mix.lock().unwrap_or_else(|e| e.into_inner());
+    let (mix, buf) = &mut *g;
+    buf.resize(out.len(), 0.0);
+    mix.want = live.want.load(Ordering::Relaxed);
+    mix.render(buf);
+    for (o, &x) in out.iter_mut().zip(buf.iter()) {
+        *o = to_i16(x);
+    }
+    live.frames.fetch_add(out.len() as u64 / 2, Ordering::Relaxed);
 }
 
 impl Player {
-    /// Starts playing `GENRES[genre]` (index wraps), seeded. Error if pacat is missing / exits at once.
+    /// Starts playing `GENRES[genre]` (index wraps), seeded: through the
+    /// sound device, else pacat. Error if neither plays.
     pub fn start(genre: usize, seed: u64) -> Result<Player, String> {
-        Player::spawn(
-            &["pacat", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100"],
-            genre,
-            seed,
-        )
+        Player::device(genre, seed).or_else(|e| {
+            eprintln!("fleece: music through pacat ({e})");
+            Player::spawn(
+                &["pacat", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=200"],
+                genre,
+                seed,
+            )
+        })
+    }
+
+    /// Plays through SDL's default output, made in its callback (4096 frames,
+    /// 85 ms, at a time). With PulseAudio's (PipeWire's) server SDL runs the
+    /// callback on a real-time thread (round robin, priority 20 here).
+    fn device(genre: usize, seed: u64) -> Result<Player, String> {
+        let genre = genre % GENRES.len();
+        let want = Arc::new(AtomicUsize::new(genre));
+        let frames = Arc::new(AtomicU64::new(0));
+        let live = Box::new(Live { mix: std::sync::Mutex::new((Mix::new(genre, seed), Vec::new())), want: want.clone(), frames: frames.clone() });
+        // SAFETY: the Live is boxed (it never moves) and dropped only after the device
+        let out = unsafe { crate::sdl::AudioOut::open(RATE, 4096, fill, &*live as *const Live as *mut std::ffi::c_void)? };
+        eprintln!("fleece: music through {}", out.driver());
+        Ok(Player { want, stop: Arc::new(AtomicBool::new(false)), frames, child: None, thread: None, device: Some((out, live)) })
     }
 
     /// The same, writing to `cmd`'s stdin.
@@ -3821,7 +3867,7 @@ impl Player {
                 return Err(format!("music thread: {e}"));
             }
         };
-        let mut p = Player { want, stop, frames, child: Some(child), thread: Some(thread) };
+        let mut p = Player { want, stop, frames, child: Some(child), thread: Some(thread), device: None };
         // a sound server that is not there shows as the player exiting at once
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_millis(300) {
@@ -3849,6 +3895,11 @@ impl Drop for Player {
     /// Stops the generator, kills and reaps the player (its pipe closing ends a
     /// blocked write), then joins the thread.
     fn drop(&mut self) {
+        // the device first (no callback runs after), then what it played from
+        if let Some((out, live)) = self.device.take() {
+            drop(out);
+            drop(live);
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(c) = &mut self.child {
             let _ = c.kill();
@@ -4045,3 +4096,30 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    /// The sound device path, against SDL's disk driver (no sound): it makes
+    /// music in the callback and closes cleanly.
+    #[test]
+    #[ignore]
+    fn device_plays_to_disk() {
+        let path = format!("{}/.cache/fleece-work/music/disk.raw", std::env::var("HOME").unwrap());
+        // SAFETY: set before SDL starts, on the test's own thread
+        unsafe {
+            std::env::set_var("SDL_AUDIODRIVER", "disk");
+            std::env::set_var("SDL_DISKAUDIOFILE", &path);
+        }
+        let p = Player::device(1, 3).expect("device");
+        std::thread::sleep(Duration::from_millis(1500));
+        let frames = p.frames.load(Ordering::Relaxed);
+        drop(p);
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&path);
+        assert!(frames > RATE as u64, "made {frames} frames");
+        assert!(bytes > 4 * RATE as u64, "wrote {bytes} bytes");
+    }
+}
+
