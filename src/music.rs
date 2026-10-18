@@ -11989,7 +11989,14 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
 fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
     let ch = &mut s.ch;
     let (click, drive) = (r.range(0.1, 0.3), r.range(0.4, 1.2));
-    ch[CH_KICK].drums = vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), click, drive)];
+    // the drums recorded when the samples are in, each kit's kinds in the
+    // channel's order: the 909 kick (the Electronic kit's, as `kit_kick_909`)
+    // through the synthesiser's drive, the 808's clap and snare, its hats (as
+    // `kit_hats_808`), its clave (the rim click), toms and the maracas, and a
+    // splash for the crash (-30 dB in 0.84 s, the synthesiser's crash 1.0 s;
+    // the kits' crashes ring 2.3-2.5 s)
+    let kick_ = vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), click, drive)];
+    ch[CH_KICK].drums = rec_kick_driven(kick_, samples::drum("Electronic", 35));
     let clap = DrumPatch {
         noise: 1.0,
         nmode: 1,
@@ -12016,11 +12023,12 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.7,
         ..DRUM
     };
-    ch[CH_SNARE].drums = vec![clap, snare];
-    ch[CH_HAT].drums = hats(r, 8000.0, 0.045, 0.35, 0.45, 0.8);
-    ch[CH_PERC].drums = percs(r);
-    ch[CH_CYM].drums = crash(r);
-    ch[CH_BASS].patch = if bass_style == 0 {
+    let d808 = |k: u8| samples::drum("TR-808", k);
+    ch[CH_SNARE].drums = rec_kit(vec![clap, snare], &[d808(39), d808(38)]);
+    ch[CH_HAT].drums = rec_kit(hats(r, 8000.0, 0.045, 0.35, 0.45, 0.8), &[d808(42), d808(44)]);
+    ch[CH_PERC].drums = rec_kit(percs(r), &[d808(75), d808(43), d808(45), d808(48), d808(70)]);
+    ch[CH_CYM].drums = rec_kit(crash(r), &[d808(55)]);
+    let bass = if bass_style == 0 {
         Patch {
             wave: if r.chance(0.6) { Wave::Saw } else { Wave::Square },
             poles4: true,
@@ -12055,7 +12063,16 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
             ..PATCH
         }
     };
+    // recorded: the 303 as `bass_acid_saw` and `bass_acid_sq` have it, the
+    // rolling bass Synth Bass 2 under its filter
+    let rec_bass = match (bass_style, bass.wave) {
+        (0, Wave::Saw) => "Synth Bass 3",
+        (0, _) => "Square Lead",
+        _ => "Synth Bass 2",
+    };
+    ch[CH_BASS].patch = rec_through(bass, samples::gm(rec_bass), 40.0);
     ch[CH_BASS].mono = true;
+    // the stabs: the synthesiser's (as `stab_saw` is)
     ch[CH_KEYS].patch = Patch {
         wave: Wave::Saw,
         unison: 2,
@@ -12073,7 +12090,7 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.3,
         ..PATCH
     };
-    ch[CH_PAD].patch = Patch {
+    let pad = Patch {
         wave: Wave::Saw,
         unison: 3,
         detune: r.range(10.0, 18.0),
@@ -12090,7 +12107,9 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.16,
         ..PATCH
     };
-    // the hook: a short bright pluck
+    // recorded: Synth Strings 1 (two detuned saw stacks) under its filter
+    ch[CH_PAD].patch = rec_through(pad, samples::gm("Synth Strings 1"), 60.0);
+    // the hook: a short bright pluck (the synthesiser's, as `pluck_hook` is)
     ch[CH_LEAD].patch = Patch {
         wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
         pw: 0.3,
@@ -12135,7 +12154,13 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
 
 fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
     let ch = &mut s.ch;
-    ch[CH_KICK].drums = vec![kick(r, (170.0, 220.0), (50.0, 58.0), (0.45, 0.6), 0.2, 0.5)];
+    // the drums recorded when the samples are in, each kit's kinds in the
+    // channel's order: the Power kit's kick (an 80s kick: of the kicks the
+    // nearest in decay, its peak at 60 Hz as the synthesiser's), the Room
+    // kit's snares (the gated reverb on top), the Electronic kit's hats, the
+    // 808's percussion as techno has it, a splash for the crash
+    let kick_ = vec![kick(r, (170.0, 220.0), (50.0, 58.0), (0.45, 0.6), 0.2, 0.5)];
+    ch[CH_KICK].drums = rec_kit(kick_, &[samples::drum("Power", 36)]);
     let snare = DrumPatch {
         tone: 0.6,
         f0: 240.0,
@@ -12152,11 +12177,14 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.8,
         ..DRUM
     };
-    ch[CH_SNARE].drums = vec![snare, DrumPatch { ndec: 0.15, ..snare }];
-    ch[CH_HAT].drums = hats(r, 8500.0, 0.04, 0.3, 0.25, 0.75);
-    ch[CH_PERC].drums = percs(r);
-    ch[CH_CYM].drums = crash(r);
-    ch[CH_BASS].patch = Patch {
+    let d808 = |k: u8| samples::drum("TR-808", k);
+    let snares = [samples::drum("Room", 38), samples::drum("Room", 40)];
+    ch[CH_SNARE].drums = rec_kit(vec![snare, DrumPatch { ndec: 0.15, ..snare }], &snares);
+    let hats_ = [samples::drum("Electronic", 42), samples::drum("Electronic", 46)];
+    ch[CH_HAT].drums = rec_kit(hats(r, 8500.0, 0.04, 0.3, 0.25, 0.75), &hats_);
+    ch[CH_PERC].drums = rec_kit(percs(r), &[d808(75), d808(43), d808(45), d808(48), d808(70)]);
+    ch[CH_CYM].drums = rec_kit(crash(r), &[d808(55)]);
+    let bass = Patch {
         wave: Wave::Saw,
         sub: 0.3,
         cutoff: r.range(300.0, 600.0),
@@ -12171,8 +12199,10 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.6,
         ..PATCH
     };
+    // recorded: Synth Bass 2 (a synthesiser's bass, recorded) under its filter
+    ch[CH_BASS].patch = rec_through(bass, samples::gm("Synth Bass 2"), 40.0);
     ch[CH_BASS].mono = true;
-    ch[CH_PAD].patch = Patch {
+    let pad = Patch {
         wave: Wave::Saw,
         unison: 3,
         detune: r.range(12.0, 22.0),
@@ -12192,7 +12222,10 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.15,
         ..PATCH
     };
+    // recorded: Polysynth (a stack of detuned saws) under its filter
+    ch[CH_PAD].patch = rec_through(pad, samples::gm("Polysynth"), 62.0);
     let sq = r.chance(0.4);
+    // the arpeggio: the synthesiser's (as `arp_pluck` is)
     ch[CH_ARP].patch = Patch {
         wave: if sq { Wave::Square } else { Wave::Saw },
         pw: r.range(0.3, 0.5),
@@ -12208,7 +12241,7 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.3,
         ..PATCH
     };
-    ch[CH_LEAD].patch = Patch {
+    let lead = Patch {
         wave: if sq { Wave::Saw } else { Wave::Square },
         unison: 3,
         detune: r.range(6.0, 10.0),
@@ -12228,9 +12261,13 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.3,
         ..PATCH
     };
+    // recorded: Saw Lead or Square Lead, as `lead_saw` and `lead_square`
+    let rec_lead = if sq { "Saw Lead" } else { "Square Lead" };
+    ch[CH_LEAD].patch = rec_through(lead, samples::gm(rec_lead), 74.0);
     ch[CH_LEAD].mono = true;
-    // the second voice: a glassy FM tone
-    ch[CH_BELL].patch = Patch {
+    // the second voice: a glassy FM tone (recorded, as `glass_fm`: the FM
+    // electric piano)
+    let bell = Patch {
         filter: false,
         fm: r.range(0.8, 1.6),
         ratio: r.pick(&[2.0, 3.0, 1.0]),
@@ -12242,6 +12279,7 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.3,
         ..PATCH
     };
+    ch[CH_BELL].patch = rec(bell, samples::gm("FM Electric Piano"), 64.0);
     mix(&mut ch[CH_BELL], 0.3, r.range(-0.4, 0.4), 0.4, 0.35, 0.2);
     mix(&mut ch[CH_KICK], 0.8, 0.0, 0.0, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.4, 0.0, 0.15, 0.0, 0.0);
