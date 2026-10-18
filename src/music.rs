@@ -8175,7 +8175,7 @@ fn kit_bodhran_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_bodhran(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_bodhran_synth(r), &[(frame_drum(0), 4.7), (frame_drum(1), 4.7)])
+    rec_kit_db(kit_bodhran_synth(r), &[frame_drum(0, 4.7), frame_drum(1, 4.7)])
 }
 fn kit_frame_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let bass = kit_kick_frame_synth(r)[0];
@@ -8183,7 +8183,7 @@ fn kit_frame_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_frame(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_frame_synth(r), &[(frame_drum(0), 6.6), (frame_drum(1), 6.6)])
+    rec_kit_db(kit_frame_synth(r), &[frame_drum(0, 6.6), frame_drum(1, 6.6)])
 }
 /// Percussion: [spoons, a low and a high frame-drum stroke, finger cymbals, shaker].
 fn kit_bones_synth(r: &mut Rng) -> Vec<DrumPatch> {
@@ -8207,7 +8207,7 @@ fn kit_bones_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// The bones (castanets' recording), the frame drum's strokes, finger
 /// cymbals, a shaker.
 fn kit_bones(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_bones_synth(r), &[(samples::gm("Castanets"), -7.9), (frame_drum(1), 4.9), (frame_drum(2), 3.5), (finger_cymbals(), 7.1), (shaker_rec(0), -10.2)])
+    rec_kit_db(kit_bones_synth(r), &[(samples::gm("Castanets"), -7.9), frame_drum(1, 4.9), frame_drum(2, 3.5), finger_cymbals(7.1), shaker_rec(0, -10.2)])
 }
 
 fn band_tavern(r: &mut Rng, s: &Synth) -> Band {
@@ -11078,35 +11078,44 @@ fn harmonica_rec(art: &str) -> Option<u16> {
     samples::multi("harmonica", art).or_else(|| samples::multi("harmonica", other)).or_else(|| samples::gm("Harmonica"))
 }
 
-/// A shaker: 0 a short shake, 1 a long one (the CC0 large shaker's, the
-/// small one's having a handling rumble under it; else the kit's maracas
-/// and shaker).
-fn shaker_rec(kind: usize) -> Option<u16> {
-    match kind {
-        0 => samples::multi("shaker", "large_hit").or_else(|| samples::drum("Standard", 70)),
-        _ => samples::multi("shaker", "large").or_else(|| samples::drum("Standard", 82)),
+/// A CC0 multi's hit at its trim `db` (`rec_kit_db`'s), else `alt` (a
+/// fallback's, its trim unmeasured: none).
+fn cc0_or(instrument: &str, articulation: &str, db: f32, alt: Option<u16>) -> (Option<u16>, f32) {
+    match samples::multi(instrument, articulation) {
+        Some(id) => (Some(id), db),
+        None => (alt, 0.0),
     }
 }
 
-/// A tambourine: 0 a hit, 1 a shake (the CC0 one's, else the kit's).
-fn tambourine_rec(kind: usize) -> Option<u16> {
-    samples::multi("tambourine", if kind == 0 { "hit" } else { "shake" }).or_else(|| samples::drum("Standard", 54))
+/// A shaker: 0 a short shake, 1 a long one (the CC0 large shaker's, the
+/// small one's having a handling rumble under it; else the kit's maracas
+/// and shaker), at `db`.
+fn shaker_rec(kind: usize, db: f32) -> (Option<u16>, f32) {
+    match kind {
+        0 => cc0_or("shaker", "large_hit", db, samples::drum("Standard", 70)),
+        _ => cc0_or("shaker", "large", db, samples::drum("Standard", 82)),
+    }
+}
+
+/// A tambourine: 0 a hit, 1 a shake (the CC0 one's, else the kit's), at `db`.
+fn tambourine_rec(kind: usize, db: f32) -> (Option<u16>, f32) {
+    cc0_or("tambourine", if kind == 0 { "hit" } else { "shake" }, db, samples::drum("Standard", 54))
 }
 
 /// A frame drum's (or the bodhrán's) stroke: 0 the large drum's open hit,
 /// 1 its muted one (the bodhrán's high stroke), 2 the small drum's muted
-/// one; the CC0 frame drums', else a taiko's and the kit's toms'.
-fn frame_drum(kind: usize) -> Option<u16> {
+/// one; the CC0 frame drums' at `db`, else a taiko's and the kit's toms'.
+fn frame_drum(kind: usize, db: f32) -> (Option<u16>, f32) {
     match kind {
-        0 => samples::multi("frame_drum", "hit").or_else(|| samples::gm("Taiko Drum")),
-        1 => samples::multi("frame_drum", "muted").or_else(|| samples::drum("Standard", 45)),
-        _ => samples::multi("frame_drum", "small_muted").or_else(|| samples::drum("Standard", 48)),
+        0 => cc0_or("frame_drum", "hit", db, samples::gm("Taiko Drum")),
+        1 => cc0_or("frame_drum", "muted", db, samples::drum("Standard", 45)),
+        _ => cc0_or("frame_drum", "small_muted", db, samples::drum("Standard", 48)),
     }
 }
 
-/// Finger cymbals (else the kit's open triangle).
-fn finger_cymbals() -> Option<u16> {
-    samples::multi("finger_cymbals", "hit").or_else(|| samples::drum("Standard", 81))
+/// Finger cymbals at `db` (else the kit's open triangle).
+fn finger_cymbals(db: f32) -> (Option<u16>, f32) {
+    cc0_or("finger_cymbals", "hit", db, samples::drum("Standard", 81))
 }
 
 
@@ -11729,7 +11738,7 @@ fn kit_kick_frame_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_kick_frame_synth(r), &[(frame_drum(0), 8.1)])
+    rec_kit_db(kit_kick_frame_synth(r), &[frame_drum(0, 8.1)])
 }
 
 /// Snares and claps: [the main hit, a softer one for rolls and ghosts].
@@ -11852,7 +11861,7 @@ fn kit_shaker_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_shaker_synth(r), &[(shaker_rec(0), -9.2), (shaker_rec(1), -9.2)])
+    rec_kit_db(kit_shaker_synth(r), &[shaker_rec(0, -9.2), shaker_rec(1, -9.2)])
 }
 fn kit_tambourine_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -11871,7 +11880,7 @@ fn kit_tambourine_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_tambourine_synth(r), &[(tambourine_rec(0), 1.4), (tambourine_rec(1), 1.4)])
+    rec_kit_db(kit_tambourine_synth(r), &[tambourine_rec(0, 1.4), tambourine_rec(1, 1.4)])
 }
 fn kit_ride_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -11919,7 +11928,7 @@ fn kit_perc_hand_synth(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
     // a clave, the low and the open high conga, the low bongo, a shaker
     let std = |k: u8| samples::drum("Standard", k);
-    rec_kit_db(kit_perc_hand_synth(r), &[(std(75), -0.5), (std(64), 1.8), (std(63), 3.7), (std(61), 5.1), (shaker_rec(0), -10.2)])
+    rec_kit_db(kit_perc_hand_synth(r), &[(std(75), -0.5), (std(64), 1.8), (std(63), 3.7), (std(61), 5.1), shaker_rec(0, -10.2)])
 }
 fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
     // a cowbell, electronic toms, a woodblock
@@ -12002,7 +12011,7 @@ fn kit_spoons_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// The spoons (castanets' recording), the frame drum's strokes, finger
 /// cymbals, a shaker.
 fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_spoons_synth(r), &[(samples::drum("Standard", 85), -2.8), (frame_drum(1), 4.9), (frame_drum(2), 3.5), (finger_cymbals(), 7.1), (shaker_rec(0), -10.2)])
+    rec_kit_db(kit_spoons_synth(r), &[(samples::drum("Standard", 85), -2.8), frame_drum(1, 4.9), frame_drum(2, 3.5), finger_cymbals(7.1), shaker_rec(0, -10.2)])
 }
 
 // -- the genres' palettes (each role's tuned original comes on top)
@@ -12564,7 +12573,7 @@ fn sounds(g: usize, r: &mut Rng, s: &mut Synth) {
 /// high-mid toms, a shaker (ambient's and lo-fi's).
 fn rec_percs(v: Vec<DrumPatch>) -> Vec<DrumPatch> {
     let std = |k: u8| samples::drum("Standard", k);
-    rec_kit_db(v, &[(std(37), -1.0), (std(41), 6.3), (std(45), 6.3), (std(48), 6.3), (shaker_rec(0), -10.1)])
+    rec_kit_db(v, &[(std(37), -1.0), (std(41), 6.3), (std(45), 6.3), (std(48), 6.3), shaker_rec(0, -10.1)])
 }
 
 fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
@@ -12699,7 +12708,7 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.6,
         ..DRUM
     }];
-    ch[CH_HAT].drums = rec_kit_db(hat, &[(shaker_rec(0), -8.8)]);
+    ch[CH_HAT].drums = rec_kit_db(hat, &[shaker_rec(0, -8.8)]);
     mix(&mut ch[CH_PAD], 0.5, 0.0, 0.6, 0.0, 0.0);
     mix(&mut ch[CH_DRONE], 0.5, 0.0, 0.3, 0.0, 0.0);
     mix(&mut ch[CH_BELL], 0.4, r.range(-0.3, 0.3), 0.8, 0.4, 0.0);
