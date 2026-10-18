@@ -6222,7 +6222,7 @@ impl Song {
         // the form: (section, its part, how soon it goes when the piece runs long: 0 never)
         let rs = L_KEYS | L_PAD | L_BASS;
         let tunes = L_LEAD | L_ARP;
-        let harp = if r.chance(if style == MARIACHI_BOLERO { 0.85 } else { 0.6 }) { L_BELL } else { 0 };
+        let harp = if r.chance(if style == MARIACHI_BOLERO { 1.0 } else { 0.6 }) { L_BELL } else { 0 };
         let zap = if matches!(style, MARIACHI_SON | MARIACHI_HUAPANGO) { L_KICK } else { 0 };
         let claps = match style {
             MARIACHI_SON | MARIACHI_POLKA => L_SNARE,
@@ -6435,7 +6435,17 @@ impl Song {
             self.mariachi_bass(b, chords, next, hemi, vb, walk, hold[0] == 0);
         }
         if m & L_BELL != 0 {
-            self.mariachi_harp(b, chords, hemi, vb);
+            // a bolero's requinto runs from an eighth after the tune's last
+            // note in the bar, where it holds and nothing answers it
+            let bs = self.mc.bar_steps;
+            let run = if self.mc.style == MARIACHI_BOLERO && sec.kind != OUTRO {
+                let notes = self.mc.mel.iter().chain(&self.mc.ans);
+                let last = notes.filter(|n| n.step as u32 / bs == bi).map(|n| n.step as u32 % bs).max();
+                last.map_or(bs / 2, |l| (l / 2 + 1) * 2)
+            } else {
+                bs
+            };
+            self.mariachi_harp(b, chords, hemi, vb, run);
         }
         if sec.kind == OUTRO {
             self.mariachi_closing(s, b, m, dom);
@@ -6613,18 +6623,34 @@ impl Song {
     }
 
     /// The harp: its bass (the root, low) on the bar's accents, the chord's
-    /// tones climbing in eighths between (falling in the B groups; in a
-    /// bolero's, 16ths).
-    fn mariachi_harp(&mut self, b: &mut Bar, chords: [Harm; 2], hemi: bool, vb: bool) {
+    /// tones climbing in eighths between (a bolero's in 16ths), falling in
+    /// the B groups. From 16th `run` on, a run instead (the requinto's, where
+    /// the tune holds): down the chord-scale in 16th triplets into the next
+    /// bar, up in the B groups.
+    fn mariachi_harp(&mut self, b: &mut Bar, chords: [Harm; 2], hemi: bool, vb: bool, run: u32) {
         let (bs, beat, style) = (self.mc.bar_steps, self.mc.beat_steps, self.mc.style);
         let acc = if hemi { 4 } else { beat };
-        let q = if style == MARIACHI_BOLERO && vb { 1 } else { 2 };
+        let q = if style == MARIACHI_BOLERO { 1 } else { 2 };
         let lo = self.tonic_near(48) - 5;
         let tones = [self.arp_tones(chords[0], 55), self.arp_tones(chords[1], 55)];
         let roots = chords.map(|c| lo + (self.root + c.bass() - lo).rem_euclid(12));
-        let down = vb && style != MARIACHI_BOLERO;
+        let down = vb;
+        if run < bs {
+            let sc = chord_scale(self.mode, chords[1]);
+            let mut v: Vec<i32> = in_range(&sc, 62 - self.root, 86 - self.root).iter().map(|p| p + self.root).collect();
+            let n = ((bs - run) * 3 / 2) as usize;
+            v.drain(..v.len().saturating_sub(n));
+            if !vb {
+                v.reverse();
+            }
+            for (k, &p) in v.iter().enumerate() {
+                let st = run as f32 + k as f32 * 2.0 / 3.0;
+                let j = self.rng.range(0.0, self.human * 0.5);
+                b.note(st, j, CH_BELL, p, if k % 3 == 0 { 0.55 } else { 0.47 }, 1.5, false);
+            }
+        }
         let mut k = 0;
-        for st in (0..bs).step_by(q as usize) {
+        for st in (0..run.min(bs)).step_by(q as usize) {
             let hh = (st * 2 >= bs) as usize;
             let j = self.rng.range(0.0, self.human);
             if st == 0 || (st * 2 == bs && st % acc == 0) {
@@ -11322,9 +11348,40 @@ fn mariachi_manico(style: u8, hemi: bool, guitar: bool, alt: bool) -> &'static [
         (MARIACHI_POLKA, _, false, false) => &[(0, C, 0.35), (2, D, 0.85), (3, U, 0.4), (4, C, 0.35), (6, D, 0.85), (7, U, 0.4)],
         (MARIACHI_POLKA, _, false, true) => &[(2, D, 0.85), (3, U, 0.45), (6, D, 0.85), (7, U, 0.45)],
         (MARIACHI_POLKA, _, true, _) => &[(2, D, 0.7), (6, D, 0.7)],
-        (_, _, false, false) => &[(4, D, 0.6), (6, U, 0.42), (10, D, 0.55), (12, D, 0.6), (14, U, 0.42)],
-        (_, _, false, true) => &[(2, U, 0.36), (4, D, 0.6), (8, C, 0.42), (10, U, 0.42), (12, D, 0.6), (14, U, 0.42)],
-        _ => &[(0, D, 0.7), (4, D, 0.65), (6, U, 0.5), (8, D, 0.65), (12, D, 0.65), (14, U, 0.5)],
+        // the bolero's: down and up on the eighths, now and then (and the
+        // guitar always) a 16th's pickup into the second and fourth beats
+        (_, _, false, false) => &[
+            (0, D, 0.45),
+            (2, U, 0.36),
+            (4, D, 0.6),
+            (6, U, 0.42),
+            (8, C, 0.42),
+            (10, U, 0.4),
+            (12, D, 0.6),
+            (14, U, 0.42),
+        ],
+        (_, _, false, true) => &[
+            (0, D, 0.45),
+            (2, U, 0.36),
+            (3, U, 0.3),
+            (4, D, 0.6),
+            (6, U, 0.42),
+            (8, C, 0.42),
+            (10, U, 0.38),
+            (11, U, 0.3),
+            (12, D, 0.6),
+            (14, U, 0.42),
+        ],
+        _ => &[
+            (0, D, 0.7),
+            (3, U, 0.4),
+            (4, D, 0.6),
+            (6, U, 0.5),
+            (8, D, 0.65),
+            (11, U, 0.4),
+            (12, D, 0.6),
+            (14, U, 0.5),
+        ],
     }
 }
 
