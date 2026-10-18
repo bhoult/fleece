@@ -19,7 +19,7 @@ Output format (the interface fleece's sampler reads):
     leading silence trimmed so the onset (the first sample within 50 dB of the peak) is 1 ms
     from the start; the tail cut where it stays below -60 dB relative to the peak, with a 50 ms
     fade (a quarter of the sample for samples under 200 ms); sustained articulations capped at
-    MAX_SECONDS after the onset, with a FADE_CAPPED fade.
+    MAX_SECONDS after the onset, with a FADE_CAPPED fade; a file in TUNE_FILE retuned to its root.
   manifest.tsv: instrument articulation root vel_lo vel_hi rr gain_db file (tab-separated).
 """
 
@@ -47,8 +47,13 @@ ONSET_DB = -50.0     # the onset: the first sample within 50 dB of the peak
 PREROLL = 48         # frames kept before the onset (1 ms), faded in
 TAIL_DB = -60.0      # the tail is cut where every 10 ms block stays below this (re the peak)
 FADE = 0.050         # the tail fade
-# caps, in seconds after the onset, per articulation (pluck: the harp), for the disk budget
-MAX_SECONDS = {"sus": 5.5, "vib": 5.5, "pluck": 4.5}
+# caps, in seconds after the onset, per articulation, for the disk budget: the sustained ones
+# ("sus", "vib"; at least the sampler's LOOP_MIN, 5 s, so a held note loops), and the ringing ones
+# ("pluck": the harp, psaltery and kalimba; "bow": the bowed psaltery's long bow, a swell that
+# ends; "hit": marimba, glockenspiel, finger cymbals, frame drum; "soft": the vibraphone;
+# "small_hit": the small frame drum; "roll": the tambourine's)
+MAX_SECONDS = {"sus": 5.5, "vib": 5.5, "pluck": 4.5, "bow": 5.5, "hit": 4.0, "soft": 4.5, "small_hit": 2.5,
+               "roll": 3.0}
 FADE_CAPPED = 0.5    # the fade of a capped sample
 TARGET_DB = -20.0    # the loudest layer's median RMS (first 1 s after the onset), in dBFS
 
@@ -80,6 +85,40 @@ ROOT_FIX_FOLDER = {
     ("VCSL", "Aerophones/Reed Aerophones/Tenor Saxophone/Non-Vibrato"): 12,
     ("VCSL", "Aerophones/Reed Aerophones/Tenor Saxophone/Vibrato"): 12,
     ("VCSL", "Aerophones/Reed Aerophones/Tenor Saxophone/Staccato"): 12,
+    # The second set (2026-10-18, the same estimators, the converted files' roots checked against
+    # YIN within 0.6 semitone and the harmonic test's odd-harmonic share (ruling out a root an
+    # octave low) and half-harmonic share (an octave high)): every one of these folders names its
+    # notes an octave low. 375 of the 391 converted files (the kalimba's aside: TUNE_FILE) agree
+    # on both; the rest are listed under ROOT_FIX_FILE. Each folder's tuning (YIN, median and range, cents): within +-12 of
+    # equal temperament at A440 but for the kalimba (TUNE_FILE), the tuba's staccato (-20..+16,
+    # three flat takes left out), the clarinet's (-17 median, short notes' settling attacks)
+    # and the glockenspiel's (+12, -7..+25, YIN's resolution at 2-4 kHz).
+    ("VSCO-2-CE", "Brass/Tuba/sus"): 12,
+    ("VSCO-2-CE", "Brass/Tuba/stac"): 12,
+    ("VSCO-2-CE", "Brass/F Horn/sus"): 12,
+    ("VSCO-2-CE", "Brass/F Horn/stac"): 12,
+    ("VSCO-2-CE", "Woodwinds/Clarinet/susLong"): 12,
+    ("VSCO-2-CE", "Woodwinds/Clarinet/stac"): 12,
+    ("VSCO-2-CE", "Woodwinds/Flute/susNV"): 12,
+    ("VSCO-2-CE", "Woodwinds/Flute/susvib"): 12,
+    ("VSCO-2-CE", "Woodwinds/Flute/stac"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Baroque Alto Recorder/Sustain"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Baroque Alto Recorder/SusVib"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Baroque Alto Recorder/Staccato"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Baroque Tenor Recorder/Sustain"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Baroque Tenor Recorder/SusVib"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Baroque Tenor Recorder/Staccato"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Ocarina, Typical/Sustains/Sus"): 12,
+    ("VCSL", "Aerophones/Edge-blown Aerophones/Ocarina, Typical/Sustains/SusVib"): 12,
+    ("VCSL", "Aerophones/Free Aerophones/Harmonica-Hohner-Super64/Sustains/Normal"): 12,
+    ("VCSL", "Aerophones/Free Aerophones/Harmonica-Hohner-Super64/Sustains/Vib"): 12,
+    ("VCSL", "Chordophones/Zithers/Psaltery, Bowed and Plucked/Pluck"): 12,
+    ("VCSL", "Chordophones/Zithers/Psaltery, Bowed and Plucked/LongBow"): 12,
+    ("VCSL", "Chordophones/Zithers/Psaltery, Bowed and Plucked/Spiccato"): 12,
+    ("VCSL", "Idiophones/Plucked Idiophones/Kalimba, Tanzania"): 12,
+    ("VCSL", "Idiophones/Struck Idiophones/Vibraphone/Soft Mallets"): 12,
+    ("VCSL", "Idiophones/Struck Idiophones/Marimba"): 12,
+    ("VCSL", "Idiophones/Struck Idiophones/Glockenspiel"): 12,
 }
 # Per-file corrections on top of the folder's: (source, folder, file) -> the sounding MIDI note.
 # None were needed. These files' estimates disagreed and were checked by hand from their
@@ -90,13 +129,43 @@ ROOT_FIX_FOLDER = {
 #   Solo Violin/Pizz C5_f_RR1, C5_f_RR2, C5_p_RR2;  Solo Contrabass/Pizz C#2_v1_rr1, C#2_v1_rr2,
 #   E1_v1_rr1, G#1_v1_rr1, G#1_v1_rr2, G0_v1_rr1, G0_v1_rr2;  Concert Harp F7_f1 (30 cents flat);
 #   Tenor Saxophone/Non-Vibrato C3_vl2.
-ROOT_FIX_FILE = {}
+# The second set's: Harmonica Normal G5 (YIN 28 semitones off, the spectrum clean at its root);
+#   Psaltery Pluck D4 and Spiccato C4 (YIN on the 3rd and 2nd harmonic);  Vibraphone soft F2 v1
+#   and v2 (YIN on a bar mode), A2 v2;  Glockenspiel soft G4, Marimba C6 med (a bar's inharmonic
+#   partials: YIN right, the harmonic test weak);  Tuba sus F0 v1, stac F1 v2 rr2 (noisy low
+#   notes, YIN within 5 cents);  F Horn stac C1 v2 rr1/rr2 (30 cents flat), C3 v2 rr1 (a strong
+#   2nd harmonic, C4 under it);  Clarinet stac F4 v1 rr2.
+# One was needed: the clarinet's "F#5" sustains all sound F6 (YIN and the spectrum, -100 cents).
+ROOT_FIX_FILE = {
+    ("VSCO-2-CE", "Woodwinds/Clarinet/susLong", "DCClar_susLong_F#5_v3_rr1_sum.wav"): 89,
+}
 # Left out: Pizz C7_f has no clear pitch (its two strongest partials near C7 are 57 cents
 # apart); Pizz A3_p and A4_p are 12-21 dB below their neighbours, with noise 40-52 dB under
 # their peaks (G3/C4 and G4/C5 cover them).
 EXCLUDE = {("VSCO-2-CE", "Strings/Solo Violin/Pizz", f) for f in (
     "LLVln_Pizz_C7_f.wav", "LLVln_Pizz_A3_p_RR1.wav", "LLVln_Pizz_A3_p_RR2.wav",
     "LLVln_Pizz_A4_p_RR1.wav", "LLVln_Pizz_A4_p_RR2.wav")}
+# The tuba's staccato F1 v1 rr1 and A#1 v1 rr1, rr2 are 34-64 cents flat (YIN and the spectrum;
+# F1 v1 rr3 and A#1 v1 rr4, within 12 cents, stand in); the kalimba's F4 k21 has two
+# fundamentals 24 cents apart, beating (its other F4 key, k3, plays the note).
+EXCLUDE |= {("VSCO-2-CE", "Brass/Tuba/stac", f) for f in (
+    "Tuba3_stac_F1_v1_rr1_Sum.wav", "Tuba3_stac_A#1_v1_rr1_Sum.wav", "Tuba3_stac_A#1_v1_rr2_Sum.wav")}
+EXCLUDE |= {("VCSL", "Idiophones/Plucked Idiophones/Kalimba, Tanzania", "MBira3_pluck_Main_F4_k21_50_100_rr2.wav")}
+
+# Tuning corrections: (source, folder, file) -> cents the file sounds above its root, lowered by
+# that much when converted (resampled: played 2^(-cents/1200) as fast). The Tanzanian mbira is
+# tuned to its own scale, -58 to +63 cents off equal temperament; each key is brought to its
+# named note. Measured as its fundamental's spectral peak (parabolic, on log magnitude) within
+# 90 cents of the note, over 0.08-1.2 s and 0.3-0.9 s after the onset (agreeing within 2 cents
+# where the fundamental is the strongest partial), and for the five top keys, whose fundamentals
+# die under the other tines' sympathetic ringing, over the first 0.15-0.4 s.
+K = "Idiophones/Plucked Idiophones/Kalimba, Tanzania"
+TUNE_FILE = {("VCSL", K, "MBira3_pluck_Main_%s_50_100_rr2.wav" % k): c for k, c in (
+    ("G1_k12", 63), ("G#1_k11", 7), ("B1_k13", -58), ("C#2_k10", -2), ("D#2_k14", 34), ("F2_k9alt", 43),
+    ("G2_k15", 50), ("A#2_k8", 62), ("C#3_k16", -45), ("D#3_k7", 57), ("F3_k17", 40), ("G3_k6", 17),
+    ("A#3_k18", 52), ("C#4_k5", 10), ("D4_k19", -50), ("D#4_k20", 16), ("D#4_k4", 34), ("F4_k3", 28),
+    ("G4_k22", 34), ("A#4_k2", 37), ("B4_k23", -42), ("C#5_k24", 45), ("E5_k25", -25), ("F#5_k1", -20),
+    ("G#5_k26", 9), ("C#6_k27", 30))}
 
 # --------------------------------------------------------------------------------------------
 # The selection. A pitched set: (instrument, articulation, source, folder, layers, keep) where
@@ -133,11 +202,73 @@ PITCHED = [
      [("var", r"_var\d\.")], r"_Main_(A#1|D2|F#2|A#2|D3|F#3|A#3|D4|E4|G4|A#4|D5)_"),
     ("tenor_sax", "stac", "VCSL", "Aerophones/Reed Aerophones/Tenor Saxophone/Staccato",
      [("vl1", r"_vl1_"), ("vl2", r"_vl2_")], None),
+    # --- brass
+    # one layer, for the disk budget: v2 (mf; v3, ff, runs out in 3-5 s, too short to loop, and v1,
+    # pp, is 8-11 dB under it); F0 and D3 have only v1
+    ("tuba", "sus", "VSCO-2-CE", "Brass/Tuba/sus", [("v2", r"_v2_|_(F0|D3)_v1_")], None),
+    # two of the four round robins (where one is out of tune, another: see EXCLUDE)
+    ("tuba", "stac", "VSCO-2-CE", "Brass/Tuba/stac", [("v1", r"_v1_"), ("v2", r"_v2_")],
+     r"_rr[12]_|_F1_v1_rr3_|_A#1_v1_rr4_"),
+    # v2 (mp) and v3 (f); A0, D4 and F4 have only v1, lent to both
+    ("horn", "sus", "VSCO-2-CE", "Brass/F Horn/sus",
+     [("v2", r"_v2_|_(A0|D4|F4)_v1_"), ("v3", r"_v3_|_(A0|D4|F4)_v1_")], None),
+    # v2 and v3 (v1 left out, for the disk budget); C1, D#1 and G1 have no v3 (their v2 lent to
+    # it), A0 only v1 (lent to both)
+    ("horn", "stac", "VSCO-2-CE", "Brass/F Horn/stac",
+     [("v2", r"_v2_|_A0_v1_"), ("v3", r"_v3_|_(C1|D#1|G1)_v2_|_A0_v1_")], None),
+    # --- woodwinds
+    # the woodwinds' sustains: one layer each, the loudest, for the disk budget (the composer's
+    # velocities are mostly over 0.5, the upper of two layers); v3, or v2 where there is no v3
+    # (the flute's C5, E5), or v1 where that is all (its C6)
+    ("clarinet", "sus", "VSCO-2-CE", "Woodwinds/Clarinet/susLong", [("v3", r"_v3_")], None),
+    # v1 and v3; D5 has no v1 (v2 lent to it)
+    ("clarinet", "stac", "VSCO-2-CE", "Woodwinds/Clarinet/stac", [("v1", r"_v1_|_D5_v2_"), ("v3", r"_v3_")], None),
+    ("flute", "sus", "VSCO-2-CE", "Woodwinds/Flute/susNV", [("v3", r"_v[23]_|_C6_v1_")], None),
+    # the first take of each note (C4, E4 and E5 have two)
+    ("flute", "vib", "VSCO-2-CE", "Woodwinds/Flute/susvib", [("v1", r"_v1_1\.")], None),
+    # v1 and v3 (v4, C4 only, left out); C6 has no v3 (v2 lent to it)
+    ("flute", "stac", "VSCO-2-CE", "Woodwinds/Flute/stac", [("v1", r"_v1_"), ("v3", r"_v3_|_C6_v2_")], None),
+    # --- small winds: the alto recorder, extended down by the tenor's three lowest notes
+    ("recorder", "sus", "VCSL", "Aerophones/Edge-blown Aerophones/Baroque Alto Recorder/Sustain", [("v1", r"")], None),
+    ("recorder", "sus", "VCSL", "Aerophones/Edge-blown Aerophones/Baroque Tenor Recorder/Sustain",
+     [("v1", r"")], r"_(C3|D3|E3)_"),
+    ("recorder", "vib", "VCSL", "Aerophones/Edge-blown Aerophones/Baroque Alto Recorder/SusVib", [("v1", r"")], None),
+    ("recorder", "vib", "VCSL", "Aerophones/Edge-blown Aerophones/Baroque Tenor Recorder/SusVib",
+     [("v1", r"")], r"_(C3|D3|E3)_"),
+    ("recorder", "stac", "VCSL", "Aerophones/Edge-blown Aerophones/Baroque Alto Recorder/Staccato",
+     [("v1", r"")], None),
+    ("recorder", "stac", "VCSL", "Aerophones/Edge-blown Aerophones/Baroque Tenor Recorder/Staccato",
+     [("v1", r"")], r"_(C3|D3|E3)_"),
+    ("ocarina", "sus", "VCSL", "Aerophones/Edge-blown Aerophones/Ocarina, Typical/Sustains/Sus", [("v1", r"")], None),
+    ("ocarina", "vib", "VCSL", "Aerophones/Edge-blown Aerophones/Ocarina, Typical/Sustains/SusVib",
+     [("v1", r"")], None),
+    # the chromatic Super 64, sampled every third or fourth semitone (C, E, G)
+    ("harmonica", "sus", "VCSL", "Aerophones/Free Aerophones/Harmonica-Hohner-Super64/Sustains/Normal",
+     [("v1", r"")], None),
+    ("harmonica", "vib", "VCSL", "Aerophones/Free Aerophones/Harmonica-Hohner-Super64/Sustains/Vib",
+     [("v1", r"")], None),
+    # --- plucked and struck
+    ("psaltery", "pluck", "VCSL", "Chordophones/Zithers/Psaltery, Bowed and Plucked/Pluck", [("v1", r"")], None),
+    ("psaltery", "bow", "VCSL", "Chordophones/Zithers/Psaltery, Bowed and Plucked/LongBow", [("v1", r"")], None),
+    ("psaltery", "stac", "VCSL", "Chordophones/Zithers/Psaltery, Bowed and Plucked/Spiccato", [("v1", r"")], None),
+    # the Tanzanian mbira's keys, retuned (TUNE_FILE): 25 notes over G2-C#7 (D#4's two keys round
+    # robins); the Kenyan one's are as far off and span two octaves
+    ("kalimba", "pluck", "VCSL", "Idiophones/Plucked Idiophones/Kalimba, Tanzania", [("v1", r"")], None),
+    # --- mallets
+    ("vibraphone", "soft", "VCSL", "Idiophones/Struck Idiophones/Vibraphone/Soft Mallets",
+     [("v1", r"_v1_"), ("v2", r"_v2_")], None),
+    # med and loud: the soft layer is 25-40 dB under the loud one (its peaks -38 to -66 dBFS)
+    ("marimba", "hit", "VCSL", "Idiophones/Struck Idiophones/Marimba", [("med", r"_med_"), ("loud", r"_loud_")], None),
+    # soft and loud (medium left out, for the disk budget)
+    ("glockenspiel", "hit", "VCSL", "Idiophones/Struck Idiophones/Glockenspiel",
+     [("soft", r"_soft_"), ("loud", r"_loud_")], None),
 ]
 
 # Unpitched sets (root 60): (instrument, articulation, source, folder, [layer, ...]) where each
-# layer, softest first, is a list of files (its round robins).
+# layer, softest first, is a list of files (its round robins): a name in the folder, or a
+# (folder, name) pair for one from another folder.
 G = "Idiophones/Struck Idiophones/"
+M = "Membranophones/Struck Membranophones/"
 UNPITCHED = [
     ("guiro", "short", "VCSL", G + "Guiro/Legacy",
      [["guiro_short.wav", "guiro_short2.wav", "guiro_short3.wav", "guiro_short4.wav", "guiro_short5.wav"]]),
@@ -182,6 +313,29 @@ UNPITCHED = [
      [["Cajon_hit2_%s_rr1.wav" % d, "Cajon_hit2_%s_rr2.wav" % d] for d in ("pp", "mp", "f")]),
     ("cajon", "hit3", "VCSL", G + "Cajon",
      [["Cajon_hit3_%s_rr1.wav" % d, "Cajon_hit3_%s_rr2.wav" % d] for d in ("p", "mp", "f")]),
+    # frame_drum: the large frame drum's open hit ("hit") and muted hit ("muted"), the small one's
+    # ("small_hit", "small_muted"); two layers (v2, v3), two round robins. The "Hand" strokes
+    # (peaks at -54 and -59 dBFS, near the noise) are left out.
+    ("frame_drum", "hit", "VCSL", M + "Frame Drum",
+     [["HDrumL_Hit_v%d_rr1_Sum.wav" % v, "HDrumL_Hit_v%d_rr2_Sum.wav" % v] for v in (2, 3)]),
+    ("frame_drum", "muted", "VCSL", M + "Frame Drum",
+     [["HDrumL_HitMuted_v%d_rr1_Sum.wav" % v, "HDrumL_HitMuted_v%d_rr2_Sum.wav" % v] for v in (2, 3)]),
+    ("frame_drum", "small_hit", "VCSL", M + "Frame Drum",
+     [["HDrumS_Hit_v%d_rr1_Sum.wav" % v, "HDrumS_Hit_v%d_rr2_Sum.wav" % v] for v in (2, 3)]),
+    ("frame_drum", "small_muted", "VCSL", M + "Frame Drum",
+     [["HDrumS_HitMuted_v%d_rr1_Sum.wav" % v, "HDrumS_HitMuted_v%d_rr2_Sum.wav" % v] for v in (2, 3)]),
+    # tambourine: a struck hit ("hit": two layers, the two tambourines as round robins), a shake
+    # ("shake": four round robins), and a roll ("roll": three layers, the first tambourine's, the
+    # second's being a rhythm of shakes rather than a roll)
+    ("tambourine", "hit", "VCSL", G + "Tambourine 1",
+     [["Tamb1_Hit_v1_rr1_Mid.wav", (G + "Tambourine 2", "Tamb2_Hit_v1_rr1_Mid.wav")],
+      ["Tamb1_Hit_v2_rr1_Mid.wav", (G + "Tambourine 2", "Tamb2_Hit_v2_rr2_Mid.wav")]]),
+    ("tambourine", "shake", "VCSL", G + "Tambourine 1",
+     [["Tamb1_Shake_rr1_Mid.wav", (G + "Tambourine 2", "Tamb2_Shake_rr3_Mid.wav"),
+       "Tamb1_Shake_rr2_Mid.wav", (G + "Tambourine 2", "Tamb2_Shake_rr4_Mid.wav")]]),
+    ("tambourine", "roll", "VCSL", G + "Tambourine 1", [["Tamb1_Roll_v%d_rr1_Mid.wav" % v] for v in (1, 2, 3)]),
+    # finger_cymbals: one strike, ringing ("hit")
+    ("finger_cymbals", "hit", "VCSL", G + "Finger Cymbals", [["Fing_Cymb.wav"]]),
 ]
 
 UNPITCHED_NAMES = {u[0] for u in UNPITCHED}
@@ -229,8 +383,9 @@ def plan(src):
                 continue
             if (repo, folder, fn) in EXCLUDE:
                 continue
+            # a file may be in several layers (a note recorded at one dynamic only, lending it to each)
             li = [i for i, (_, rx) in enumerate(layers) if re.search(rx, fn)]
-            if len(li) != 1:
+            if not li:
                 continue
             m = NOTE_RE.search(fn)
             if not m:
@@ -238,7 +393,8 @@ def plan(src):
             named = (int(m.group(3)) + 1) * 12 + "C D EF G A B".index(m.group(1)) \
                 + {"#": 1, "b": -1}.get(m.group(2), 0)
             root = ROOT_FIX_FILE.get((repo, folder, fn), named + fix)
-            groups.setdefault((li[0], root), []).append((fn, named))
+            for i in li:
+                groups.setdefault((i, root), []).append((fn, named))
         if not groups:
             die("nothing selected in %s" % folder)
         for (li, root), files in sorted(groups.items()):
@@ -249,20 +405,28 @@ def plan(src):
     for inst, art, repo, folder, layers in UNPITCHED:
         for li, files in enumerate(layers):
             for rr, fn in enumerate(files, 1):
+                fo, fn = fn if isinstance(fn, tuple) else (folder, fn)
                 out.append(dict(instrument=inst, articulation=art, root=60, layer=li, nlayers=len(layers),
-                                layer_name="v%d" % (li + 1), rr=rr, repo=repo, folder=folder, src=fn,
+                                layer_name="v%d" % (li + 1), rr=rr, repo=repo, folder=fo, src=fn,
                                 named="", pitched=False))
+    seen = set()
     for o in out:
         o["vel_lo"], o["vel_hi"] = vel_ranges(o["nlayers"])[o["layer"]]
         base = ("%03d_v%d_rr%d.wav" % (o["root"], o["layer"] + 1, o["rr"])) if o["pitched"] \
             else ("v%d_rr%d.wav" % (o["layer"] + 1, o["rr"]))
         o["file"] = "multi/%s/%s/%s" % (o["instrument"], o["articulation"], base)
+        # two sets may share an instrument/articulation (one instrument's range extended by
+        # another's) only where their roots differ
+        if o["file"] in seen:
+            die("two sources for %s" % o["file"])
+        seen.add(o["file"])
     return out
 
 
 def folders(name):
     """The folders to check out from source name (in cone mode a folder brings its subfolders)."""
-    fs = {f for _, _, r, f, _, _ in PITCHED if r == name} | {f for _, _, r, f, _ in UNPITCHED if r == name}
+    fs = {f for _, _, r, f, _, _ in PITCHED if r == name} | {f for _, _, r, f, _ in UNPITCHED if r == name} \
+        | {fn[0] for _, _, r, _, ls in UNPITCHED if r == name for l in ls for fn in l if isinstance(fn, tuple)}
     return sorted(f for f in fs if not any(f.startswith(g + "/") for g in fs))
 
 
@@ -289,15 +453,22 @@ def resampler():
     return RESAMPLER
 
 
-def decode(path):
-    """The file's audio as 48 kHz 16-bit interleaved samples: (array('h'), channels)."""
-    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
-                        "-of", "csv=p=0", "file:" + path], capture_output=True, text=True)
-    if p.returncode != 0 or not p.stdout.strip():
+def decode(path, cents=0):
+    """The file's audio as 48 kHz 16-bit interleaved samples: (array('h'), channels); lowered by
+    `cents` (played slower) when that is not 0."""
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                        "stream=channels,sample_rate", "-of", "default=nw=1", "file:" + path],
+                       capture_output=True, text=True)
+    info = dict(ln.split("=", 1) for ln in p.stdout.split() if "=" in ln)
+    if p.returncode != 0 or not info.get("channels", "").isdigit() or not info.get("sample_rate", "").isdigit():
         die("ffprobe failed on %s: %s" % (path, p.stderr.strip()))
-    ch = int(p.stdout.strip().split(",")[0])
+    ch = int(info["channels"])
+    af = "aresample=%d:%sdither_method=triangular" % (RATE, resampler())
+    if cents:
+        # (an integer rate: within 0.02 cents)
+        af = "asetrate=%d," % round(int(info["sample_rate"]) * 2 ** (-cents / 1200.0)) + af
     p = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", "file:" + path, "-map", "0:a:0",
-                        "-af", "aresample=%d:%sdither_method=triangular" % (RATE, resampler()),
+                        "-af", af,
                         "-ac", str(ch), "-ar", str(RATE), "-f", "s16le", "-c:a", "pcm_s16le", "-"],
                        capture_output=True)
     if p.returncode != 0:
@@ -346,7 +517,7 @@ def sumsq(a):
 def convert(job, src, stage):
     path = os.path.join(src, job["repo"], job["folder"], job["src"])
     check_wav_header(path)
-    a, ch = decode(path)
+    a, ch = decode(path, TUNE_FILE.get((job["repo"], job["folder"], job["src"]), 0))
     frames = len(a) // ch
     pk = peak_of(a)
     if frames < 480 or pk < 64:
@@ -540,7 +711,7 @@ def sources_md(jobs, gains, dest):
         w("")
     w("## Processing\n")
     w("- Decoded and resampled to 48 kHz with ffmpeg (soxr where available), 16-bit with triangular dither;"
-      " channels as recorded (all of these are stereo).")
+      " channels as recorded (stereo, but for the harmonica, recorded in mono).")
     w("- Leading silence trimmed: the onset is the first sample within %g dB of the file's peak, and the file"
       " starts 1 ms before it (that 1 ms faded in)." % -ONSET_DB)
     w("- Tail cut at the end of the last 10 ms that reaches %g dB relative to the peak, with a 50 ms raised-cosine"
@@ -550,6 +721,9 @@ def sources_md(jobs, gains, dest):
     w("- Roots: the note in each file name, corrected per folder (most VSCO-2-CE and VCSL folders name notes one"
       " octave low, the C3 = middle C convention) and verified by pitch estimation of every sample;"
       " see `ROOT_FIX_FOLDER` in `tools/samples_manifest.py`. Unpitched percussion uses root 60.")
+    w("- Retuned (resampled to its root, the length changing with it): %d files of the Tanzanian mbira, tuned"
+      " to its own scale (%+d to %+d cents); see `TUNE_FILE` in `tools/samples_manifest.py`."
+      % (len(TUNE_FILE), min(TUNE_FILE.values()), max(TUNE_FILE.values())))
     w("- Velocity layers split 0-127 evenly, softest first; `gain_db` is one value per instrument/articulation,"
       " putting the loudest layer's median RMS over the first 1 s after the onset at %g dBFS, so the layers keep"
       " their recorded loudness relationship." % TARGET_DB)
