@@ -7705,8 +7705,8 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     s.fx.wind_to = 0.0;
     s.fx.rain_to = 0.0;
     s.m.wow_to = 0.0;
-    s.m.gain = 1.4;
-    s.m.target = 0.2;
+    s.m.gain = 1.3;
+    s.m.target = 0.195;
 }
 
 /// A bassline changed in `k` places: a note on or off, another note, an
