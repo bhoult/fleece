@@ -4570,31 +4570,53 @@ impl Song {
 
     /// A ska piece: first-wave (Jamaica, the early sixties: a shuffle at 110
     /// to 130 bpm, a jazz band's horns, the piano and the guitar on the
-    /// off-beats, a Hammond) or 2-tone (Britain, the late seventies: nearly
+    /// off-beats, a Hammond), 2-tone (Britain, the late seventies: nearly
     /// straight, 132 to 158, a Farfisa or a Vox bubbling, a picked bass, the
-    /// kick now and then on every beat). An intro (a vamp, a horn riff over
-    /// it, or the drums leading in), the head (AB or AABA, eight bars a
-    /// strain), a solo or two over its changes, now and then a breakdown,
-    /// the head out (from the bridge, when long) and a tag ending on a final
-    /// hit: a minute and a half to two and a half.
+    /// kick now and then on every beat) or the third wave (ska-punk, the
+    /// nineties on: straight, 135 to 148, the skank in the verses and the
+    /// punk drive in the choruses, a four-piece horn section in close
+    /// harmony carrying the tune). An intro (a vamp, a horn riff over it, or
+    /// the drums leading in), the head (AB or AABA, eight bars a strain), a
+    /// solo or two over its changes, now and then a breakdown, the head out
+    /// (from the bridge, when long) and a tag ending on a final hit: a minute
+    /// and a half to two and a half. (The third wave's form is its own.)
     fn piece_ska(&mut self, s: &mut Synth) {
         let mode = self.mode;
         let minor = MODES[mode][2] == 3;
         let shuffled = self.guest.is_none();
         let r = &mut self.rng;
-        let two_tone = r.chance(if minor { 0.7 } else { 0.4 });
-        self.bpm = if two_tone { r.range(132.0, 158.0) } else { r.range(110.0, 130.0) } as f64;
+        // the style: the third wave and 2-tone lean minor, the first wave major
+        let style = if r.chance(if minor { 0.6 } else { 0.21 }) {
+            SKS_THIRD
+        } else if r.chance(if minor { 0.7 } else { 0.4 }) {
+            SKS_TWO
+        } else {
+            SKS_FIRST
+        };
+        let (two_tone, third) = (style == SKS_TWO, style == SKS_THIRD);
+        self.bpm = match style {
+            SKS_THIRD => r.range(135.0, 148.0),
+            SKS_TWO => r.range(132.0, 158.0),
+            _ => r.range(110.0, 130.0),
+        } as f64;
         self.swing = 0.0;
-        self.human = if two_tone { 0.004 } else { 0.007 };
-        // the drummer's shuffle (the off-beat eighths late); none under a mix's drummer
-        let shuffle = match (shuffled, two_tone) {
-            (false, _) => 0.0,
-            (_, true) => r.range(0.0, 0.06),
+        self.human = match style {
+            SKS_FIRST => 0.007,
+            SKS_TWO => 0.004,
+            _ => 0.003,
+        };
+        // the drummer's shuffle (the off-beat eighths late); none under a
+        // mix's drummer, nor in the third wave
+        let shuffle = match (shuffled, style) {
+            (false, _) | (_, SKS_THIRD) => 0.0,
+            (_, SKS_TWO) => r.range(0.0, 0.06),
             _ => r.range(0.12, 0.32),
         };
         // the horns' keys (Bb, Eb, F, C, G, Ab, D), and the minor keys a guitar likes
         self.root = if minor { r.pick(&[9, 2, 7, 4, 0, 5]) } else { r.pick(&[10, 3, 5, 0, 7, 8, 2]) };
         let (pa, pb, pv) = match mode {
+            _ if third && minor => (SKA_TW_MIN_A, SKA_TW_MIN_B, SKA_TW_VAMP_MIN),
+            _ if third => (SKA_TW_MAJ_A, SKA_TW_MAJ_B, SKA_TW_VAMP_MAJ),
             _ if minor => (SKA_MIN_A, SKA_MIN_B, SKA_VAMP_MIN),
             MIXOLYDIAN => (SKA_MIX_A, SKA_MIX_B, SKA_VAMP_MIX),
             _ => (SKA_MAJ_A, SKA_MAJ_B, SKA_VAMP_MAJ),
@@ -4605,109 +4627,51 @@ impl Song {
         // the A strain comes home, the bridge (higher) ends on the dominant
         let (am, aa) = ska_tune(r, &a, mode, SK_LO, SK_HI, true);
         let (bm, ba) = ska_tune(r, &b, mode, SK_LO + 2, SK_HI + 2, false);
-        // the form, and as many solo choruses (and a breakdown) as a minute
-        // and a half to two and a half holds (at the tempo a mix's drummer
-        // will pull it to); an AABA too long comes back from the bridge, or is AB
+        // the form (at the tempo a mix's drummer will pull it to)
         let bpm = self.guest.map_or(self.bpm, |g| self.bpm + 0.6 * (MID_BPM[g] - self.bpm));
-        let bar_s = 240.0 / bpm;
-        let tag = if r.bit_chance() { 3 } else { 5 };
-        let mut aaba = r.chance(0.5);
-        let mut from_bridge = aaba && r.chance(0.5);
-        let (mut solos, brk);
-        loop {
-            let n = if aaba { 32 } else { 16 };
-            let base = 4 + n + if from_bridge { 16 } else { n } + tag;
-            solos = 1;
-            while ((base + solos * n) as f64) * bar_s < 95.0 && solos < 3 {
-                solos += 1;
-            }
-            let t = (base + solos * n) as f64 * bar_s;
-            if t > 150.0 && aaba {
-                (aaba, from_bridge) = (!from_bridge, !from_bridge);
-                continue;
-            }
-            brk = t + 8.0 * bar_s <= 150.0 && r.chance(0.5);
-            break;
-        }
-        let form: Vec<u8> = if aaba { vec![0, 0, 1, 0] } else { vec![0, 1] };
-        let organ = if two_tone || r.chance(0.5) { L_PAD } else { 0 };
-        let piano = if !two_tone || r.chance(0.35) { L_DRONE } else { 0 };
-        let rhythm = L_KICK | L_SNARE | L_HAT | L_OHAT | L_BASS | L_KEYS;
-        let horns = L_LEAD | L_BELL | L_ARP;
-        let intro = r.weighted(&[1.0, 1.2, 0.8]) as u8;
-        let sx = |part: u8, strain: u8, rep: u8, dress: u8| SkaSec { part, strain, rep, dress, ..SkaSec::default() };
-        let riffing = if intro == SKI_RIFF { horns } else { 0 };
-        let mut plan = vec![(
-            Sec {
-                kind: INTRO,
-                bars: 4,
-                mask: rhythm | organ | riffing | if intro == SKI_VAMP { 0 } else { L_PERC },
-                energy: 0.65,
-            },
-            sx(SK_INTRO, 0, 0, 0),
-        )];
-        // the head: the organ joins after the first strain, the piano leaves the bridge to it
-        let mut reps = [0u8; 2];
-        for (k, &st) in form.iter().enumerate() {
-            let keys = if k == 0 {
-                piano | if piano == 0 { organ } else { 0 }
-            } else {
-                organ | if st == 0 { piano } else { 0 }
-            };
-            let sec = Sec { kind: MAIN, bars: 8, mask: rhythm | horns | keys, energy: 0.72 + 0.04 * k as f32 };
-            plan.push((sec, sx(SK_HEAD, st, reps[st as usize], st)));
-            reps[st as usize] += 1;
-        }
-        // the solos, a chorus each, the riffs behind them
-        let n = 8 * form.len() as u32;
-        for k in 0..solos {
-            let mask = rhythm | L_PERC | L_LEAD | L_CTR | if organ != 0 { organ } else { piano };
-            let x = SkaSec { part: SK_SOLO, solo: k as u8, dress: 1 + (k % 2) as u8, ..SkaSec::default() };
-            plan.push((Sec { kind: MAIN, bars: n, mask, energy: 0.8 + 0.05 * k as f32 }, x));
-        }
-        // the breakdown: the bass, the guitar and the drums, quietly
-        if brk {
-            let mask = L_KICK | L_SNARE | L_HAT | L_BASS | L_KEYS | L_PERC;
-            plan.push((Sec { kind: BREAK, bars: 8, mask, energy: 0.5 }, sx(SK_BREAK, 0, 0, 2)));
-        }
-        for (k, &st) in form.iter().enumerate().skip(if from_bridge { 2 } else { 0 }) {
-            let sec = Sec {
-                kind: MAIN,
-                bars: 8,
-                mask: rhythm | horns | organ | piano | L_PERC,
-                energy: 0.86 + 0.03 * k as f32,
-            };
-            plan.push((sec, SkaSec { out: true, ..sx(SK_HEAD, st, reps[st as usize], st) }));
-            reps[st as usize] += 1;
-        }
-        let mask = rhythm | horns | organ | piano | L_PERC;
-        plan.push((Sec { kind: OUTRO, bars: tag, mask, energy: 1.0 }, sx(SK_TAG, 0, 0, 0)));
+        let (plan, form, solos, intro) =
+            if third { (ska_third_form(r), vec![0, 1], 0, SKI_RIFF) } else { ska_form(r, 240.0 / bpm, two_tone) };
         self.plan = plan.iter().map(|x| x.0).collect();
-        // the riffs: the intro's (on the lead's register) and the one behind the solos
+        // the riffs: the intro's (on the lead's register; the third wave's
+        // a run) and the one behind the solos
         let home = Harm { root: 0, q: if minor { Q_MIN } else { Q_MAJ }, inv: 0 };
-        let riff = ska_riff(r, home, mode, SK_LO + 2, SK_HI);
-        let back = ska_riff(r, home, mode, SK_LO - 5, SK_HI - 7);
+        let riff = ska_riff(r, home, mode, SK_LO + 2, SK_HI, if third { SKA_TW_RUNS } else { SKA_RIFFS });
+        let back = ska_riff(r, home, mode, SK_LO - 5, SK_HI - 7, SKA_RIFFS);
+        let mut strains = vec![SkaStrain { chords: a, mel: am, ans: aa }, SkaStrain { chords: b, mel: bm, ans: ba }];
+        let mut run = Vec::new();
+        if third {
+            // the bridge's chords, and the horn break's runs over the chorus's
+            let pc = if minor { SKA_TW_MIN_C } else { SKA_TW_MAJ_C };
+            strains.push(SkaStrain { chords: halves(r.pick(pc)), mel: Vec::new(), ans: Vec::new() });
+            run = ska_runs(r, &strains[1].chords, mode, SK_LO, SK_HI + 2);
+        }
         self.sk = Ska {
             bar_steps: 16,
             beat_steps: 4,
-            meter: if two_tone { "4/4 2-tone" } else { "4/4 first wave" },
+            meter: match style {
+                SKS_THIRD => "4/4 third wave",
+                SKS_TWO => "4/4 2-tone",
+                _ => "4/4 first wave",
+            },
             two_tone,
+            third,
             shuffle,
-            four: two_tone && self.bpm > 140.0 && r.chance(0.6),
+            four: third || (two_tone && self.bpm > 140.0 && r.chance(0.6)),
             open: r.chance(0.4),
             bubble: two_tone || r.chance(0.4),
             intro,
             end: r.below(3) as u8,
-            strains: vec![SkaStrain { chords: a, mel: am, ans: aa }, SkaStrain { chords: b, mel: bm, ans: ba }],
+            strains,
             vamp,
             form,
             map: plan.iter().map(|x| x.1).collect(),
             riff,
             back,
+            run,
             ..Ska::default()
         };
-        sounds_ska(r, s, two_tone);
-        self.band = band_ska(r, s, two_tone);
+        sounds_ska(r, s, style);
+        self.band = band_ska(r, s, style);
         // the soloists, each in its register, as loud as the lead's horn
         let orig = s.ch[CH_LEAD].patch;
         let mut who: Vec<usize> = (0..SKA_SOLOISTS.len()).collect();
@@ -4719,7 +4683,13 @@ impl Song {
         }
         self.progs = vec![self.sk.strains[0].chords.clone(), self.sk.strains[1].chords.clone()];
         self.prog = self.progs[0].clone();
+        // the third wave's last chorus now and then a half or a whole step up
         self.lifts.clear();
+        if third && r.chance(0.35) {
+            let up = r.pick(&[1, 2, 2]);
+            let k = plan.len() - 2;
+            self.lifts = (0..plan.len()).map(|j| if j >= k { up } else { 0 }).collect();
+        }
         s.dly.target = (self.step_len() * 3.0) as f32;
     }
 
@@ -4736,7 +4706,7 @@ impl Song {
         let st = &self.sk.strains;
         self.prog = match x.part {
             SK_INTRO => self.sk.vamp.clone(),
-            SK_HEAD | SK_BREAK => st[x.strain as usize].chords.clone(),
+            SK_HEAD | SK_BREAK | SK_RUN => st[x.strain as usize].chords.clone(),
             SK_SOLO => self.sk.form.iter().flat_map(|&k| st[k as usize].chords.iter().copied()).collect(),
             _ => {
                 let tail = &st[0].chords[12..16];
@@ -4799,6 +4769,22 @@ impl Song {
             SK_TAG => SKH_TRIAD,
             _ => r.pick(&[SKH_SIXTH, SKH_OCT]),
         };
+        if x.part == SK_RUN {
+            self.sk.mel = self.sk.run.clone();
+            self.sk.ans.clear();
+        }
+        if self.sk.third {
+            // the third wave's horns: the lines in unison and octaves or in
+            // thirds, the choruses in close harmony; the punk beat (a rock
+            // beat more often than the skank beat) and the power chords
+            self.sk.harmony = match x.part {
+                SK_HEAD if x.strain == 1 => r.pick(&[SKH_TRIAD, SKH_TRIAD, SKH_THIRD]),
+                SK_HEAD | SK_INTRO | SK_RUN => r.pick(&[SKH_OCT, SKH_THIRD]),
+                _ => SKH_TRIAD,
+            };
+            self.sk.drive = r.weighted(&[0.15, 0.85]) as u8;
+            self.sk.ring = r.chance(0.35);
+        }
         self.sk.hold = x.part == SK_SOLO && r.chance(0.4);
         if x.part == SK_SOLO {
             self.sk.solo_prev = r.pick(&[4, 7, 0, 9]);
@@ -4820,9 +4806,9 @@ impl Song {
         }
         let st = &self.sk.strains;
         match self.sk.map.get(self.sec + 1) {
-            Some(x) if matches!(x.part, SK_HEAD | SK_BREAK) => st[x.strain as usize].chords[0],
+            Some(x) if matches!(x.part, SK_HEAD | SK_BREAK | SK_RUN) => st[x.strain as usize].chords[0],
             Some(x) if x.part == SK_SOLO => st[0].chords[0],
-            Some(x) if x.part == SK_TAG => st[0].chords[12],
+            Some(x) if x.part == SK_TAG && !self.sk.third => st[0].chords[12],
             _ => self.ska_home(),
         }
     }
@@ -4849,19 +4835,32 @@ impl Song {
         let x = self.sk.map[self.sec];
         let i = self.sec_bar;
         let c = [self.chord(i * 2), self.chord(i * 2 + 1), self.ska_next(sec)];
+        // the third wave's distorted guitar and fourth horn never sit a phrase out
+        let m = if self.sk.third { m | (sec.mask & (L_DRONE | L_PAD)) } else { m };
         if sec.kind == OUTRO && i + 1 == sec.bars {
             self.ska_button(b, m);
             return;
         }
-        self.ska_drums(b, sec, m);
+        if x.punk {
+            self.ska_punk(b, sec, m);
+        } else {
+            self.ska_drums(b, sec, m);
+        }
         if x.part == SK_INTRO && self.sk.intro == SKI_DRUMS && i == 0 {
             // the drums lead in alone
             return;
         }
         if m & L_BASS != 0 {
-            self.ska_walk(b, c, sec.energy, x.part == SK_BREAK && i < 4);
+            if x.punk {
+                self.ska_drive(b, c, sec.energy, x.half);
+            } else {
+                self.ska_walk(b, c, sec.energy, x.part == SK_BREAK && i < 4);
+            }
         }
         self.ska_skank(s, b, c, sec, m);
+        if x.punk && m & L_DRONE != 0 {
+            self.ska_power(b, c, sec, x.half);
+        }
         if x.part == SK_SOLO
             && i == 0
             && let Some(&(p, _)) = self.sk.solos.get(x.solo as usize)
@@ -4870,9 +4869,10 @@ impl Song {
             s.ch[CH_LEAD].patch = p;
         }
         match x.part {
-            SK_HEAD => self.ska_horns(b, sec, m, c, i % 8),
+            SK_HEAD | SK_RUN => self.ska_horns(b, sec, m, c, i % 8),
             SK_TAG => self.ska_horns(b, sec, m, c, 6 + i % 2),
             SK_SOLO => self.ska_solo(b, sec, m, c),
+            SK_BREAK if self.sk.third => self.ska_swell(b, sec, m, c, x.half),
             SK_INTRO if self.sk.intro == SKI_RIFF => self.ska_riff_bar(b, m, c, true, 0.7 + 0.25 * sec.energy),
             SK_INTRO if i + 1 == sec.bars => self.ska_pickup(b, m, c),
             _ => {}
@@ -4911,7 +4911,7 @@ impl Song {
                     self.ska_hit(b, (4 * k) as f32, CH_KICK, 0, v);
                 }
             }
-            if vb && !roll && self.rng.chance(0.3) {
+            if vb && !roll && !self.sk.third && self.rng.chance(0.3) {
                 self.ska_hit(b, 14.0, CH_KICK, 0, 0.5 * quiet);
             }
         }
@@ -4962,7 +4962,11 @@ impl Song {
                     break;
                 }
                 self.ska_hit(b, on, CH_HAT, HAT_C, if k == 0 { 0.5 } else { 0.42 });
-                let open = m & L_OHAT != 0 && sec.kind != BREAK && (self.sk.open || (vb && k % 2 == 1) || e >= 0.9);
+                // (the third wave's verses keep it closed, the beat ahead of the skank)
+                let open = m & L_OHAT != 0
+                    && sec.kind != BREAK
+                    && !self.sk.third
+                    && (self.sk.open || (vb && k % 2 == 1) || e >= 0.9);
                 let (kind, v) = if open { (HAT_O, 0.42) } else { (HAT_C, 0.42) };
                 let v = v * self.rng.range(0.9, 1.0);
                 self.ska_hit(b, on + 2.0, CH_HAT, kind, v);
@@ -5059,7 +5063,7 @@ impl Song {
                 }
             }
         };
-        let push = self.sk.two_tone && r.chance(0.2);
+        let push = (self.sk.two_tone || self.sk.third) && r.chance(0.2);
         self.sk.bass_prev = n[3];
         let lift = 0.85 + 0.15 * e;
         let h = self.human;
@@ -5124,7 +5128,9 @@ impl Song {
             }
             return v1;
         }
-        let swung = self.sk.two_tone;
+        let swung = self.sk.two_tone || self.sk.third;
+        // the third wave's upstroke looser
+        let h = if self.sk.third && ch == CH_KEYS { 0.012 } else { h };
         for k in 0..4 {
             let st = (4 * k + 2) as f32;
             let v = if k < 2 { &v0 } else { &v1 };
@@ -5150,21 +5156,29 @@ impl Song {
     fn ska_skank(&mut self, s: &Synth, b: &mut Bar, c: [Harm; 3], sec: Sec, m: u32) {
         let e = sec.energy;
         let vb = self.var_b();
+        let straight = self.sk.two_tone || self.sk.third;
         if m & L_KEYS != 0 {
-            let twice = if self.sk.two_tone && vb { 0b1010 } else { 0 };
+            let twice = if straight && vb { 0b1010 } else { 0 };
             let prev = std::mem::take(&mut self.keys_v);
             // the first wave's chop tighter
-            let spread = self.rng.range(0.004, 0.008) * if self.sk.two_tone { 1.0 } else { 0.4 };
+            // the first wave's chop tighter, the third wave's upstroke a wider sweep
+            let wide = match (straight, self.sk.third) {
+                (_, true) => 2.5,
+                (true, _) => 1.0,
+                _ => 0.4,
+            };
+            let spread = self.rng.range(0.004, 0.008) * wide;
             self.keys_v =
                 self.ska_offbeats(s, b, CH_KEYS, c, (57, 72), &prev, 0.6 + 0.2 * e, 1.2, twice, spread, false);
         }
-        if m & L_PAD != 0 {
+        // (the third wave's organ and piano channels are a horn and a guitar)
+        if m & L_PAD != 0 && !self.sk.third {
             let (twice, len) = if self.sk.bubble { (0b1111, 0.7) } else { (0, 1.7) };
             let prev = std::mem::take(&mut self.pad_v);
             let hold = self.sk.hold;
             self.pad_v = self.ska_offbeats(s, b, CH_PAD, c, (55, 70), &prev, 0.42 + 0.15 * e, len, twice, 0.0, hold);
         }
-        if m & L_DRONE != 0 {
+        if m & L_DRONE != 0 && !self.sk.third {
             let twice = if vb && !self.sk.two_tone { 0b1000 } else { 0 };
             let prev = std::mem::take(&mut self.sk.piano_v);
             self.sk.piano_v =
@@ -5229,7 +5243,20 @@ impl Song {
                     }
                 }
             }
-            let (p2, p3) = self.ska_voices(n.pitch, c[ska_half(n.step % 16, n.len)], self.sk.harmony, tune);
+            let hc = c[ska_half(n.step % 16, n.len)];
+            if self.sk.third {
+                // the third wave's four: the sax, the trombone, the baritone under the trumpet
+                let [p2, p3, p4] = self.ska_voices4(n.pitch, hc, self.sk.harmony, tune);
+                for (ch, layer, q, f) in
+                    [(CH_PAD, L_PAD, p2, 0.85), (CH_BELL, L_BELL, p3, 0.85), (CH_ARP, L_ARP, p4, 0.8)]
+                {
+                    if m & layer != 0 {
+                        b.note(st, late, ch, tune + q, v * f, len, false);
+                    }
+                }
+                continue;
+            }
+            let (p2, p3) = self.ska_voices(n.pitch, hc, self.sk.harmony, tune);
             if m & L_BELL != 0 {
                 b.note(st, late, CH_BELL, tune + p2, v * 0.85, len, false);
             }
@@ -5250,6 +5277,204 @@ impl Song {
                 let v = n.vel * vel;
                 b.note(st, late, CH_BELL, tune + n.pitch, v * 0.85, 0.8, false);
                 b.note(st, late, CH_ARP, tune + under, v * 0.8, 0.8, false);
+            }
+        }
+    }
+
+    /// The third wave's four horns under the trumpet's `p` (over chord `h`):
+    /// the sax, the trombone and the baritone. In octaves the sax with the
+    /// trumpet, the trombone an octave down, the baritone two; in thirds or
+    /// sixths the sax under the trumpet, the others in octaves; in close
+    /// harmony the sax a third under, the trombone the chord tone below, the
+    /// baritone on the chord's root.
+    fn ska_voices4(&self, p: i32, h: Harm, how: u8, tune: i32) -> [i32; 3] {
+        let (p2, p3) = self.ska_voices(p, h, how, tune);
+        match how {
+            SKH_OCT => [p, p2, p3],
+            SKH_TRIAD => {
+                let root = in_range(&[h.root.rem_euclid(12)], p3 - 12, p3 - 1);
+                [p2, p3, root.first().copied().unwrap_or(p3 - 12)]
+            }
+            _ => [p2, p - 12, p3],
+        }
+    }
+
+    /// A power chord on `h`'s root for the distorted guitar: the root (E2
+    /// to Eb3), the fifth, the octave.
+    fn ska_fifths(&self, h: Harm) -> [i32; 3] {
+        let root = 40 + (self.root + h.root - 40).rem_euclid(12);
+        [root, root + 7, root + 12]
+    }
+
+    /// The third wave's drums in the punk drive: the skank beat now and then
+    /// (the kick on every beat, the snare on every off-beat, the crash
+    /// riding the beats) or a rock beat (the kick on one and three, on every
+    /// beat in the B groups, the snare on two and four, the crash riding the
+    /// beats when it is strong), else the hats in eighths; in half time the
+    /// kick on one, the snare on three, the hats in quarters; a crash on each
+    /// bar's one (every other bar when it is less strong), the toms or a
+    /// roll into each new eight bars, a "ba-dap" closing four.
+    fn ska_punk(&mut self, b: &mut Bar, sec: Sec, m: u32) {
+        let x = self.sk.map[self.sec];
+        let (i, e) = (self.sec_bar, sec.energy);
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        let roll = fill == 2;
+        let toms = roll && self.rng.chance(0.6);
+        let from = if roll { 12.0 } else { 16.0 };
+        let lv = 0.85 + 0.15 * e;
+        let skank = self.sk.drive == 0 && !x.half;
+        let ride = !x.half && (skank || e >= 0.85);
+        let mut hits: Vec<(f32, usize, u8, f32)> = Vec::with_capacity(32);
+        if m & L_KICK != 0 {
+            let ks: &[f32] = match (x.half, skank || vb) {
+                (true, _) => &[0.0],
+                (_, true) => &[0.0, 4.0, 8.0, 12.0],
+                _ => &[0.0, 8.0],
+            };
+            for &st in ks.iter().filter(|&&st| st < from || st == 0.0) {
+                hits.push((st, CH_KICK, 0, if st % 8.0 == 0.0 { 0.95 } else { 0.78 } * lv));
+            }
+        }
+        if m & L_SNARE != 0 {
+            let ss: &[f32] = match (x.half, skank) {
+                (true, _) => &[8.0],
+                (_, true) => &[2.0, 6.0, 10.0, 14.0],
+                _ => &[4.0, 12.0],
+            };
+            for &st in ss.iter().filter(|&&st| st < from) {
+                hits.push((st, CH_SNARE, 0, if skank { 0.75 } else { 0.9 } * lv));
+            }
+            if fill == 1 && !x.half {
+                // ba-dap
+                hits.push((14.0, CH_SNARE, 1, 0.45));
+                hits.push((15.0, CH_SNARE, 0, 0.6));
+            }
+        }
+        if m & (L_HAT | L_OHAT) != 0 {
+            for k in 0..8 {
+                let st = 2.0 * k as f32;
+                if st >= from {
+                    break;
+                }
+                if ride {
+                    // the crash on the beats, the hat's foot between
+                    if k % 2 == 0 && k > 0 {
+                        hits.push((st, CH_CYM, 0, 0.4));
+                    }
+                } else if !x.half || k % 2 == 0 {
+                    let open = k % 2 == 1 && m & L_OHAT != 0 && (vb || self.sk.open);
+                    let v = if k % 2 == 0 { 0.5 } else { 0.36 };
+                    hits.push((st, CH_HAT, if open { HAT_O } else { HAT_C }, v));
+                }
+            }
+        }
+        if i % if e >= 0.85 { 1 } else { 2 } == 0 {
+            hits.push((0.0, CH_CYM, 0, 0.55 + 0.3 * e));
+        }
+        if roll && m & L_SNARE != 0 {
+            if toms {
+                for (st, kind) in [(12.0, TOM_HI), (13.0, TOM_HI), (14.0, TOM_MID), (15.0, TOM_LO)] {
+                    hits.push((st, CH_PERC, kind, 0.85));
+                }
+            } else {
+                // 16ths, louder as they go
+                for k in 0..4 {
+                    hits.push((12.0 + k as f32, CH_SNARE, 1, 0.35 + 0.15 * k as f32));
+                }
+            }
+        }
+        let h = self.human;
+        for (st, ch, kind, v) in hits {
+            let late = self.rng.range(0.0, h);
+            b.hit(st, late, ch, kind, v * self.rng.range(0.93, 1.0));
+        }
+    }
+
+    /// The third wave's bass in the punk drive: eighths on each half bar's
+    /// root, the beats dug in a little, the last now and then a semitone from
+    /// the next bar's root; in half time the root on the one and the three.
+    fn ska_drive(&mut self, b: &mut Bar, c: [Harm; 3], e: f32, half: bool) {
+        let lo = self.tonic_near(38) - 5;
+        let fit = |p: i32| lo + (p - lo).rem_euclid(12);
+        let roots = [fit(self.root + c[0].bass()), fit(self.root + c[1].bass())];
+        let next = fit(self.root + c[2].bass());
+        let lift = 0.85 + 0.15 * e;
+        let h = self.human;
+        if half {
+            for (st, k, len) in [(0.0, 0, 7.0), (8.0, 1, 7.0)] {
+                let late = self.rng.range(0.0, h);
+                b.note(st, late, CH_BASS, roots[k], 0.9 * lift, len, false);
+            }
+            return;
+        }
+        let walk = next != roots[1] && self.rng.chance(0.3);
+        for k in 0..8 {
+            let mut p = roots[k / 4];
+            if k == 7 && walk {
+                p = next + if next > p { -1 } else { 1 };
+            }
+            let v = if k % 2 == 0 { 0.92 } else { 0.88 } * lift * self.rng.range(0.94, 1.0);
+            let late = self.rng.range(0.0, h);
+            b.note(2.0 * k as f32, late, CH_BASS, p, v, 1.6, false);
+        }
+        self.sk.bass_prev = roots[1];
+    }
+
+    /// The third wave's distorted guitar in the punk drive: power chords on
+    /// each half bar's root, palm-muted eighths with the beats dug in, or
+    /// rung out on the one and the three; in half time a bar rung out (or
+    /// two halves).
+    fn ska_power(&mut self, b: &mut Bar, c: [Harm; 3], sec: Sec, half: bool) {
+        let vel = 0.75 + 0.2 * sec.energy;
+        let split = c[1] != c[0];
+        let hits: Vec<(f32, f32, f32, usize)> = if half || self.sk.ring {
+            match (half, split) {
+                (true, false) => vec![(0.0, 15.5, 1.0, 0)],
+                _ => vec![(0.0, 7.5, 1.0, 0), (8.0, 7.5, 0.95, 1)],
+            }
+        } else {
+            (0..8).map(|k| (2.0 * k as f32, 0.9, if k % 2 == 0 { 1.0 } else { 0.7 }, k / 4)).collect()
+        };
+        let h = self.human;
+        for (st, len, f, k) in hits {
+            let late = self.rng.range(0.0, h);
+            for n in self.ska_fifths(c[k]) {
+                b.note(st, late, CH_DRONE, n, vel * f, len, false);
+            }
+        }
+    }
+
+    /// The third wave's bridge on the horns: the four holding each chord in
+    /// close harmony, swelling as it goes (a quiet bridge's from its second
+    /// half), the trumpet moving as little as it can.
+    fn ska_swell(&mut self, b: &mut Bar, sec: Sec, m: u32, c: [Harm; 3], half: bool) {
+        let i = self.sec_bar;
+        if !half && i < sec.bars / 2 {
+            return;
+        }
+        let tune = self.tonic_near(SK_TUNE);
+        let vel = 0.45 + 0.45 * (i + 1) as f32 / sec.bars as f32;
+        let split = c[1] != c[0];
+        for (k, st) in [(0usize, 0.0f32), (1, 8.0)] {
+            if k == 1 && !split {
+                break;
+            }
+            let h = c[k];
+            let ct = in_range(&h.pcs(), SK_LO + 2, SK_HI);
+            let top = ct[nearest(&ct, self.sk.solo_prev)];
+            self.sk.solo_prev = top;
+            let len = if split { 7.5 } else { 15.5 };
+            let [p2, p3, p4] = self.ska_voices4(top, h, SKH_TRIAD, tune);
+            for (ch, layer, n, f) in [
+                (CH_LEAD, L_LEAD, top, 1.0),
+                (CH_PAD, L_PAD, p2, 0.9),
+                (CH_BELL, L_BELL, p3, 0.9),
+                (CH_ARP, L_ARP, p4, 0.85),
+            ] {
+                if m & layer != 0 {
+                    b.note(st, 0.0, ch, tune + n, vel * f, len, false);
+                }
             }
         }
     }
@@ -5275,7 +5500,19 @@ impl Song {
             let v = n.vel * vel;
             let how = if intro { self.sk.harmony } else { SKH_THIRD };
             let (p2, p3) = self.ska_voices(n.pitch, c[ska_half(n.step, n.len)], how, tune);
-            if intro {
+            if intro && self.sk.third {
+                let [q2, q3, q4] = self.ska_voices4(n.pitch, c[ska_half(n.step, n.len)], how, tune);
+                for (ch, layer, q, f) in [
+                    (CH_LEAD, L_LEAD, n.pitch, 1.0),
+                    (CH_PAD, L_PAD, q2, 0.85),
+                    (CH_BELL, L_BELL, q3, 0.85),
+                    (CH_ARP, L_ARP, q4, 0.8),
+                ] {
+                    if m & layer != 0 {
+                        b.note(st, late, ch, tune + q, v * f, len, false);
+                    }
+                }
+            } else if intro {
                 if m & L_LEAD != 0 {
                     b.note(st, late, CH_LEAD, tune + n.pitch, v, len, false);
                 }
@@ -5408,6 +5645,29 @@ impl Song {
         // the horns' top: the tonic, the third or the sixth, near the tune's tonic an octave up
         let top = in_range(&h.pcs(), 7, 16);
         let lead = top[self.rng.below(top.len())];
+        if self.sk.third {
+            // the third wave stops dead: one hit, an eighth long, everyone
+            let [q2, q3, q4] = self.ska_voices4(lead, h, SKH_TRIAD, tune);
+            for (ch, layer, n) in
+                [(CH_LEAD, L_LEAD, lead), (CH_PAD, L_PAD, q2), (CH_BELL, L_BELL, q3), (CH_ARP, L_ARP, q4)]
+            {
+                if m & layer != 0 {
+                    b.note(0.0, 0.0, ch, tune + n, 0.95, 1.8, false);
+                }
+            }
+            if m & L_DRONE != 0 {
+                for n in self.ska_fifths(h) {
+                    b.note(0.0, 0.0, CH_DRONE, n, 0.95, 1.8, false);
+                }
+            }
+            if m & L_BASS != 0 {
+                b.note(0.0, 0.0, CH_BASS, bass, 0.95, 1.8, false);
+            }
+            b.hit(0.0, 0.0, CH_KICK, 0, 1.0);
+            b.hit(0.0, 0.0, CH_SNARE, 0, 0.9);
+            b.hit(0.0, 0.0, CH_CYM, 0, 0.9);
+            return;
+        }
         let (p2, p3) = self.ska_voices(lead, h, SKH_TRIAD, tune);
         // the chord: the rhythm section's `len` long, the horns' and the organ's `ring`
         let chord = |b: &mut Bar, st: f32, len: f32, ring: f32, vel: f32, v: &[Vec<i32>; 3]| {
@@ -5481,8 +5741,11 @@ impl Song {
         let vb = self.var_b();
         let fill = self.fill(sec);
         let full = matches!(sec.kind, MAIN | BUILD | OUTRO);
-        // this piece's drummer: four on the floor, the hat open on every off-beat
+        // this piece's drummer: four on the floor, the hat open on every
+        // off-beat; a third-wave one's punk drive (the kick on every beat,
+        // the snare on every off-beat) where the band is in full
         let (four, open) = (self.dr.snare_kind == 1, self.dr.tambourine);
+        let punk = self.sk.third && full;
         let r = &mut self.rng;
         let last = (beats - 1) * beat;
         let off = beat / 2;
@@ -5493,17 +5756,20 @@ impl Song {
         if kick || sec.kind == BREAK {
             let soft = if kick { 1.0 } else { 0.6 };
             for k in 0..beats {
-                let on = k == 0 || four || (beats == 4 && k == 2);
+                let on = k == 0 || four || punk || (beats == 4 && k == 2);
                 if on && !(cut(k * beat) && k > 0) {
                     let v = if k == 0 { 0.9 } else { 0.75 } * (0.85 + 0.15 * e) * soft;
                     b.hit((k * beat) as f32, r.range(0.0, h), CH_KICK, 0, v);
                 }
             }
         }
-        let backs = (1..beats).filter(|&k| beats == 3 || k % 2 == 1);
+        let backs: Vec<u32> = if punk {
+            (0..beats).map(|k| k * beat + off).collect()
+        } else {
+            (1..beats).filter(|&k| beats == 3 || k % 2 == 1).map(|k| k * beat).collect()
+        };
         let snare = full || m & L_SNARE != 0;
-        for k in backs {
-            let st = k * beat;
+        for st in backs {
             if cut(st) {
                 continue;
             }
@@ -5638,6 +5904,15 @@ impl Song {
                 }
                 if !compound {
                     self.swing = self.swing.max(r.range(0.12, 0.22));
+                }
+            }
+            SKA => {
+                // a third-wave drummer a third of the time: the punk drive on a rock kit
+                self.sk.third = r.chance(0.33);
+                if self.sk.third {
+                    s.ch[CH_KICK].drums = ska_kit_punk_kick(r);
+                    s.ch[CH_SNARE].drums = ska_kit_punk_snare(r);
+                    (s.ch[CH_KICK].gain, s.ch[CH_SNARE].gain) = (0.45, 1.4);
                 }
             }
             _ => {}
@@ -7684,12 +7959,18 @@ fn sounds_tavern(r: &mut Rng, s: &mut Synth) {
 
 // -- ska
 
-/// What a ska section plays: the intro, the head, a solo, the breakdown, the tag.
+/// What a ska section plays: the intro, the head, a solo, the breakdown
+/// (the third wave's bridge), the tag, the third wave's horn break.
 const SK_INTRO: u8 = 0;
 const SK_HEAD: u8 = 1;
 const SK_SOLO: u8 = 2;
 const SK_BREAK: u8 = 3;
 const SK_TAG: u8 = 4;
+const SK_RUN: u8 = 5;
+/// Ska's styles: the first wave, 2-tone, the third wave (ska-punk).
+const SKS_FIRST: u8 = 0;
+const SKS_TWO: u8 = 1;
+const SKS_THIRD: u8 = 2;
 /// Intros: the rhythm section's vamp (the horns' pickup into the head), a
 /// horn riff over it, a bar of the drums alone first.
 const SKI_VAMP: u8 = 0;
@@ -7766,6 +8047,36 @@ const SKA_MIN_B: &[&str] = &[
 const SKA_VAMP_MAJ: &[&str] = &["I+IV V7+IV I+IV V7+IV", "I I IV V7", "I IV V7 IV", "I vi IV V7"];
 const SKA_VAMP_MIX: &[&str] = &["I bVII IV I", "I+bVII IV+I I+bVII IV+V7", "I I bVII IV"];
 const SKA_VAMP_MIN: &[&str] = &["i+bVII bVI+V7 i+bVII bVI+V7", "i i iv V7", "i iv V7 iv", "i bVII bVI V7"];
+/// The third wave's: verses (A, home again), choruses (B, ending on the
+/// dominant or the bVII), bridges (C), minor mostly (i-bVI-bIII-bVII and
+/// its kin), and intros.
+const SKA_TW_MIN_A: &[&str] = &[
+    "i bVI bIII bVII i bVI bVII i",
+    "i i bVI bVI bIII bIII bVII i",
+    "i bVII bVI bVII i bVII bVI+bVII i",
+    "i iv bVII bIII bVI iv V7 i",
+    "i+bVI bIII+bVII i+bVI bIII+bVII i+bVI bIII+bVII iv+bVII i",
+    "i bIII bVII iv i bIII bVII+V7 i",
+];
+const SKA_TW_MIN_B: &[&str] = &[
+    "bVI bVII i i bVI bVII V7 V7",
+    "bVI bVII bIII bIII bVI bVII V7 V7",
+    "iv iv i i bVI bVII V7 V7",
+    "bIII bVII bVI bVI bIII bVII bVI bVII",
+    "bVI bIII bVII i bVI bIII bVII bVII",
+];
+const SKA_TW_MIN_C: &[&str] = &[
+    "bVI bVI bVII bVII i i bVII bVII",
+    "iv iv bVI bVI bVII bVII V7 V7",
+    "bIII bIII bVII bVII bVI bVI V7 V7",
+    "i i bVI bVI iv iv V7 V7",
+];
+const SKA_TW_MAJ_A: &[&str] =
+    &["I V vi IV I V IV+V I", "I IV vi V I IV V I", "I iii IV V I iii IV+V I", "I I IV IV vi vi V I"];
+const SKA_TW_MAJ_B: &[&str] = &["IV V vi IV IV V V7 V7", "vi IV I V vi IV V7 V7", "IV IV I I vi vi V7 V7"];
+const SKA_TW_MAJ_C: &[&str] = &["vi vi IV IV I I V V", "ii ii IV IV vi vi V7 V7", "IV IV vi vi IV IV V7 V7"];
+const SKA_TW_VAMP_MIN: &[&str] = &["i bVI bIII bVII", "i bVII bVI bVII", "i i bVI bVII"];
+const SKA_TW_VAMP_MAJ: &[&str] = &["I V vi IV", "I IV I V", "vi IV I V"];
 
 /// Rhythms a bar of a head is made of (16th steps, lengths): quarters and
 /// eighths, the 3+3+2 push, dotted figures, a bar starting on the
@@ -7814,9 +8125,22 @@ const SKA_RIFFS: &[&[(u16, u16)]] = &[
     &[(0, 3), (3, 3), (6, 2), (10, 2), (14, 2)],
 ];
 
-/// A ska section: its part, the strain it plays (0 A, 1 B), which time
-/// through that strain, whether it is the head out, its instruments (the
-/// band's A or B: `which`), its soloist.
+/// The third wave's horn runs, a bar each: 16ths up or down the scale and
+/// into eighths, eighths straight through, pairs of 16ths, a syncopated
+/// line breaking into 16ths.
+const SKA_TW_RUNS: &[&[(u16, u16)]] = &[
+    &[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 2), (10, 2), (12, 4)],
+    &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 2), (10, 2), (12, 2), (14, 2)],
+    &[(0, 2), (2, 1), (3, 1), (4, 2), (6, 1), (7, 1), (8, 2), (10, 1), (11, 1), (12, 4)],
+    &[(0, 3), (3, 3), (6, 2), (8, 1), (9, 1), (10, 1), (11, 1), (12, 4)],
+    &[(2, 1), (3, 1), (4, 1), (5, 1), (6, 2), (8, 2), (10, 2), (12, 2), (14, 2)],
+    &[(0, 2), (2, 2), (4, 1), (5, 1), (6, 1), (7, 1), (8, 4), (12, 1), (13, 1), (14, 2)],
+];
+
+/// A ska section: its part, the strain it plays (0 A, 1 B, the third
+/// wave's bridge 2 C), which time through that strain, whether it is the
+/// head out, its instruments (the band's A or B: `which`), its soloist;
+/// whether it is in the third wave's punk drive, and in half time.
 #[derive(Clone, Copy, Default)]
 struct SkaSec {
     part: u8,
@@ -7825,6 +8149,8 @@ struct SkaSec {
     out: bool,
     dress: u8,
     solo: u8,
+    punk: bool,
+    half: bool,
 }
 
 /// A ska strain: eight bars of chords (two a bar), the head over them and
@@ -7845,6 +8171,7 @@ struct Ska {
     beat_steps: u32,
     meter: &'static str,
     two_tone: bool,
+    third: bool,
     /// how late the off-beat eighths come (16ths): the first wave's shuffle
     shuffle: f32,
     /// the kick on every beat, the open hat on every off-beat, the organ's
@@ -7876,6 +8203,127 @@ struct Ska {
     solo_prev: i32,
     solo_dir: i32,
     piano_v: Vec<i32>,
+    /// the third wave's: this section's punk beat (0 the skank beat, 1 a
+    /// rock beat), whether its power chords ring (or are palm-muted), the
+    /// horn break's line
+    drive: u8,
+    ring: bool,
+    run: Vec<PNote>,
+}
+
+/// A first-wave or 2-tone piece's form: an intro (a vamp, a horn riff
+/// over it, or the drums leading in), the head (AB or AABA), as many solo
+/// choruses (and a breakdown) as a minute and a half to two and a half
+/// holds at bars `bar_s` seconds long (an AABA too long comes back from the
+/// bridge, or is AB), the head out and the tag. The sections, the head's
+/// strains in order, the solos, the intro's kind.
+fn ska_form(r: &mut Rng, bar_s: f64, two_tone: bool) -> (Vec<(Sec, SkaSec)>, Vec<u8>, u32, u8) {
+    let tag = if r.bit_chance() { 3 } else { 5 };
+    let mut aaba = r.chance(0.5);
+    let mut from_bridge = aaba && r.chance(0.5);
+    let (mut solos, brk);
+    loop {
+        let n = if aaba { 32 } else { 16 };
+        let base = 4 + n + if from_bridge { 16 } else { n } + tag;
+        solos = 1;
+        while ((base + solos * n) as f64) * bar_s < 95.0 && solos < 3 {
+            solos += 1;
+        }
+        let t = (base + solos * n) as f64 * bar_s;
+        if t > 150.0 && aaba {
+            (aaba, from_bridge) = (!from_bridge, !from_bridge);
+            continue;
+        }
+        brk = t + 8.0 * bar_s <= 150.0 && r.chance(0.5);
+        break;
+    }
+    let form: Vec<u8> = if aaba { vec![0, 0, 1, 0] } else { vec![0, 1] };
+    let organ = if two_tone || r.chance(0.5) { L_PAD } else { 0 };
+    let piano = if !two_tone || r.chance(0.35) { L_DRONE } else { 0 };
+    let rhythm = L_KICK | L_SNARE | L_HAT | L_OHAT | L_BASS | L_KEYS;
+    let horns = L_LEAD | L_BELL | L_ARP;
+    let intro = r.weighted(&[1.0, 1.2, 0.8]) as u8;
+    let sx = |part: u8, strain: u8, rep: u8, dress: u8| SkaSec { part, strain, rep, dress, ..SkaSec::default() };
+    let riffing = if intro == SKI_RIFF { horns } else { 0 };
+    let mut plan = vec![(
+        Sec {
+            kind: INTRO,
+            bars: 4,
+            mask: rhythm | organ | riffing | if intro == SKI_VAMP { 0 } else { L_PERC },
+            energy: 0.65,
+        },
+        sx(SK_INTRO, 0, 0, 0),
+    )];
+    // the head: the organ joins after the first strain, the piano leaves the bridge to it
+    let mut reps = [0u8; 2];
+    for (k, &st) in form.iter().enumerate() {
+        let keys =
+            if k == 0 { piano | if piano == 0 { organ } else { 0 } } else { organ | if st == 0 { piano } else { 0 } };
+        let sec = Sec { kind: MAIN, bars: 8, mask: rhythm | horns | keys, energy: 0.72 + 0.04 * k as f32 };
+        plan.push((sec, sx(SK_HEAD, st, reps[st as usize], st)));
+        reps[st as usize] += 1;
+    }
+    // the solos, a chorus each, the riffs behind them
+    let n = 8 * form.len() as u32;
+    for k in 0..solos {
+        let mask = rhythm | L_PERC | L_LEAD | L_CTR | if organ != 0 { organ } else { piano };
+        let x = SkaSec { part: SK_SOLO, solo: k as u8, dress: 1 + (k % 2) as u8, ..SkaSec::default() };
+        plan.push((Sec { kind: MAIN, bars: n, mask, energy: 0.8 + 0.05 * k as f32 }, x));
+    }
+    // the breakdown: the bass, the guitar and the drums, quietly
+    if brk {
+        let mask = L_KICK | L_SNARE | L_HAT | L_BASS | L_KEYS | L_PERC;
+        plan.push((Sec { kind: BREAK, bars: 8, mask, energy: 0.5 }, sx(SK_BREAK, 0, 0, 2)));
+    }
+    for (k, &st) in form.iter().enumerate().skip(if from_bridge { 2 } else { 0 }) {
+        let sec =
+            Sec { kind: MAIN, bars: 8, mask: rhythm | horns | organ | piano | L_PERC, energy: 0.86 + 0.03 * k as f32 };
+        plan.push((sec, SkaSec { out: true, ..sx(SK_HEAD, st, reps[st as usize], st) }));
+        reps[st as usize] += 1;
+    }
+    let mask = rhythm | horns | organ | piano | L_PERC;
+    plan.push((Sec { kind: OUTRO, bars: tag, mask, energy: 1.0 }, sx(SK_TAG, 0, 0, 0)));
+    (plan, form, solos, intro)
+}
+
+/// The third wave's form: a horn line over the band in the punk drive, two
+/// verses (A, the skank under the horns' tune, once or twice through) each
+/// answered by a chorus (B, in the punk drive), the horn break (runs over
+/// the chorus's chords), the bridge (C: a half-time breakdown, or quiet
+/// and building back), the last chorus (once or twice through) and one hit
+/// to end it.
+fn ska_third_form(r: &mut Rng) -> Vec<(Sec, SkaSec)> {
+    let ska = L_KICK | L_SNARE | L_HAT | L_OHAT | L_BASS | L_KEYS;
+    let punk = L_KICK | L_SNARE | L_HAT | L_OHAT | L_BASS | L_DRONE | L_PERC;
+    let horns = L_LEAD | L_BELL | L_ARP | L_PAD;
+    // the band's B instruments in the punk drive
+    let sx = |part: u8, strain: u8, rep: u8, punk: bool| SkaSec {
+        part,
+        strain,
+        rep,
+        punk,
+        dress: punk as u8,
+        ..SkaSec::default()
+    };
+    let mut plan = vec![(Sec { kind: INTRO, bars: 4, mask: punk | horns, energy: 0.8 }, sx(SK_INTRO, 0, 0, true))];
+    for k in 0..2u8 {
+        let e = 0.05 * k as f32;
+        plan.push((Sec { kind: MAIN, bars: 8, mask: ska | horns, energy: 0.7 + e }, sx(SK_HEAD, 0, k, false)));
+        plan.push((Sec { kind: MAIN, bars: 8, mask: punk | horns, energy: 0.85 + e }, sx(SK_HEAD, 1, k, true)));
+    }
+    plan.push((Sec { kind: MAIN, bars: 8, mask: punk | horns, energy: 0.9 }, sx(SK_RUN, 1, 0, true)));
+    let bridge = if r.chance(0.55) {
+        let x = SkaSec { half: true, dress: 2, ..sx(SK_BREAK, 2, 0, true) };
+        (Sec { kind: BREAK, bars: 8, mask: punk | horns, energy: 0.75 }, x)
+    } else {
+        let mask = L_KICK | L_SNARE | L_HAT | L_BASS | L_KEYS | horns;
+        (Sec { kind: BREAK, bars: 8, mask, energy: 0.5 }, SkaSec { dress: 2, ..sx(SK_BREAK, 2, 0, false) })
+    };
+    plan.push(bridge);
+    let x = SkaSec { out: true, ..sx(SK_HEAD, 1, 2, true) };
+    plan.push((Sec { kind: MAIN, bars: 16, mask: punk | horns, energy: 1.0 }, x));
+    plan.push((Sec { kind: OUTRO, bars: 1, mask: punk | horns, energy: 1.0 }, sx(SK_TAG, 0, 0, true)));
+    plan
 }
 
 /// Which of a bar's chords a note sounds over: 0 the first half's, 1 the
@@ -8058,19 +8506,45 @@ fn ska_scoops(r: &mut Rng, mel: &mut [PNote], p: f32) {
     }
 }
 
-/// A two-bar riff over the home chord: a cell of stabs and pushes, its
-/// second bar the same rhythm from another chord tone (or another cell).
-fn ska_riff(r: &mut Rng, home: Harm, mode: usize, lo: i32, hi: i32) -> Vec<PNote> {
+/// A two-bar riff over the home chord: a cell of `cells` (stabs and
+/// pushes; the third wave's runs), its second bar the same rhythm from
+/// another chord tone (or another cell).
+fn ska_riff(r: &mut Rng, home: Harm, mode: usize, lo: i32, hi: i32, cells: &[&[(u16, u16)]]) -> Vec<PNote> {
     let c = [home; 3];
     let ct = in_range(&home.pcs(), lo + 3, hi - 3);
     let mut dir = 1;
-    let cell = r.pick(SKA_RIFFS);
+    let cell = r.pick(cells);
     let p = ct[r.below(ct.len())];
     let a = ska_figure(r, cell, c, mode, p, &mut dir, lo, hi);
-    let cell2 = if r.chance(0.6) { cell } else { r.pick(SKA_RIFFS) };
+    let cell2 = if r.chance(0.6) { cell } else { r.pick(cells) };
     let p = ct[r.below(ct.len())];
     let b = ska_figure(r, cell2, c, mode, p, &mut dir, lo, hi);
     a.into_iter().chain(b.into_iter().map(|n| PNote { step: n.step + 16, ..n })).collect()
+}
+
+/// The third wave's horn break: eight bars of runs over a strain's chords
+/// (the first two bars back in the fifth and sixth, fitted to theirs), each
+/// four-bar phrase closing on a long note.
+fn ska_runs(r: &mut Rng, chords: &[Harm], mode: usize, lo: i32, hi: i32) -> Vec<PNote> {
+    let ch = |bar: usize| [chords[bar * 2], chords[bar * 2 + 1], chords[(bar * 2 + 2) % chords.len()]];
+    let mut bars: Vec<Vec<PNote>> = Vec::with_capacity(8);
+    let mut prev = r.pick(&[0, 4, 7, 12]).clamp(lo, hi);
+    let mut dir = if prev > (lo + hi) / 2 { -1 } else { 1 };
+    for bar in 0..8 {
+        let notes = if (bar == 4 || bar == 5) && r.chance(0.7) {
+            ska_refit(&bars[bar - 4], ch(bar - 4), ch(bar), mode, lo, hi)
+        } else {
+            let cell = if bar % 4 == 3 { r.pick(SKA_CADENCE) } else { r.pick(SKA_TW_RUNS) };
+            ska_figure(r, cell, ch(bar), mode, prev, &mut dir, lo, hi)
+        };
+        prev = notes.last().map_or(prev, |n| n.pitch);
+        bars.push(notes);
+    }
+    let mut run = Vec::new();
+    for (bar, notes) in bars.iter().enumerate() {
+        run.extend(notes.iter().map(|n| PNote { step: n.step + 16 * bar as u16, ..*n }));
+    }
+    run
 }
 
 /// A clean electric guitar's upstroke, muted after it speaks (a short
@@ -8096,6 +8570,80 @@ fn ska_guitar_chop(r: &mut Rng) -> Patch {
 /// The skank on a clean guitar left to ring a little (a bridge pickup's twang).
 fn ska_guitar_clean(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(0.5, 0.8), ks_tone: 0.88, a: 0.001, d: 0.3, s: 0.7, r: 0.07, gain: 0.5, ..PATCH }
+}
+
+/// The third wave's skank: a guitar's chop with some crunch (an amp turned up).
+fn ska_guitar_crunch(r: &mut Rng) -> Patch {
+    Patch {
+        ks: r.range(0.3, 0.5),
+        ks_tone: r.range(0.8, 0.9),
+        cutoff: r.range(3000.0, 4200.0),
+        res: 0.15,
+        env_amt: 0.8,
+        fdec: 0.06,
+        keytrack: 0.3,
+        a: 0.001,
+        d: 0.12,
+        s: 0.45,
+        r: 0.035,
+        drive: r.range(1.5, 3.0),
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+/// A distorted guitar for power chords, double-tracked (two saws a few
+/// cents apart, left and right, the amp's mids pushed ahead of it, an "a"
+/// formant, and driven hard).
+fn ska_guitar_dist(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Saw,
+        unison: 2,
+        detune: r.range(6.0, 10.0),
+        width: 1.0,
+        wave2: Wave::Square,
+        mix2: 0.3,
+        vowel: 1,
+        cutoff: r.range(3000.0, 4000.0),
+        res: 0.2,
+        env_amt: 1.0,
+        fdec: 0.08,
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.6,
+        s: 0.7,
+        r: 0.06,
+        drive: r.range(5.0, 8.0),
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+/// A fuzzier take: squares, an "o" ahead of the amp, driven harder.
+fn ska_guitar_fuzz(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: r.range(0.3, 0.45),
+        vowel: 4,
+        unison: 2,
+        detune: r.range(5.0, 9.0),
+        width: 1.0,
+        wave2: Wave::Saw,
+        mix2: 0.25,
+        semi2: 12.0,
+        cutoff: r.range(1200.0, 1800.0),
+        res: 0.25,
+        env_amt: 1.2,
+        fdec: 0.1,
+        keytrack: 0.4,
+        a: 0.002,
+        d: 0.7,
+        s: 0.75,
+        r: 0.06,
+        drive: r.range(8.0, 12.0),
+        gain: 0.28,
+        ..PATCH
+    }
 }
 
 /// An upright piano, bright and a little hard (a high partial ringing on).
@@ -8423,6 +8971,104 @@ fn ska_kit_splash(r: &mut Rng) -> Vec<DrumPatch> {
     vec![DrumPatch { ndec: r.range(0.7, 1.0), ncut: r.range(5500.0, 7000.0), ..crash(r)[0] }]
 }
 
+/// The third wave's trumpet: bright and hard-edged, a section player's.
+fn ska_trumpet(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: 4.0,
+        width: 0.1,
+        cutoff: r.range(2200.0, 2800.0),
+        res: 0.2,
+        env_amt: 1.6,
+        fdec: 0.08,
+        keytrack: 0.6,
+        a: 0.012,
+        d: 0.3,
+        s: 0.8,
+        r: 0.06,
+        vib: 0.08,
+        vib_rate: 5.5,
+        glide: 0.012,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+/// The third wave's tenor sax: more reed in it than the jazz band's.
+fn ska_tenor(r: &mut Rng) -> Patch {
+    Patch {
+        fm: r.range(3.0, 3.8),
+        ratio: 1.0,
+        fm_dec: 2.0,
+        cutoff: r.range(3500.0, 4500.0),
+        res: 0.2,
+        keytrack: 0.4,
+        a: 0.025,
+        d: 0.4,
+        s: 0.85,
+        r: 0.1,
+        vib: 0.15,
+        vib_rate: 5.5,
+        glide: 0.02,
+        gain: 0.26,
+        ..PATCH
+    }
+}
+
+/// The third wave's trombone: brassier, blown harder.
+fn ska_bone(r: &mut Rng) -> Patch {
+    Patch {
+        cutoff: r.range(1500.0, 2000.0),
+        res: 0.2,
+        env_amt: 1.4,
+        fdec: 0.12,
+        keytrack: 0.5,
+        a: 0.02,
+        d: 0.4,
+        s: 0.85,
+        r: 0.08,
+        vib: 0.06,
+        vib_rate: 5.0,
+        glide: 0.04,
+        gain: 0.3,
+        ..PATCH
+    }
+}
+
+/// The third wave's rock kick: punchy, the beater's snap on top.
+fn ska_kit_punk_kick(r: &mut Rng) -> Vec<DrumPatch> {
+    vec![DrumPatch {
+        noise: 0.5,
+        nmode: 0,
+        ncut: 6000.0,
+        ndec: 0.02,
+        ..kick(r, (130.0, 160.0), (50.0, 58.0), (0.22, 0.3), 1.0, 0.4)
+    }]
+}
+
+/// The third wave's rock snare: a fat crack, the wires ringing; and its soft stroke.
+fn ska_kit_punk_snare(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        tone: 0.6,
+        f0: r.range(220.0, 260.0),
+        f1: r.range(180.0, 200.0),
+        pdec: 0.01,
+        tdec: 0.1,
+        tone2: 0.3,
+        ratio2: 1.5,
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(2500.0, 3500.0),
+        nres: 0.1,
+        ndec: r.range(0.16, 0.22),
+        click: 0.2,
+        drive: 0.4,
+        gain: 0.9,
+        ..DRUM
+    };
+    vec![c, DrumPatch { tone: 0.3, ndec: 0.08, click: 0.0, gain: 0.55, ..c }]
+}
+
 /// Ska's instruments: the skank's (guitars, pianos, an organ stab; the
 /// first wave's guitars alone), the organs, the pianos, the basses, the
 /// lead horns, the second horns, the low ones; the kits; the soloists (and
@@ -8436,6 +9082,18 @@ const P_SKA_CHOP: &[(&str, Make)] = &[
 ];
 const P_SKA_GUITAR: &[(&str, Make)] =
     &[("muted guitar chop", ska_guitar_chop), ("clean guitar skank", ska_guitar_clean)];
+/// The third wave's: the skank, the distorted guitars, the sax beside the
+/// trumpet, the bass, the lead and second horns; its kick and snare.
+const P_SKA_PUNK_CHOP: &[(&str, Make)] =
+    &[("crunchy guitar skank", ska_guitar_crunch), ("muted guitar chop", ska_guitar_chop)];
+const P_SKA_DIST: &[(&str, Make)] = &[("distorted guitar", ska_guitar_dist), ("fuzz guitar", ska_guitar_fuzz)];
+const P_SKA_SAX: &[(&str, Make)] = &[("tenor sax", ska_tenor), ("alto sax", ska_alto)];
+const P_SKA_PUNK_BASS: &[(&str, Make)] =
+    &[("electric bass, picked", ska_bass_pick), ("electric bass, fingers", ska_bass_finger)];
+const P_SKA_TW_LEAD: &[(&str, Make)] = &[("trumpet", ska_trumpet), ("alto sax", ska_alto)];
+const P_SKA_TW_HORN: &[(&str, Make)] = &[("trombone", ska_bone), ("tenor sax", ska_tenor)];
+const K_SKA_PUNK_KICK: &[(&str, MakeKit)] = &[("rock kick", ska_kit_punk_kick)];
+const K_SKA_PUNK_SNARE: &[(&str, MakeKit)] = &[("rock snare", ska_kit_punk_snare), ("tight snare", ska_kit_snare)];
 const P_SKA_ORGAN: &[(&str, Make)] =
     &[("Farfisa", ska_farfisa), ("Vox Continental", ska_vox), ("Hammond", ska_hammond), ("organ", pad_organ)];
 const P_SKA_PIANO: &[(&str, Make)] =
@@ -8470,18 +9128,28 @@ const K_SKA_CYM: &[(&str, MakeKit)] = &[("crash", crash), ("splash", ska_kit_spl
 const SKA_SOLOISTS: &[(&str, Make, i32)] =
     &[("tenor sax", sax, 62), ("trumpet", trumpet, 72), ("trombone", trombone, 58), ("alto sax", ska_alto, 67)];
 
-fn band_ska(r: &mut Rng, s: &Synth, two_tone: bool) -> Band {
+fn band_ska(r: &mut Rng, s: &Synth, style: u8) -> Band {
+    let third = style == SKS_THIRD;
     let mut b = Band::default();
     // the first wave's skank always a guitar's (the piano plays it on its own)
-    b.tone(r, s, CH_KEYS, if two_tone { P_SKA_CHOP } else { P_SKA_GUITAR }, 64.0);
-    b.tone(r, s, CH_PAD, P_SKA_ORGAN, 62.0);
-    b.tone(r, s, CH_DRONE, P_SKA_PIANO, 60.0);
-    b.tone(r, s, CH_BASS, P_SKA_BASS, 40.0);
-    b.tone(r, s, CH_LEAD, P_SKA_LEAD, 72.0);
-    b.tone(r, s, CH_BELL, P_SKA_HORN, 62.0);
+    let chop = match style {
+        SKS_FIRST => P_SKA_GUITAR,
+        SKS_TWO => P_SKA_CHOP,
+        _ => P_SKA_PUNK_CHOP,
+    };
+    b.tone(r, s, CH_KEYS, chop, 64.0);
+    b.tone(r, s, CH_PAD, if third { P_SKA_SAX } else { P_SKA_ORGAN }, 62.0);
+    if third {
+        b.tone(r, s, CH_DRONE, P_SKA_DIST, 48.0);
+    } else {
+        b.tone(r, s, CH_DRONE, P_SKA_PIANO, 60.0);
+    }
+    b.tone(r, s, CH_BASS, if third { P_SKA_PUNK_BASS } else { P_SKA_BASS }, 40.0);
+    b.tone(r, s, CH_LEAD, if third { P_SKA_TW_LEAD } else { P_SKA_LEAD }, 72.0);
+    b.tone(r, s, CH_BELL, if third { P_SKA_TW_HORN } else { P_SKA_HORN }, 62.0);
     b.tone(r, s, CH_ARP, P_SKA_LOW, 50.0);
-    b.kit(r, s, CH_KICK, K_SKA_KICK);
-    b.kit(r, s, CH_SNARE, K_SKA_SNARE);
+    b.kit(r, s, CH_KICK, if third { K_SKA_PUNK_KICK } else { K_SKA_KICK });
+    b.kit(r, s, CH_SNARE, if third { K_SKA_PUNK_SNARE } else { K_SKA_SNARE });
     b.kit(r, s, CH_HAT, K_SKA_HAT);
     b.kit(r, s, CH_PERC, K_SKA_PERC);
     b.kit(r, s, CH_CYM, K_SKA_CYM);
@@ -8489,42 +9157,72 @@ fn band_ska(r: &mut Rng, s: &Synth, two_tone: bool) -> Band {
 }
 
 /// Ska's sounds: a jazz kit (the cross-stick more often in the first
-/// wave), the muted guitar's chop, a Hammond (first wave) or a Farfisa or
-/// Vox (2-tone), the piano, an upright or fingered bass (a picked one in
-/// 2-tone), trumpet or alto, trombone or tenor, baritone; a room; the
-/// first wave's record a little dull and crackling, light in the bass, the
-/// chop forward; 2-tone spread wide.
-fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
+/// wave; the third wave's a rock kit), the muted guitar's chop (the third
+/// wave's crunchy, and its distorted guitar), a Hammond (first wave) or a
+/// Farfisa or Vox (2-tone), the piano (the third wave's sax instead of the
+/// organ, its guitar instead of the piano), an upright or fingered bass (a
+/// picked one after the first wave), trumpet or alto, trombone or tenor,
+/// baritone; a room; the first wave's record a little dull and crackling,
+/// light in the bass, the chop forward; 2-tone and the third wave spread wide.
+fn sounds_ska(r: &mut Rng, s: &mut Synth, style: u8) {
+    let (first, two_tone, third) = (style == SKS_FIRST, style == SKS_TWO, style == SKS_THIRD);
     let ch = &mut s.ch;
-    ch[CH_KICK].drums = ska_kit_kick(r);
-    ch[CH_SNARE].drums = if r.chance(if two_tone { 0.2 } else { 0.6 }) { ska_kit_cross(r) } else { ska_kit_snare(r) };
+    ch[CH_KICK].drums = if third { ska_kit_punk_kick(r) } else { ska_kit_kick(r) };
+    ch[CH_SNARE].drums = if third {
+        ska_kit_punk_snare(r)
+    } else if r.chance(if two_tone { 0.2 } else { 0.6 }) {
+        ska_kit_cross(r)
+    } else {
+        ska_kit_snare(r)
+    };
     ch[CH_HAT].drums = ska_kit_hats(r);
     ch[CH_PERC].drums = ska_kit_toms(r);
     ch[CH_CYM].drums = crash(r);
-    ch[CH_BASS].patch = match (two_tone, r.bit_chance()) {
-        (true, true) => ska_bass_pick(r),
-        (false, true) => bass_upright(r),
+    ch[CH_BASS].patch = match (first, r.bit_chance()) {
+        (false, true) => ska_bass_pick(r),
+        (true, true) => bass_upright(r),
         _ => ska_bass_finger(r),
     };
-    ch[CH_KEYS].patch = ska_guitar_chop(r);
-    ch[CH_PAD].patch = match (two_tone, r.bit_chance()) {
-        (false, _) => ska_hammond(r),
-        (true, true) => ska_farfisa(r),
-        _ => ska_vox(r),
+    ch[CH_KEYS].patch = if third { ska_guitar_crunch(r) } else { ska_guitar_chop(r) };
+    ch[CH_PAD].patch = match (style, r.bit_chance()) {
+        (SKS_FIRST, _) => ska_hammond(r),
+        (SKS_TWO, true) => ska_farfisa(r),
+        (SKS_TWO, false) => ska_vox(r),
+        (_, true) => ska_tenor(r),
+        _ => ska_alto(r),
     };
-    ch[CH_DRONE].patch = piano(r);
-    ch[CH_LEAD].patch = if two_tone && r.bit_chance() { ska_alto(r) } else { trumpet(r) };
-    ch[CH_BELL].patch = if r.chance(0.6) { trombone(r) } else { sax(r) };
+    ch[CH_DRONE].patch = if third { ska_guitar_dist(r) } else { piano(r) };
+    ch[CH_LEAD].patch = if third {
+        ska_trumpet(r)
+    } else if two_tone && r.bit_chance() {
+        ska_alto(r)
+    } else {
+        trumpet(r)
+    };
+    ch[CH_BELL].patch = if third {
+        ska_bone(r)
+    } else if r.chance(0.6) {
+        trombone(r)
+    } else {
+        sax(r)
+    };
     ch[CH_ARP].patch = ska_bari(r);
     // each role as loud whichever instrument it drew (the band's others are
     // levelled to these); on a first-wave record the bass thinner and the
     // chop forward, up in the middle with the horns
-    let first = !two_tone;
     for (c, note, db) in [
-        (CH_BASS, 40.0, if first { -21.0 } else { -18.0 }),
-        (CH_KEYS, 64.0, if first { -21.0 } else { -26.0 }),
+        (CH_BASS, 40.0, if two_tone { -18.0 } else { -21.0 }),
+        (
+            CH_KEYS,
+            64.0,
+            match style {
+                SKS_FIRST => -21.0,
+                SKS_TWO => -26.0,
+                _ => -25.0,
+            },
+        ),
         (CH_PAD, 62.0, -21.0),
-        (CH_DRONE, 60.0, -19.0),
+        (CH_DRONE, if third { 48.0 } else { 60.0 }, if third { -21.0 } else { -19.0 }),
         (CH_LEAD, 72.0, -19.0),
         (CH_BELL, 62.0, -19.0),
         (CH_ARP, 50.0, -18.0),
@@ -8538,29 +9236,36 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
         (CH_BELL, true),
         (CH_ARP, true),
         (CH_KEYS, false),
-        (CH_PAD, false),
+        (CH_PAD, third),
         (CH_DRONE, false),
     ] {
         ch[c].mono = mono;
     }
-    // the first wave's jazz kit light: a felt beater's thud, the cross-stick soft
-    mix(&mut ch[CH_KICK], if first { 0.35 } else { 0.6 }, 0.0, 0.05, 0.0, 0.0);
-    mix(&mut ch[CH_SNARE], if first { 0.32 } else { 0.45 }, 0.08, 0.18, 0.0, 0.0);
-    mix(&mut ch[CH_HAT], 0.7, 0.25, 0.06, 0.0, 0.0);
+    // the first wave's jazz kit light (a felt beater's thud, the cross-stick
+    // soft), the third wave's rock kit up front
+    let (kick, snare) = match style {
+        SKS_FIRST => (0.35, 0.32),
+        SKS_TWO => (0.6, 0.45),
+        _ => (0.45, 1.4),
+    };
+    mix(&mut ch[CH_KICK], kick, 0.0, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_SNARE], snare, 0.08, 0.18, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], if third { 0.98 } else { 0.7 }, 0.25, 0.06, 0.0, 0.0);
     mix(&mut ch[CH_PERC], 0.35, -0.2, 0.12, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.32, -0.3, 0.15, 0.0, 0.0);
     mix(&mut ch[CH_BASS], 0.5, 0.0, 0.04, 0.0, 0.0);
-    mix(&mut ch[CH_KEYS], 0.4, -0.35, 0.15, 0.04, 0.0);
+    mix(&mut ch[CH_KEYS], 0.4, -0.35, if third { 0.3 } else { 0.15 }, 0.04, 0.0);
     mix(&mut ch[CH_PAD], 0.5, 0.35, 0.18, 0.0, 0.0);
     mix(&mut ch[CH_DRONE], 0.4, 0.15, 0.15, 0.0, 0.0);
-    mix(&mut ch[CH_LEAD], 0.7, 0.12, 0.22, 0.05, 0.0);
+    mix(&mut ch[CH_LEAD], if third { 0.88 } else { 0.7 }, 0.12, 0.22, 0.05, 0.0);
     mix(&mut ch[CH_BELL], 0.5, -0.22, 0.22, 0.03, 0.0);
     mix(&mut ch[CH_ARP], 0.36, -0.05, 0.18, 0.0, 0.0);
-    if two_tone {
-        // spread wide: the guitar and the organ either side, the horns
-        // apart, the piano and the hats out; each as loud as nearer the middle
-        let power = |p: f32| ((1.0 - p.abs()).powi(2) + 1.0) / 2.0;
-        for (c, pan) in [
+    // 2-tone spread wide: the guitar and the organ either side, the horns
+    // apart, the piano and the hats out; the third wave's horn section
+    // spread across, its distorted guitar wide of itself (left and right);
+    // each as loud as nearer the middle
+    let pans: &[(usize, f32)] = match style {
+        SKS_TWO => &[
             (CH_KEYS, -0.8),
             (CH_PAD, 0.8),
             (CH_LEAD, 0.4),
@@ -8570,23 +9275,45 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
             (CH_HAT, 0.55),
             (CH_PERC, -0.45),
             (CH_CYM, -0.45),
-        ] {
-            ch[c].gain *= (power(ch[c].pan) / power(pan)).sqrt();
-            ch[c].pan = pan;
-        }
-        s.m.set_lp(20000.0);
-        s.fx.crackle = 0.0;
-        s.fx.hiss = 0.0;
-    } else {
+        ],
+        SKS_THIRD => &[
+            (CH_KEYS, -0.6),
+            (CH_PAD, -0.35),
+            (CH_LEAD, 0.3),
+            (CH_BELL, 0.55),
+            (CH_ARP, -0.5),
+            (CH_DRONE, 0.0),
+            (CH_HAT, 0.45),
+            (CH_PERC, -0.4),
+            (CH_CYM, -0.35),
+        ],
+        _ => &[],
+    };
+    let power = |p: f32| ((1.0 - p.abs()).powi(2) + 1.0) / 2.0;
+    for &(c, pan) in pans {
+        ch[c].gain *= (power(ch[c].pan) / power(pan)).sqrt();
+        ch[c].pan = pan;
+    }
+    // the distorted guitar's speaker
+    ch[CH_DRONE].lp = if third { 6500.0 } else { 20000.0 };
+    if first {
         mix(&mut ch[CH_FX], 0.8, 0.0, 0.0, 0.0, 0.0);
         s.m.set_lp(r.range(10000.0, 14000.0));
         s.fx.crackle = r.range(0.02, 0.05);
         s.fx.crackle_rate = r.range(3.0, 8.0);
         s.fx.hiss = r.range(0.0008, 0.0015);
+    } else {
+        s.m.set_lp(20000.0);
+        s.fx.crackle = 0.0;
+        s.fx.hiss = 0.0;
     }
     s.rev.fb = r.range(0.76, 0.82);
     s.rev.damp = 0.45;
-    s.rev_wet = if two_tone { 0.18 } else { 0.24 };
+    s.rev_wet = match style {
+        SKS_FIRST => 0.24,
+        SKS_TWO => 0.18,
+        _ => 0.22,
+    };
     s.dly.fb = 0.15;
     s.dly.lpk = 0.3;
     s.dly_rev = 0.2;
@@ -10399,8 +11126,8 @@ fn sounds(g: usize, r: &mut Rng, s: &mut Synth) {
             sounds_polka(r, s, trumpet)
         }
         SKA => {
-            let two_tone = r.bit_chance();
-            sounds_ska(r, s, two_tone)
+            let style = if r.bit_chance() { SKS_TWO } else { SKS_FIRST };
+            sounds_ska(r, s, style)
         }
         MARIACHI => sounds_mariachi(r, s),
         _ => sounds_tavern(r, s),
@@ -12804,8 +13531,22 @@ mod tests {
 
     #[test]
     fn ska_pools_parse() {
-        let strains = [SKA_MAJ_A, SKA_MAJ_B, SKA_MIX_A, SKA_MIX_B, SKA_MIN_A, SKA_MIN_B];
-        for (pools, bars) in [(&strains[..], 8), (&[SKA_VAMP_MAJ, SKA_VAMP_MIX, SKA_VAMP_MIN][..], 4)] {
+        let strains = [
+            SKA_MAJ_A,
+            SKA_MAJ_B,
+            SKA_MIX_A,
+            SKA_MIX_B,
+            SKA_MIN_A,
+            SKA_MIN_B,
+            SKA_TW_MIN_A,
+            SKA_TW_MIN_B,
+            SKA_TW_MIN_C,
+            SKA_TW_MAJ_A,
+            SKA_TW_MAJ_B,
+            SKA_TW_MAJ_C,
+        ];
+        let vamps = [SKA_VAMP_MAJ, SKA_VAMP_MIX, SKA_VAMP_MIN, SKA_TW_VAMP_MIN, SKA_TW_VAMP_MAJ];
+        for (pools, bars) in [(&strains[..], 8), (&vamps[..], 4)] {
             for plan in pools.iter().flat_map(|p| p.iter()) {
                 assert_eq!(plan.split_whitespace().count(), bars, "{plan}");
                 for tok in plan.split_whitespace().flat_map(|t| t.split('+')) {
@@ -12813,6 +13554,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Ska alone over a few seeds draws all three styles, each in its tempo.
+    #[test]
+    fn ska_plays_its_three_styles() {
+        let mut seen = [0; 3];
+        for seed in 0..8u64 {
+            let mut e = Engine::new(SKA, seed);
+            let mut ev = Vec::new();
+            while e.pos < 900.0 * SR as f64 {
+                e.pos += e.song.bar(&mut e.syn, e.pos, &mut ev);
+                ev.clear();
+            }
+            for &(bpm, _, _, meter) in &e.song.log {
+                let (k, lo, hi) = match meter {
+                    "4/4 first wave" => (0, 110.0, 130.0),
+                    "4/4 2-tone" => (1, 132.0, 158.0),
+                    "4/4 third wave" => (2, 135.0, 148.0),
+                    _ => panic!("seed {seed}: a ska piece in {meter}"),
+                };
+                assert!((lo..=hi).contains(&bpm), "seed {seed}: {meter} at {bpm} bpm");
+                seen[k] += 1;
+            }
+        }
+        assert!(seen.iter().all(|&n| n >= 3), "styles drawn: {seen:?}");
     }
 
     /// Ska alone, a few seeds, a few pieces each: every event (the horns'
