@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Fetches and prepares the real-instrument samples for fleece's generated music (ska and
-# mariachi). fleece uses its synthesiser for anything missing, so all of this is optional.
+# Fetches and prepares the real-instrument samples for fleece's generated music (every genre's
+# instruments, the synthesisers' included). fleece uses its synthesiser for anything missing, so
+# all of this is optional.
 #
 #   tools/get-samples.sh [DEST]        DEST defaults to ~/.local/share/fleece/samples
 #
 # It fetches:
 #   - MuseScore General 0.2, a General MIDI SoundFont (MuseScore_General.sf2 and its License,
 #     Readme and Sample_Sources.csv) from ftp.osuosl.org: MIT license (FluidR3 by Frank Wen and
-#     others; its notices must travel with it). Used for guitars, organs, bass, piano and drums.
+#     others; its notices must travel with it). Used for guitars, organs, basses, pianos and keys,
+#     the synthesisers' basses, leads and pads, and the drum kits and machines.
 #   - Folders of Versilian Studios' VS Chamber Orchestra 2: Community Edition
 #     (github.com/sgossner/VSCO-2-CE) and Versilian Community Sample Library
 #     (github.com/sgossner/VCSL), both CC0 1.0 (public domain), as sparse, shallow, blobless git
-#     clones pinned to a commit: violins, violin, trumpet, trombone, contrabass, harp, tenor sax,
-#     guiro, shakers, claps and cajon.
+#     clones pinned to a commit: violins, violin, trumpet, trombone, tuba, horn, contrabass, harp,
+#     tenor sax, clarinet, flute, recorder, ocarina, harmonica, psaltery, kalimba, vibraphone,
+#     marimba, glockenspiel, guiro, shakers, claps, cajon, frame drum, tambourine and finger
+#     cymbals.
 # and writes into DEST: the SoundFont files; multi/<instrument>/<articulation>/*.wav (48 kHz,
 # 16-bit, trimmed); manifest.tsv (what the sampler reads); sources.tsv (each file's origin);
 # SOURCES.md; and licenses/ (each source's license and readme, verbatim).
 #
-# Disk space: about 515 MB in DEST (216 MB SoundFont, 299 MB multi/), plus about 0.9 GB
+# Disk space: about 755 MB in DEST (216 MB SoundFont, 538 MB multi/), plus about 2 GB
 # of git clones in the cache (FLEECE_SAMPLES_SRC, default ~/.cache/fleece/samples-src), which
 # is only needed to rebuild multi/ and can be deleted afterwards.
 #
