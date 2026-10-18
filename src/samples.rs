@@ -116,6 +116,9 @@ const AUTO_MATCH: f32 = 0.4;
 /// two stereo pairs over some velocities).
 const MAXZ: usize = 4;
 
+/// 32.32 fixed point's one.
+const FX: f64 = 4294967296.0;
+
 /// The fade a sample that runs out ends with (10 ms, samples).
 const END_FADE: f64 = 480.0;
 
@@ -549,7 +552,44 @@ impl Sampler {
             let xf = if looping { z.xf as f64 } else { 0.0 };
             let xs = le - xf;
             let mut pos = self.pos[k];
-            for o in out.iter_mut() {
+            let n = out.len();
+            let mut at = 0;
+            while at < n {
+                // plain reading as far as it goes: short of the loop's end
+                // (or its crossfade) or of the end's fade, a frame to spare
+                let limit = if looping { if xf > 0.0 { xs } else { le } } else { end - END_FADE * step } - 1.0;
+                if pos < limit {
+                    let m = (((limit - pos) / step).ceil() as usize).clamp(1, n - at);
+                    // in 32.32 fixed point from the frame under it
+                    let base = pos.floor();
+                    let b0 = base as usize;
+                    let (mut fx, st) = (((pos - base) * FX) as u64, (step * FX) as u64);
+                    if z.chans == 2 {
+                        for o in out[at..at + m].iter_mut() {
+                            let i = 2 * (b0 + (fx >> 32) as usize);
+                            let fr = (fx as u32) as f32 * (1.0 / FX as f32);
+                            let (a, b) = (d[i] as f32, d[i + 2] as f32);
+                            let (c, e) = (d[i + 1] as f32, d[i + 3] as f32);
+                            o[0] += (a + (b - a) * fr) * gl;
+                            o[1] += (c + (e - c) * fr) * gr;
+                            fx += st;
+                        }
+                    } else {
+                        for o in out[at..at + m].iter_mut() {
+                            let i = b0 + (fx >> 32) as usize;
+                            let fr = (fx as u32) as f32 * (1.0 / FX as f32);
+                            let (a, b) = (d[i] as f32, d[i + 1] as f32);
+                            let x = a + (b - a) * fr;
+                            o[0] += x * gl;
+                            o[1] += x * gr;
+                            fx += st;
+                        }
+                    }
+                    pos = base + fx as f64 / FX;
+                    at += m;
+                    continue;
+                }
+                // a sample at a time: the loop's wrap and crossfade, the end's fade
                 if looping {
                     if pos >= le {
                         pos = ls + (pos - le) % (le - ls);
@@ -579,9 +619,10 @@ impl Sampler {
                         r *= left;
                     }
                 }
-                o[0] += l * gl;
-                o[1] += r * gr;
+                out[at][0] += l * gl;
+                out[at][1] += r * gr;
                 pos += step;
+                at += 1;
             }
             self.pos[k] = pos;
             any |= self.live[k];
@@ -594,15 +635,20 @@ impl Sampler {
                 }
             }
         } else {
+            // held, then decaying to the sustain: a ramp to where the block ends
+            let n = out.len();
+            let h = (self.hold as usize).min(n);
+            self.hold -= h as u32;
+            let e0 = self.env;
+            let e1 = if n > h { (e0 * self.dec.powi((n - h) as i32)).max(self.sus) } else { e0 };
+            let de = (e1 - e0) / n.max(1) as f32;
+            let mut e = e0;
             for o in out.iter_mut() {
-                if self.hold > 0 {
-                    self.hold -= 1;
-                } else if self.env > self.sus {
-                    self.env = (self.env * self.dec).max(self.sus);
-                }
-                o[0] *= self.env;
-                o[1] *= self.env;
+                e += de;
+                o[0] *= e;
+                o[1] *= e;
             }
+            self.env = e1;
         }
         any && self.env >= 1e-3
     }
