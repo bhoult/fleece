@@ -4855,16 +4855,16 @@ impl Song {
         // the recorded instruments brought to the balance the synthesiser's had
         for (ch, pair, _) in self.band.tones.iter_mut() {
             for p in pair.iter_mut().filter(|p| p.samp != 0) {
-                p.gain *= ska_rec_trim(style, *ch);
+                p.gain *= ska_rec_trim(style, *ch) * ska_rec_more(style, *ch, p.samp);
             }
         }
         for c in [CH_KEYS, CH_PAD, CH_DRONE, CH_BASS, CH_LEAD, CH_BELL, CH_ARP] {
             if s.ch[c].patch.samp != 0 {
-                s.ch[c].patch.gain *= ska_rec_trim(style, c);
+                s.ch[c].patch.gain *= ska_rec_trim(style, c) * ska_rec_more(style, c, s.ch[c].patch.samp);
             }
         }
         for (p, _) in self.sk.solos.iter_mut().filter(|(p, _)| p.samp != 0) {
-            p.gain *= ska_rec_trim(style, CH_LEAD);
+            p.gain *= ska_rec_trim(style, CH_LEAD) * ska_rec_more(style, CH_LEAD, p.samp);
         }
         if style == SKS_FIRST {
             // the first wave's recordings in mono, as its records are
@@ -9017,7 +9017,8 @@ fn ska_farfisa_synth(r: &mut Rng) -> Patch {
 /// The Farfisa: no recording of one; the nearest reeds, an accordion's
 /// (one reed, not the musette's), its quick vibrato kept.
 fn ska_farfisa(r: &mut Rng) -> Patch {
-    rec_keep(ska_farfisa_synth(r), samples::gm("Accordion"), 62.0, |q| Patch { vib: 0.06, vib_rate: 6.5, ..q })
+    let p = ska_farfisa_synth(r);
+    rec_keep(p, samples::gm("Accordion"), 62.0, |q| Patch { vib: p.vib, vib_rate: p.vib_rate, ..q })
 }
 
 /// A Vox Continental: hollow (squares at the note and the octave), reedy, still.
@@ -9544,6 +9545,27 @@ fn ska_rec_trim(style: u8, ch: usize) -> f32 {
         (CH_PERC, _) => 4.7,
         (CH_CYM, SKS_FIRST) => -3.3,
         (CH_CYM, _) => 3.4,
+        _ => 0.0,
+    };
+    10f32.powf(db / 20.0)
+}
+
+/// `ska_rec_trim`'s, more for the recordings standing in for the 2-tone
+/// organs, the melodica and the Wurlitzer (an accordion's, a reed organ's,
+/// a harmonica's, an FM electric piano's), measured as the acoustic
+/// genres' trims are (each forced on both halves of its channel's pair, 30
+/// seeds' first 90 s, by style): the Farfisa's accordion 2.2 dB up in 2-tone; the melodica's
+/// harmonica 3.8 dB up in 2-tone and 6.3 in the first wave (the first
+/// wave's lead trim is the trumpet's; the harmonica's notes vary by up to
+/// 10 dB from one to the next, so its level varies by the piece's key and
+/// register); the Wurlitzer 1.1 and 2.5 dB down.
+fn ska_rec_more(style: u8, ch: usize, samp: u16) -> f32 {
+    let db = match (ch, style) {
+        (CH_PAD, SKS_TWO) if rec_is(samp, "Accordion") => 2.2,
+        (CH_LEAD, SKS_TWO) if rec_is(samp, "harmonica:sus") => 3.8,
+        (CH_LEAD, SKS_FIRST) if rec_is(samp, "harmonica:sus") => 6.3,
+        (CH_DRONE, SKS_TWO) if rec_is(samp, "FM Electric Piano") => -1.1,
+        (CH_DRONE, SKS_FIRST) if rec_is(samp, "FM Electric Piano") => -2.5,
         _ => 0.0,
     };
     10f32.powf(db / 20.0)
@@ -14241,7 +14263,9 @@ fn mariachi_kit_tarima(r: &mut Rng) -> Vec<DrumPatch> {
     };
     // recorded: a wooden box's (a cajón's) deeper thump for the heel, its
     // slap for the toe (the tarima is a box under the dancers)
-    let recs = [(samples::multi("cajon", "hit2"), 0.8), (samples::multi("cajon", "hit1"), 0.5)];
+    // (as loud as the synthesiser's over whole pieces: K-weighted, the
+    // channel alone, 10 seeds)
+    let recs = [(samples::multi("cajon", "hit2"), 1.18), (samples::multi("cajon", "hit1"), 0.74)];
     mariachi_kit_sampled(vec![stomp, tap], &recs)
 }
 
@@ -14453,6 +14477,8 @@ fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
     b.kit(r, s, CH_SNARE, K_MARIACHI_SNARE);
     b.kit(r, s, CH_HAT, K_MARIACHI_HAT);
     b.kit(r, s, CH_PERC, K_MARIACHI_PERC);
+    // the flute's and the salterio's recordings (the others' have their gains)
+    band_trim(&mut b, s, &[(CH_LEAD, "flute:auto", -2.2), (CH_BELL, "psaltery:pluck", 2.8)], &[]);
     b
 }
 
