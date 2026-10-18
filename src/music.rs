@@ -9986,6 +9986,55 @@ fn levelled(orig: &Patch, note: f32, p: Patch) -> Patch {
     Patch { gain: p.gain * (loudness(orig, note) / loudness(&p, note)).clamp(0.2, 5.0), ..p }
 }
 
+/// `p` played by the recorded instrument `id` when the samples are in (else
+/// `p` itself), as loud as `p` at `note`. Kept from `p`: what the composer
+/// reads of a patch (the attack: whether a chord is held; the sustain and
+/// the string: whether the keys die away), the release, glide and bend. The
+/// recording's own tone, vibrato and decay take the oscillators' place, the
+/// filter and the drive off (`rec_through` keeps them). `p` is made first
+/// either way (the same draws), so a seed plays the same notes with the
+/// samples or without, and without them the same music, byte for byte.
+fn rec(p: Patch, id: Option<u16>, note: f32) -> Patch {
+    let Some(samp) = id else { return p };
+    let q = Patch {
+        samp,
+        gain: p.gain,
+        a: p.a,
+        d: p.d,
+        s: p.s,
+        r: p.r,
+        ks: p.ks,
+        ks_tone: p.ks_tone,
+        glide: p.glide,
+        bend: p.bend,
+        ..SAMPLED
+    };
+    levelled(&p, note, q)
+}
+
+/// `rec`, the recording through all the patch has after its oscillators:
+/// the filter and its envelope (a 303's sweep), the vowel, the drive, the
+/// vibrato and tremolo. For a synthesiser's sound whose recording is a
+/// synthesiser's too.
+fn rec_through(p: Patch, id: Option<u16>, note: f32) -> Patch {
+    let Some(samp) = id else { return p };
+    levelled(&p, note, Patch { samp, ..p })
+}
+
+/// A kit's kinds played by recorded hits when the samples are in (`ids`,
+/// one for each kind in order; None, or a kind past the list, keeps the
+/// synthesiser's), each at its kind's gain (`samples::CAL_DRUM` brings a
+/// recorded hit to about a synthesised one's loudness), the drive off.
+fn rec_kit(v: Vec<DrumPatch>, ids: &[Option<u16>]) -> Vec<DrumPatch> {
+    v.into_iter()
+        .enumerate()
+        .map(|(k, d)| match ids.get(k) {
+            Some(&Some(samp)) => DrumPatch { samp, gain: d.gain, ..DRUM },
+            _ => d,
+        })
+        .collect()
+}
+
 impl Band {
     /// Channel `ch`'s pair: the role's tuned original (sometimes) or a pick
     /// from `pal`, and another pick, both brought to the original's
@@ -10656,7 +10705,8 @@ fn fiddle(r: &mut Rng) -> Patch {
     }
 }
 
-fn accordion(r: &mut Rng) -> Patch {
+/// A musette accordion: three reeds a little apart (the synthesiser's).
+fn accordion_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: r.range(0.35, 0.45),
@@ -10678,8 +10728,12 @@ fn accordion(r: &mut Rng) -> Patch {
     }
 }
 
+fn accordion(r: &mut Rng) -> Patch {
+    rec(accordion_synth(r), samples::gm("Italian Accordion"), 74.0)
+}
+
 fn bandoneon(r: &mut Rng) -> Patch {
-    Patch { unison: 2, detune: r.range(2.0, 5.0), semi2: 0.0, cutoff: r.range(2000.0, 2600.0), ..accordion(r) }
+    Patch { unison: 2, detune: r.range(2.0, 5.0), semi2: 0.0, cutoff: r.range(2000.0, 2600.0), ..accordion_synth(r) }
 }
 
 fn harmonica(r: &mut Rng) -> Patch {
@@ -10960,9 +11014,12 @@ fn bass_synth(r: &mut Rng) -> Patch {
     }
 }
 
-fn bass_acid_sq(r: &mut Rng) -> Patch {
+/// The 303: a saw or a square through a resonant four-pole low-pass that
+/// its envelope sweeps, sliding; recorded, a synthesiser's lead through the
+/// same filter.
+fn bass_acid(r: &mut Rng, wave: Wave) -> Patch {
     Patch {
-        wave: Wave::Square,
+        wave,
         poles4: true,
         cutoff: r.range(180.0, 320.0),
         res: r.range(0.78, 0.9),
@@ -10980,8 +11037,12 @@ fn bass_acid_sq(r: &mut Rng) -> Patch {
     }
 }
 
+fn bass_acid_sq(r: &mut Rng) -> Patch {
+    rec_through(bass_acid(r, Wave::Square), samples::gm("Square Lead"), 40.0)
+}
+
 fn bass_acid_saw(r: &mut Rng) -> Patch {
-    Patch { wave: Wave::Saw, ..bass_acid_sq(r) }
+    rec_through(bass_acid(r, Wave::Saw), samples::gm("Saw Lead"), 40.0)
 }
 
 fn tuba(r: &mut Rng) -> Patch {
@@ -11060,7 +11121,8 @@ fn drone_reed(r: &mut Rng) -> Patch {
 // -- drum kits (each channel's kinds in their order)
 
 fn kit_kick_808(r: &mut Rng) -> Vec<DrumPatch> {
-    vec![DrumPatch { drive: 0.2, ..kick(r, (80.0, 100.0), (43.0, 48.0), (1.0, 1.5), 0.0, 0.0) }]
+    let v = vec![DrumPatch { drive: 0.2, ..kick(r, (80.0, 100.0), (43.0, 48.0), (1.0, 1.5), 0.0, 0.0) }];
+    rec_kit(v, &[samples::drum("TR-808", 36)])
 }
 fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
     vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), 0.25, 0.8)]

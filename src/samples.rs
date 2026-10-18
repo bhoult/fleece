@@ -36,8 +36,8 @@ const MANIFEST: &str = "manifest.tsv";
 
 /// The SoundFont's melodic presets loaded, by name (as its phdr has them,
 /// bank 0, else the lowest melodic bank: Funk Guitar is bank 8's; never the
-/// "Expr." variants, whose dynamics follow a controller). The three pianos
-/// are one set of samples (100 MB of the 150).
+/// "Expr." variants, whose dynamics follow a controller). The pianos are
+/// one set of samples (100 MB).
 pub const GM_PRESETS: &[&str] = &[
     // guitars
     "Nylon String Guitar",
@@ -47,41 +47,139 @@ pub const GM_PRESETS: &[&str] = &[
     "Palm Muted Guitar",
     "Overdrive Guitar",
     "Distortion Guitar",
+    "Funk Guitar",
+    "Mandolin",
+    "Banjo",
     // organs
     "Drawbar Organ",
     "Percussive Organ",
     "Rock Organ",
-    "Funk Guitar",
-    // pianos
+    "Church Organ",
+    "Reed Organ",
+    // pianos and keys
     "Grand Piano",
     "Bright Grand Piano",
+    "Mellow Grand Piano",
     "Honky-Tonk Piano",
+    "Tine Electric Piano",
+    "Detuned Tine EP",
+    "FM Electric Piano",
+    "Harpsichord",
+    "Clavinet",
+    // mallets and bells
+    "Celesta",
+    "Glockenspiel",
+    "Music Box",
+    "Vibraphone",
+    "Marimba",
+    "Xylophone",
+    "Tubular Bells",
+    "Dulcimer",
+    "Kalimba",
+    "Tinker Bell",
+    "Steel Drums",
+    // free reeds
+    "Accordion",
+    "Italian Accordion",
+    "Bandoneon",
+    "Harmonica",
     // basses
     "Acoustic Bass",
     "Fingered Bass",
     "Picked Bass",
     "Fretless Bass",
-    // saxes
+    "Slap Bass",
+    "Synth Bass 1",
+    "Synth Bass 2",
+    "Synth Bass 3",
+    "Synth Bass 4",
+    // saxes and reeds
+    "Soprano Sax",
     "Alto Sax",
     "Tenor Sax",
     "Baritone Sax",
+    "Oboe",
+    "English Horn",
+    "Bassoon",
+    "Clarinet",
+    "Bagpipe",
+    "Shenai",
+    // pipes
+    "Piccolo",
+    "Flute",
+    "Recorder",
+    "Pan Flute",
+    "Whistle",
+    "Ocarina",
     // brass
     "Trumpet",
     "Harmon Mute Trumpet",
     "Trombone",
+    "Tuba",
+    "French Horns",
+    "Brass Section",
+    "Synth Brass 1",
+    "Synth Brass 2",
     // strings (General MIDI's String Ensembles 1 and 2 are "Strings Fast"
     // and "Strings Slow" here)
     "Violin",
+    "Viola",
+    "Cello",
     "Fiddle",
     "Strings Fast",
     "Strings Slow",
     "Strings Pizzicato",
+    "Synth Strings 1",
+    "Synth Strings 2",
     "Harp",
     "Contrabass",
+    // voices
+    "Choir Aahs",
+    "Voice Oohs",
+    "Synth Voice",
+    "Orchestra Hit",
+    // synthesisers: leads
+    "Square Lead",
+    "Saw Lead",
+    "Calliope Lead",
+    "Chiffer Lead",
+    "Charang",
+    "Solo Vox",
+    "5th Saw Wave",
+    "Bass & Lead",
+    "Detuned Saw",
+    "Sine Wave",
+    // pads
+    "Fantasia",
+    "Warm Pad",
+    "Polysynth",
+    "Space Voice",
+    "Bowed Glass",
+    "Metal Pad",
+    "Halo Pad",
+    "Sweep Pad",
+    // effects
+    "Ice Rain",
+    "Soundtrack",
+    "Crystal",
+    "Atmosphere",
+    "Brightness",
+    "Echo Drops",
+    "Star Theme",
+    // percussion played by note
+    "Agogo",
+    "Woodblock",
+    "Taiko Drum",
+    "Melodic Tom",
+    "Synth Drum",
+    "Castanets",
+    "Concert Bass Drum",
+    "808 Tom",
+    "Timpani",
 ];
 
 /// Its drum kits loaded (bank 128), by name.
-pub const GM_KITS: &[&str] = &["Standard", "Room", "Power", "Jazz", "Brush"];
+pub const GM_KITS: &[&str] = &["Standard", "Room", "Power", "Jazz", "Brush", "Electronic", "TR-808", "Orchestra Kit"];
 
 /// The reference every instrument is brought to: -20 dBFS RMS (full scale 1).
 const REF_RMS: f32 = 0.1;
