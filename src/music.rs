@@ -1663,6 +1663,9 @@ struct Channel {
     swell_s: f32,
     swell_rate: f32,
     swell_ph: f32,
+    /// the stereo width of what it plays (1 as it is, 0 mono): a wide
+    /// recording narrowed before the pan
+    width: f32,
     buf: [[f32; 2]; BLOCK],
     /// the round robin the next sampled note (0) or hit (by its kind)
     /// takes: each cycles in order (a shaker's strokes down and up)
@@ -1695,6 +1698,7 @@ impl Channel {
             swell_s: 0.0,
             swell_rate: 0.5,
             swell_ph: 0.0,
+            width: 1.0,
             buf: [[0.0; 2]; BLOCK],
             rr: [0; 8],
         }
@@ -1772,6 +1776,12 @@ impl Channel {
             for o in self.buf[..n].iter_mut() {
                 o[0] = self.filt[0].lp(o[0]);
                 o[1] = self.filt[1].lp(o[1]);
+            }
+        }
+        if self.width != 1.0 {
+            for o in self.buf[..n].iter_mut() {
+                let (m, d) = (0.5 * (o[0] + o[1]), 0.5 * (o[0] - o[1]) * self.width);
+                *o = [m + d, m - d];
             }
         }
         self.gain_s += (self.gain - self.gain_s) * 0.05;
