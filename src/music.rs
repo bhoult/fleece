@@ -6149,8 +6149,8 @@ impl Song {
         let (bs, beat, bpm, meter) = match style {
             MARIACHI_SON => (12u32, 6u32, r.range(108.0, 132.0), "6/8 son jalisciense"),
             MARIACHI_HUAPANGO => (12, 6, r.range(88.0, 108.0), "6/8 huapango"),
-            MARIACHI_VALS => (12, 4, r.range(135.0, 170.0), "3/4 ranchera valseada"),
-            MARIACHI_POLKA => (8, 4, r.range(105.0, 125.0), "2/4 ranchera polkeada"),
+            MARIACHI_VALS => (12, 4, r.range(115.0, 145.0), "3/4 ranchera valseada"),
+            MARIACHI_POLKA => (8, 4, r.range(125.0, 145.0), "2/4 ranchera polkeada"),
             _ => (16, 4, r.range(70.0, 88.0), "4/4 bolero ranchero"),
         };
         self.bpm = bpm as f64;
