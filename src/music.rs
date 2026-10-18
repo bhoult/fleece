@@ -4839,6 +4839,33 @@ impl Song {
             let (_, make, center) = SKA_SOLOISTS[who[k]];
             self.sk.solos.push((levelled(&orig, center as f32, make(r)), center));
         }
+        // the recorded instruments brought to the balance the synthesiser's had
+        for (ch, pair, _) in self.band.tones.iter_mut() {
+            for p in pair.iter_mut().filter(|p| p.samp != 0) {
+                p.gain *= ska_rec_trim(style, *ch);
+            }
+        }
+        for c in [CH_KEYS, CH_PAD, CH_DRONE, CH_BASS, CH_LEAD, CH_BELL, CH_ARP] {
+            if s.ch[c].patch.samp != 0 {
+                s.ch[c].patch.gain *= ska_rec_trim(style, c);
+            }
+        }
+        for (p, _) in self.sk.solos.iter_mut().filter(|(p, _)| p.samp != 0) {
+            p.gain *= ska_rec_trim(style, CH_LEAD);
+        }
+        if style == SKS_FIRST {
+            // the first wave's recordings in mono, as its records are
+            let tones = self.band.tones.iter_mut().flat_map(|t| t.1.iter_mut());
+            let solos = self.sk.solos.iter_mut().map(|x| &mut x.0);
+            for p in tones.chain(solos).filter(|p| p.samp != 0) {
+                ska_mono(p);
+            }
+            for c in [CH_KEYS, CH_PAD, CH_DRONE, CH_BASS, CH_LEAD, CH_BELL, CH_ARP] {
+                if s.ch[c].patch.samp != 0 {
+                    ska_mono(&mut s.ch[c].patch);
+                }
+            }
+        }
         self.progs = vec![self.sk.strains[0].chords.clone(), self.sk.strains[1].chords.clone()];
         self.prog = self.progs[0].clone();
         // the third wave's last chorus now and then a half or a whole step up
@@ -8748,7 +8775,7 @@ fn ska_runs(r: &mut Rng, chords: &[Harm], mode: usize, lo: i32, hi: i32) -> Vec<
 /// A clean electric guitar's upstroke, muted after it speaks (a short
 /// gate, a quick release): a bright string, the filter closing quickly.
 fn ska_guitar_chop(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         ks: r.range(0.35, 0.6),
         ks_tone: r.range(0.72, 0.85),
         cutoff: r.range(2800.0, 4000.0),
@@ -8762,17 +8789,31 @@ fn ska_guitar_chop(r: &mut Rng) -> Patch {
         r: 0.035,
         gain: 0.55,
         ..PATCH
-    }
+    };
+    // recorded: a guitar muted at the bridge
+    ska_rec(p, samples::gm("Palm Muted Guitar"))
 }
 
 /// The skank on a clean guitar left to ring a little (a bridge pickup's twang).
 fn ska_guitar_clean(r: &mut Rng) -> Patch {
-    Patch { filter: false, ks: r.range(0.5, 0.8), ks_tone: 0.88, a: 0.001, d: 0.3, s: 0.7, r: 0.07, gain: 0.5, ..PATCH }
+    let p = Patch {
+        filter: false,
+        ks: r.range(0.5, 0.8),
+        ks_tone: 0.88,
+        a: 0.001,
+        d: 0.3,
+        s: 0.7,
+        r: 0.07,
+        gain: 0.5,
+        ..PATCH
+    };
+    // recorded: a clean, bright electric guitar
+    ska_rec(p, samples::gm("Funk Guitar"))
 }
 
 /// The third wave's skank: a guitar's chop with some crunch (an amp turned up).
 fn ska_guitar_crunch(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         ks: r.range(0.3, 0.5),
         ks_tone: r.range(0.8, 0.9),
         cutoff: r.range(3000.0, 4200.0),
@@ -8787,6 +8828,11 @@ fn ska_guitar_crunch(r: &mut Rng) -> Patch {
         drive: r.range(1.5, 3.0),
         gain: 0.45,
         ..PATCH
+    };
+    // recorded: the clean guitar into the drive
+    match samples::gm("Clean Guitar") {
+        Some(id) => Patch { drive: p.drive, ..ska_rec(p, Some(id)) },
+        None => p,
     }
 }
 
@@ -8794,7 +8840,7 @@ fn ska_guitar_crunch(r: &mut Rng) -> Patch {
 /// cents apart, left and right, the amp's mids pushed ahead of it, an "a"
 /// formant, and driven hard).
 fn ska_guitar_dist(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Saw,
         unison: 2,
         detune: r.range(6.0, 10.0),
@@ -8814,12 +8860,13 @@ fn ska_guitar_dist(r: &mut Rng) -> Patch {
         drive: r.range(5.0, 8.0),
         gain: 0.3,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::gm("Distortion Guitar"))
 }
 
 /// A fuzzier take: squares, an "o" ahead of the amp, driven harder.
 fn ska_guitar_fuzz(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Square,
         pw: r.range(0.3, 0.45),
         vowel: 4,
@@ -8841,12 +8888,13 @@ fn ska_guitar_fuzz(r: &mut Rng) -> Patch {
         drive: r.range(8.0, 12.0),
         gain: 0.28,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::gm("Overdrive Guitar"))
 }
 
 /// An upright piano, bright and a little hard (a high partial ringing on).
 fn ska_piano_bright(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         filter: false,
         fm: r.range(1.5, 2.0),
         ratio: 1.0,
@@ -8860,7 +8908,9 @@ fn ska_piano_bright(r: &mut Rng) -> Patch {
         r: 0.25,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    // recorded: an upright a little out of tune
+    ska_rec(p, samples::gm("Honky-Tonk Piano"))
 }
 
 /// A Farfisa: thin, bright and buzzing (a narrow pulse, a saw an octave
@@ -8909,7 +8959,7 @@ fn ska_vox(r: &mut Rng) -> Patch {
 /// A Hammond: drawbars (sines at the note and the octave, the sub-octave
 /// under them), the Leslie's wobble.
 fn ska_hammond(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
         mix2: r.range(0.4, 0.7),
@@ -8927,12 +8977,13 @@ fn ska_hammond(r: &mut Rng) -> Patch {
         drive: 0.3,
         gain: 0.16,
         ..PATCH
-    }
+    };
+    Patch { a: p.a, ..ska_rec(p, samples::gm("Drawbar Organ")) }
 }
 
 /// An electric bass played with a pick: a saw's edge, the filter snapping shut.
 fn ska_bass_pick(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Saw,
         wave2: Wave::Sine,
         mix2: 0.6,
@@ -8948,12 +8999,13 @@ fn ska_bass_pick(r: &mut Rng) -> Patch {
         drive: 0.25,
         gain: 0.6,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::gm("Picked Bass"))
 }
 
 /// An electric bass played with the fingers: round, a little growl.
 fn ska_bass_finger(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Tri,
         wave2: Wave::Saw,
         mix2: 0.15,
@@ -8970,12 +9022,13 @@ fn ska_bass_finger(r: &mut Rng) -> Patch {
         drive: 0.2,
         gain: 0.75,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::gm("Fingered Bass"))
 }
 
 /// Flatwound strings muted at the bridge: a thump and a short tone.
 fn ska_bass_flat(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
         mix2: 0.35,
@@ -8989,12 +9042,19 @@ fn ska_bass_flat(r: &mut Rng) -> Patch {
         r: 0.05,
         gain: 0.85,
         ..PATCH
+    };
+    // recorded: a fingered bass, its top rolled off
+    match samples::gm("Fingered Bass") {
+        Some(id) => {
+            Patch { filter: true, cutoff: 2.0 * p.cutoff, keytrack: p.keytrack, res: 0.0, ..ska_rec(p, Some(id)) }
+        }
+        None => p,
     }
 }
 
 /// An alto sax: brighter and lighter than the tenor.
 fn ska_alto(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         fm: r.range(2.4, 3.0),
         ratio: 1.0,
         fm_dec: 2.0,
@@ -9010,7 +9070,8 @@ fn ska_alto(r: &mut Rng) -> Patch {
         glide: 0.025,
         gain: 0.26,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::gm("Alto Sax"))
 }
 
 /// A melodica: a free reed blown, plain and a little nasal.
@@ -9037,7 +9098,7 @@ fn ska_melodica(r: &mut Rng) -> Patch {
 
 /// A flugelhorn: a trumpet's darker, rounder cousin.
 fn ska_flugel(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         unison: 2,
         detune: 3.0,
         width: 0.1,
@@ -9057,12 +9118,17 @@ fn ska_flugel(r: &mut Rng) -> Patch {
         glide: 0.02,
         gain: 0.33,
         ..PATCH
+    };
+    // recorded: a trumpet, darker
+    match samples::multi("trumpet", "auto") {
+        Some(id) => Patch { filter: true, cutoff: 1.8 * p.cutoff, keytrack: 0.5, res: 0.0, ..ska_rec(p, Some(id)) },
+        None => p,
     }
 }
 
 /// A baritone sax: low and reedy, a growl in it.
 fn ska_bari(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         fm: r.range(2.8, 3.4),
         ratio: 1.0,
         fm_dec: 1.5,
@@ -9078,11 +9144,12 @@ fn ska_bari(r: &mut Rng) -> Patch {
         glide: 0.03,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::gm("Baritone Sax"))
 }
 
 /// A jazz kit's bass drum, tuned and damped: a felt beater's thud.
-fn ska_kit_kick(r: &mut Rng) -> Vec<DrumPatch> {
+fn ska_kit_kick_synth(r: &mut Rng) -> Vec<DrumPatch> {
     vec![DrumPatch {
         noise: 0.12,
         nmode: 0,
@@ -9092,9 +9159,29 @@ fn ska_kit_kick(r: &mut Rng) -> Vec<DrumPatch> {
     }]
 }
 
+/// The jazz kick: recorded, a jazz kit's.
+fn ska_kit_kick(r: &mut Rng) -> Vec<DrumPatch> {
+    ska_kit_rec(ska_kit_kick_synth(r), "Jazz", &[36])
+}
+
+/// 2-tone's kick: recorded, a rock kit's in a room (the synthesiser's the jazz kick).
+fn ska_kit_kick_room(r: &mut Rng) -> Vec<DrumPatch> {
+    ska_kit_rec(ska_kit_kick_synth(r), "Room", &[36])
+}
+
+/// The soft kick: recorded, a jazz kit's other bass drum.
+fn ska_kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
+    ska_kit_rec(kit_kick_soft(r), "Jazz", &[35])
+}
+
 /// The cross-stick (the stick laid across the rim: a woody click with a
 /// ring) and the snare, softly, for rolls and ghosts.
 fn ska_kit_cross(r: &mut Rng) -> Vec<DrumPatch> {
+    // recorded: a jazz kit's side stick and snare
+    ska_kit_rec(ska_kit_cross_synth(r), "Jazz", &[37, 38])
+}
+
+fn ska_kit_cross_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let f = r.range(430.0, 540.0);
     let cross = DrumPatch {
         tone: 0.8,
@@ -9113,11 +9200,15 @@ fn ska_kit_cross(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.8,
         ..DRUM
     };
-    vec![cross, ska_kit_snare(r)[1]]
+    vec![cross, ska_kit_snare_synth(r)[1]]
 }
 
 /// A tight, high snare (a rimshot's crack) and its soft stroke.
 fn ska_kit_snare(r: &mut Rng) -> Vec<DrumPatch> {
+    ska_kit_rec(ska_kit_snare_synth(r), "Room", &[38, 38])
+}
+
+fn ska_kit_snare_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         tone: 0.5,
         f0: r.range(290.0, 330.0),
@@ -9141,7 +9232,17 @@ fn ska_kit_snare(r: &mut Rng) -> Vec<DrumPatch> {
 
 /// Hi-hats, bright and tight; the open one a short "tss" with the skank.
 fn ska_kit_hats(r: &mut Rng) -> Vec<DrumPatch> {
-    hats(r, 8500.0, 0.035, 0.16, 0.35, 0.7)
+    ska_kit_rec(hats(r, 8500.0, 0.035, 0.16, 0.35, 0.7), "Standard", &[42, 46])
+}
+
+/// A ride: recorded, a standard kit's.
+fn ska_kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
+    ska_kit_rec(kit_ride(r), "Standard", &[51, 51])
+}
+
+/// A crash: recorded, a standard kit's.
+fn ska_kit_crash(r: &mut Rng) -> Vec<DrumPatch> {
+    ska_kit_rec(crash(r), "Standard", &[49])
 }
 
 /// Percussion: [the cross-stick, three toms, a tambourine's jingle].
@@ -9161,17 +9262,21 @@ fn ska_kit_toms(r: &mut Rng) -> Vec<DrumPatch> {
     };
     let base = r.range(95.0, 115.0);
     let jingle = kit_tambourine(r)[0];
-    vec![ska_kit_cross(r)[0], tom(base), tom(base * 1.33), tom(base * 1.7), DrumPatch { gain: 0.5, ..jingle }]
+    let cross = ska_kit_cross_synth(r)[0];
+    let v = vec![cross, tom(base), tom(base * 1.33), tom(base * 1.7), DrumPatch { gain: 0.5, ..jingle }];
+    // recorded: a kit in a room, its side stick, three toms, a tambourine
+    ska_kit_rec(v, "Room", &[37, 45, 48, 50, 54])
 }
 
 /// A splash: a small cymbal, bright and quick.
 fn ska_kit_splash(r: &mut Rng) -> Vec<DrumPatch> {
-    vec![DrumPatch { ndec: r.range(0.7, 1.0), ncut: r.range(5500.0, 7000.0), ..crash(r)[0] }]
+    let v = vec![DrumPatch { ndec: r.range(0.7, 1.0), ncut: r.range(5500.0, 7000.0), ..crash(r)[0] }];
+    ska_kit_rec(v, "Standard", &[55])
 }
 
 /// The third wave's trumpet: bright and hard-edged, a section player's.
 fn ska_trumpet(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         unison: 2,
         detune: 4.0,
         width: 0.1,
@@ -9189,12 +9294,13 @@ fn ska_trumpet(r: &mut Rng) -> Patch {
         glide: 0.012,
         gain: 0.28,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::multi("trumpet", "auto"))
 }
 
 /// The third wave's tenor sax: more reed in it than the jazz band's.
 fn ska_tenor(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         fm: r.range(3.0, 3.8),
         ratio: 1.0,
         fm_dec: 2.0,
@@ -9210,12 +9316,13 @@ fn ska_tenor(r: &mut Rng) -> Patch {
         glide: 0.02,
         gain: 0.26,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::multi("tenor_sax", "auto"))
 }
 
 /// The third wave's trombone: brassier, blown harder.
 fn ska_bone(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         cutoff: r.range(1500.0, 2000.0),
         res: 0.2,
         env_amt: 1.4,
@@ -9230,18 +9337,20 @@ fn ska_bone(r: &mut Rng) -> Patch {
         glide: 0.04,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    ska_rec(p, samples::multi("trombone", "auto"))
 }
 
 /// The third wave's rock kick: punchy, the beater's snap on top.
 fn ska_kit_punk_kick(r: &mut Rng) -> Vec<DrumPatch> {
-    vec![DrumPatch {
+    let v = vec![DrumPatch {
         noise: 0.5,
         nmode: 0,
         ncut: 6000.0,
         ndec: 0.02,
         ..kick(r, (130.0, 160.0), (50.0, 58.0), (0.22, 0.3), 1.0, 0.4)
-    }]
+    }];
+    ska_kit_rec(v, "Power", &[36])
 }
 
 /// The third wave's rock snare: a fat crack, the wires ringing; and its soft stroke.
@@ -9264,7 +9373,130 @@ fn ska_kit_punk_snare(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.9,
         ..DRUM
     };
-    vec![c, DrumPatch { tone: 0.3, ndec: 0.08, click: 0.0, gain: 0.55, ..c }]
+    ska_kit_rec(vec![c, DrumPatch { tone: 0.3, ndec: 0.08, click: 0.0, gain: 0.55, ..c }], "Power", &[38, 38])
+}
+
+/// `p` played on a recorded instrument (`id`) when the samples are in: its
+/// gain (the levelling sets it), glide, bend and release kept.
+fn ska_rec(p: Patch, id: Option<u16>) -> Patch {
+    match id {
+        Some(samp) => Patch { samp, gain: p.gain, glide: p.glide, bend: p.bend, r: p.r, ..SAMPLED },
+        None => p,
+    }
+}
+
+/// A kit's hits played on a recorded kit's `keys` (one for each kind) when
+/// the samples are in, each as loud as its patch's gain has it.
+fn ska_kit_rec(v: Vec<DrumPatch>, kit: &str, keys: &[u8]) -> Vec<DrumPatch> {
+    v.into_iter()
+        .zip(keys)
+        .map(|(d, &key)| match samples::drum(kit, key) {
+            Some(samp) => DrumPatch { samp, gain: d.gain, ..DRUM },
+            None => d,
+        })
+        .collect()
+}
+
+/// A recording summed to mono, through the patch's four-pole low-pass (at
+/// the top of its range, 9 kHz, unless it has a cutoff of its own).
+fn ska_mono(p: &mut Patch) {
+    if !p.filter {
+        (p.filter, p.cutoff, p.keytrack, p.env_amt, p.res) = (true, 9000.0, 0.0, 0.0, 0.0);
+    }
+    p.poles4 = true;
+}
+
+/// A recorded instrument's level (or a recorded kit's) on channel `ch` in
+/// `style`, against the synthesiser's there: measured over whole pieces, a
+/// channel alone, the recordings against the synthesiser's patches
+/// levelled alike (the levelling's long note and early window read short
+/// chops, plucks and horn stabs, and the recordings' own decays, otherwise
+/// than the music plays them). But the third wave's snare 4 dB under the
+/// synthesiser's: that one was up to brighten a dark mix, and the recorded
+/// kit is bright.
+fn ska_rec_trim(style: u8, ch: usize) -> f32 {
+    let db = match (ch, style) {
+        (CH_KEYS, SKS_FIRST) => -0.4,
+        (CH_KEYS, SKS_TWO) => 3.0,
+        (CH_KEYS, _) => 4.5,
+        (CH_PAD, SKS_FIRST) => 1.0,
+        (CH_PAD, SKS_TWO) => 0.5,
+        (CH_PAD, _) => -8.1,
+        (CH_DRONE, SKS_FIRST) => 2.0,
+        (CH_DRONE, SKS_TWO) => 1.0,
+        (CH_DRONE, _) => 2.3,
+        (CH_BASS, SKS_FIRST) => -1.3,
+        (CH_BASS, SKS_TWO) => 1.4,
+        (CH_BASS, _) => 4.7,
+        (CH_ARP, SKS_FIRST) => -1.6,
+        (CH_ARP, SKS_TWO) => -3.4,
+        (CH_ARP, _) => -4.1,
+        (CH_LEAD, SKS_FIRST) => -3.4,
+        (CH_LEAD, SKS_TWO) => -2.8,
+        (CH_LEAD, _) => -1.3,
+        (CH_BELL, SKS_THIRD) => -5.8,
+        (CH_BELL, _) => -3.0,
+        (CH_KICK, SKS_FIRST) => 0.6,
+        (CH_KICK, SKS_TWO) => 3.9,
+        (CH_KICK, _) => 1.6,
+        (CH_SNARE, SKS_FIRST) => -2.6,
+        (CH_SNARE, SKS_TWO) => -2.5,
+        (CH_SNARE, _) => -5.1,
+        (CH_HAT, SKS_FIRST) => -8.2,
+        (CH_HAT, _) => -3.0,
+        (CH_PERC, SKS_TWO) => 2.9,
+        (CH_PERC, _) => 4.7,
+        (CH_CYM, SKS_FIRST) => -3.3,
+        (CH_CYM, _) => 3.4,
+        _ => 0.0,
+    };
+    10f32.powf(db / 20.0)
+}
+
+/// The band's instruments that are other genres' too, recorded for ska: the
+/// grand piano, the organs (their swells kept), the upright bass (a
+/// contrabass plucked), the trumpet, the tenor sax, the trombone, the tenor
+/// horn (a trombone, mellower), the muted trumpet.
+fn ska_piano_rec(r: &mut Rng) -> Patch {
+    ska_rec(piano(r), samples::gm("Grand Piano"))
+}
+
+fn ska_organ_rec(r: &mut Rng) -> Patch {
+    let p = pad_organ(r);
+    Patch { a: p.a, ..ska_rec(p, samples::gm("Rock Organ")) }
+}
+
+fn ska_organ_stab_rec(r: &mut Rng) -> Patch {
+    let p = stab_organ(r);
+    Patch { a: p.a, ..ska_rec(p, samples::gm("Percussive Organ")) }
+}
+
+fn ska_upright_rec(r: &mut Rng) -> Patch {
+    ska_rec(bass_upright(r), samples::multi("contrabass", "pizz"))
+}
+
+fn ska_trumpet_rec(r: &mut Rng) -> Patch {
+    ska_rec(trumpet(r), samples::multi("trumpet", "auto"))
+}
+
+fn ska_sax_rec(r: &mut Rng) -> Patch {
+    ska_rec(sax(r), samples::multi("tenor_sax", "auto"))
+}
+
+fn ska_trombone_rec(r: &mut Rng) -> Patch {
+    ska_rec(trombone(r), samples::multi("trombone", "auto"))
+}
+
+fn ska_horn_rec(r: &mut Rng) -> Patch {
+    let p = horn(r);
+    match samples::multi("trombone", "auto") {
+        Some(id) => Patch { filter: true, cutoff: 1.5 * p.cutoff, keytrack: 0.5, res: 0.0, ..ska_rec(p, Some(id)) },
+        None => p,
+    }
+}
+
+fn ska_muted_rec(r: &mut Rng) -> Patch {
+    ska_rec(muted_trumpet(r), samples::gm("Harmon Mute Trumpet"))
 }
 
 /// Ska's instruments: the skank's (guitars, pianos, an organ stab; the
@@ -9274,9 +9506,9 @@ fn ska_kit_punk_snare(r: &mut Rng) -> Vec<DrumPatch> {
 const P_SKA_CHOP: &[(&str, Make)] = &[
     ("muted guitar chop", ska_guitar_chop),
     ("clean guitar skank", ska_guitar_clean),
-    ("piano", piano),
+    ("piano", ska_piano_rec),
     ("bright upright piano", ska_piano_bright),
-    ("organ stab", stab_organ),
+    ("organ stab", ska_organ_stab_rec),
 ];
 const P_SKA_GUITAR: &[(&str, Make)] =
     &[("muted guitar chop", ska_guitar_chop), ("clean guitar skank", ska_guitar_clean)];
@@ -9293,38 +9525,44 @@ const P_SKA_TW_HORN: &[(&str, Make)] = &[("trombone", ska_bone), ("tenor sax", s
 const K_SKA_PUNK_KICK: &[(&str, MakeKit)] = &[("rock kick", ska_kit_punk_kick)];
 const K_SKA_PUNK_SNARE: &[(&str, MakeKit)] = &[("rock snare", ska_kit_punk_snare), ("tight snare", ska_kit_snare)];
 const P_SKA_ORGAN: &[(&str, Make)] =
-    &[("Farfisa", ska_farfisa), ("Vox Continental", ska_vox), ("Hammond", ska_hammond), ("organ", pad_organ)];
+    &[("Farfisa", ska_farfisa), ("Vox Continental", ska_vox), ("Hammond", ska_hammond), ("organ", ska_organ_rec)];
 const P_SKA_PIANO: &[(&str, Make)] =
-    &[("piano", piano), ("bright upright piano", ska_piano_bright), ("Wurlitzer", ep_wurli)];
+    &[("piano", ska_piano_rec), ("bright upright piano", ska_piano_bright), ("Wurlitzer", ep_wurli)];
 const P_SKA_BASS: &[(&str, Make)] = &[
     ("electric bass, picked", ska_bass_pick),
     ("electric bass, fingers", ska_bass_finger),
     ("flatwound bass", ska_bass_flat),
-    ("upright bass", bass_upright),
+    ("upright bass", ska_upright_rec),
 ];
 const P_SKA_LEAD: &[(&str, Make)] = &[
-    ("trumpet", trumpet),
+    ("trumpet", ska_trumpet_rec),
     ("alto sax", ska_alto),
-    ("tenor sax", sax),
+    ("tenor sax", ska_sax_rec),
     ("melodica", ska_melodica),
     ("flugelhorn", ska_flugel),
-    ("muted trumpet", muted_trumpet),
+    ("muted trumpet", ska_muted_rec),
 ];
 const P_SKA_HORN: &[(&str, Make)] = &[
-    ("trombone", trombone),
-    ("tenor sax", sax),
-    ("tenor horn", horn),
+    ("trombone", ska_trombone_rec),
+    ("tenor sax", ska_sax_rec),
+    ("tenor horn", ska_horn_rec),
     ("alto sax", ska_alto),
     ("flugelhorn", ska_flugel),
 ];
-const P_SKA_LOW: &[(&str, Make)] = &[("baritone sax", ska_bari), ("trombone", trombone), ("tenor sax", sax)];
-const K_SKA_KICK: &[(&str, MakeKit)] = &[("jazz kick", ska_kit_kick), ("soft kick", kit_kick_soft)];
+const P_SKA_LOW: &[(&str, Make)] =
+    &[("baritone sax", ska_bari), ("trombone", ska_trombone_rec), ("tenor sax", ska_sax_rec)];
+const K_SKA_KICK: &[(&str, MakeKit)] = &[("jazz kick", ska_kit_kick), ("soft kick", ska_kit_kick_soft)];
+const K_SKA_ROOM_KICK: &[(&str, MakeKit)] = &[("rock kick", ska_kit_kick_room), ("soft kick", ska_kit_kick_soft)];
 const K_SKA_SNARE: &[(&str, MakeKit)] = &[("cross-stick", ska_kit_cross), ("tight snare", ska_kit_snare)];
-const K_SKA_HAT: &[(&str, MakeKit)] = &[("hi-hats", ska_kit_hats), ("ride", kit_ride)];
+const K_SKA_HAT: &[(&str, MakeKit)] = &[("hi-hats", ska_kit_hats), ("ride", ska_kit_ride)];
 const K_SKA_PERC: &[(&str, MakeKit)] = &[("cross-stick, toms, tambourine", ska_kit_toms)];
-const K_SKA_CYM: &[(&str, MakeKit)] = &[("crash", crash), ("splash", ska_kit_splash)];
-const SKA_SOLOISTS: &[(&str, Make, i32)] =
-    &[("tenor sax", sax, 62), ("trumpet", trumpet, 72), ("trombone", trombone, 58), ("alto sax", ska_alto, 67)];
+const K_SKA_CYM: &[(&str, MakeKit)] = &[("crash", ska_kit_crash), ("splash", ska_kit_splash)];
+const SKA_SOLOISTS: &[(&str, Make, i32)] = &[
+    ("tenor sax", ska_sax_rec, 62),
+    ("trumpet", ska_trumpet_rec, 72),
+    ("trombone", ska_trombone_rec, 58),
+    ("alto sax", ska_alto, 67),
+];
 
 fn band_ska(r: &mut Rng, s: &Synth, style: u8) -> Band {
     let third = style == SKS_THIRD;
@@ -9346,7 +9584,12 @@ fn band_ska(r: &mut Rng, s: &Synth, style: u8) -> Band {
     b.tone(r, s, CH_LEAD, if third { P_SKA_TW_LEAD } else { P_SKA_LEAD }, 72.0);
     b.tone(r, s, CH_BELL, if third { P_SKA_TW_HORN } else { P_SKA_HORN }, 62.0);
     b.tone(r, s, CH_ARP, P_SKA_LOW, 50.0);
-    b.kit(r, s, CH_KICK, if third { K_SKA_PUNK_KICK } else { K_SKA_KICK });
+    let kick = match style {
+        SKS_FIRST => K_SKA_KICK,
+        SKS_TWO => K_SKA_ROOM_KICK,
+        _ => K_SKA_PUNK_KICK,
+    };
+    b.kit(r, s, CH_KICK, kick);
     b.kit(r, s, CH_SNARE, if third { K_SKA_PUNK_SNARE } else { K_SKA_SNARE });
     b.kit(r, s, CH_HAT, K_SKA_HAT);
     b.kit(r, s, CH_PERC, K_SKA_PERC);
@@ -9361,11 +9604,17 @@ fn band_ska(r: &mut Rng, s: &Synth, style: u8) -> Band {
 /// organ, its guitar instead of the piano), an upright or fingered bass (a
 /// picked one after the first wave), trumpet or alto, trombone or tenor,
 /// baritone; a room; the first wave's record a little dull and crackling,
-/// light in the bass, the chop forward; 2-tone and the third wave spread wide.
+/// light in the bass, the chop forward; 2-tone and the third wave spread
+/// wide. With the samples in, recordings play nearly all of it (each
+/// instrument says which), brought to this balance by `ska_rec_trim`.
 fn sounds_ska(r: &mut Rng, s: &mut Synth, style: u8) {
     let (first, two_tone, third) = (style == SKS_FIRST, style == SKS_TWO, style == SKS_THIRD);
     let ch = &mut s.ch;
-    ch[CH_KICK].drums = if third { ska_kit_punk_kick(r) } else { ska_kit_kick(r) };
+    ch[CH_KICK].drums = match style {
+        SKS_FIRST => ska_kit_kick(r),
+        SKS_TWO => ska_kit_kick_room(r),
+        _ => ska_kit_punk_kick(r),
+    };
     ch[CH_SNARE].drums = if third {
         ska_kit_punk_snare(r)
     } else if r.chance(if two_tone { 0.2 } else { 0.6 }) {
@@ -9375,10 +9624,10 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, style: u8) {
     };
     ch[CH_HAT].drums = ska_kit_hats(r);
     ch[CH_PERC].drums = ska_kit_toms(r);
-    ch[CH_CYM].drums = crash(r);
+    ch[CH_CYM].drums = ska_kit_crash(r);
     ch[CH_BASS].patch = match (first, r.bit_chance()) {
         (false, true) => ska_bass_pick(r),
-        (true, true) => bass_upright(r),
+        (true, true) => ska_upright_rec(r),
         _ => ska_bass_finger(r),
     };
     ch[CH_KEYS].patch = if third { ska_guitar_crunch(r) } else { ska_guitar_chop(r) };
@@ -9389,20 +9638,20 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, style: u8) {
         (_, true) => ska_tenor(r),
         _ => ska_alto(r),
     };
-    ch[CH_DRONE].patch = if third { ska_guitar_dist(r) } else { piano(r) };
+    ch[CH_DRONE].patch = if third { ska_guitar_dist(r) } else { ska_piano_rec(r) };
     ch[CH_LEAD].patch = if third {
         ska_trumpet(r)
     } else if two_tone && r.bit_chance() {
         ska_alto(r)
     } else {
-        trumpet(r)
+        ska_trumpet_rec(r)
     };
     ch[CH_BELL].patch = if third {
         ska_bone(r)
     } else if r.chance(0.6) {
-        trombone(r)
+        ska_trombone_rec(r)
     } else {
-        sax(r)
+        ska_sax_rec(r)
     };
     ch[CH_ARP].patch = ska_bari(r);
     // each role as loud whichever instrument it drew (the band's others are
@@ -9491,6 +9740,12 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, style: u8) {
     for &(c, pan) in pans {
         ch[c].gain *= (power(ch[c].pan) / power(pan)).sqrt();
         ch[c].pan = pan;
+    }
+    // a recorded kit brought to the balance the synthesiser's had
+    for c in [CH_KICK, CH_SNARE, CH_HAT, CH_PERC, CH_CYM] {
+        if ch[c].drums.iter().any(|d| d.samp != 0) {
+            ch[c].gain *= ska_rec_trim(style, c);
+        }
     }
     // the distorted guitar's speaker
     ch[CH_DRONE].lp = if third { 6500.0 } else { 20000.0 };
