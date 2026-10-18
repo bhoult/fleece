@@ -44,7 +44,7 @@ const NG: usize = GENRES.len();
 /// tempo, near enough), and each part has an instrument of each.
 pub const IDS: usize = NG * (NG + 1);
 /// Each genre's tempo, about (a mix's lies 60 % of the way to its drummer's).
-const MID_BPM: [f64; NG] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0, 135.0, 120.0];
+const MID_BPM: [f64; NG] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0, 135.0, 118.0];
 
 /// The id of `primary` alone, or mixed with `secondary` (another genre).
 pub fn mix_id(primary: usize, secondary: Option<usize>) -> usize {
@@ -1136,7 +1136,8 @@ impl Delay {
 
     #[inline]
     fn tick(&mut self, x: f32) -> (f32, f32) {
-        self.time += (self.target - self.time) * 0.0001;
+        // kept inside the line (a time past it read garbage and went NaN)
+        self.time = (self.time + (self.target - self.time) * 0.0001).clamp(1.0, DLEN as f32 - 2.0);
         let rp = self.w as f32 + DLEN as f32 - self.time;
         let i0 = rp as usize;
         let fr = rp - i0 as f32;
@@ -2577,6 +2578,9 @@ impl Song {
         if self.genre == TAVERN {
             return vec![self.tv.mask];
         }
+        if self.genre == MARIACHI {
+            return self.mc.mask.to_vec();
+        }
         let bar = self.sec_bar.saturating_sub(1);
         (0..2).map(|h| self.chord(bar * 2 + h).mask(self.root + self.lift)).collect()
     }
@@ -2705,7 +2709,8 @@ impl Song {
             }
         }
         let len = self.bar_steps() as f64 * self.step_len();
-        let lilt = if self.beat_steps() == 6 { 0.18 } else { 0.0 };
+        // (a jig's; mariachi's 6/8 is even)
+        let lilt = if self.beat_steps() == 6 && self.genre != MARIACHI { 0.18 } else { 0.0 };
         let mut b = Bar { t0, step: self.step_len(), swing: self.swing, lilt, lift: self.lift, ev };
         if self.sec_bar.is_multiple_of(8) && self.sec_bar > 0 && sec.kind == MAIN {
             // now and then an optional layer sits out a phrase
@@ -2715,6 +2720,7 @@ impl Song {
                 SYNTHWAVE => &[L_ARP, L_OHAT, L_PAD, L_PERC],
                 LOFI => &[L_LEAD, L_PERC, L_HAT],
                 SKA => &[L_DRONE, L_PAD, L_PERC, L_OHAT],
+                MARIACHI => &[L_BELL, L_DRONE, L_PAD, L_HAT],
                 _ => &[L_HAT],
             };
             self.mute = if self.rng.chance(0.5) { self.rng.pick(opt) } else { 0 };
@@ -2734,9 +2740,9 @@ impl Song {
             MARIACHI => self.mariachi(s, &mut b, sec, m),
             _ => self.polka(&mut b, sec),
         }
-        // a mix: the drummer's beat for the writer's (but for polka's and
-        // tavern's last bar, their ending)
-        let ending = matches!(self.genre, POLKA | TAVERN | SKA) && sec.kind == OUTRO && self.sec_bar + 1 == sec.bars;
+        // a mix: the drummer's beat for the writer's (but for polka's,
+        // tavern's, ska's and mariachi's last bar, their ending)
+        let ending = matches!(self.genre, POLKA | TAVERN | SKA | MARIACHI) && sec.kind == OUTRO && self.sec_bar + 1 == sec.bars;
         if self.guest.is_some() && !ending {
             let mut k = n0;
             for j in n0..b.ev.len() {
@@ -2779,7 +2785,8 @@ impl Song {
             LOFI => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
             TAVERN => [2.0, 3.0, 0.0, 0.0, 3.0, 2.0, 0.0],
             SKA => [5.0, 1.0, 0.0, 0.0, 1.5, 1.5, 0.5],
-            MARIACHI => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+            // mariachi: major mostly, minor ones in harmonic minor
+            MARIACHI => [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4],
             // polka: major mostly, now and then a minor one
             _ => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         };
@@ -2853,6 +2860,8 @@ impl Song {
                 1 => 1,
                 _ => r.below(3),
             }
+        } else if self.genre == MARIACHI {
+            self.mc.map.get(self.sec).map_or(0, |m| m.dress)
         } else {
             which
         };
@@ -6122,22 +6131,820 @@ impl Song {
         }
     }
 
-    // -- mariachi (placeholders: lo-fi's music until mariachi is written)
+    // -- mariachi
 
+    /// A mariachi piece: its style (and so its meter and tempo), its strains
+    /// (verse, chorus, the contrasting part, the fanfare) with their tunes,
+    /// and its form: the fanfare; verses and choruses, AABB or ABAB, the
+    /// fanfare's end again between them; the contrasting part; the last
+    /// chorus with everyone; the ending. A minute and a half to two and a half.
     fn piece_mariachi(&mut self, s: &mut Synth) {
-        self.piece_lofi(s);
-        self.mc = Mariachi { bar_steps: 16, beat_steps: 4, meter: "4/4" };
+        let center = self.rng.pick(&[67, 69, 70, 72]);
+        let tonic = self.tonic_near(center);
+        let minor = self.mode != IONIAN;
+        let mode = if minor { MARIACHI_MINOR } else { IONIAN };
+        self.mode = mode;
+        let r = &mut self.rng;
+        let style = r.weighted(&[3.0, 2.0, 2.0, 2.0, 2.0]) as u8;
+        let (bs, beat, bpm, meter) = match style {
+            MARIACHI_SON => (12u32, 6u32, r.range(108.0, 132.0), "6/8 son jalisciense"),
+            MARIACHI_HUAPANGO => (12, 6, r.range(88.0, 108.0), "6/8 huapango"),
+            MARIACHI_VALS => (12, 4, r.range(135.0, 170.0), "3/4 ranchera valseada"),
+            MARIACHI_POLKA => (8, 4, r.range(105.0, 125.0), "2/4 ranchera polkeada"),
+            _ => (16, 4, r.range(70.0, 88.0), "4/4 bolero ranchero"),
+        };
+        self.bpm = bpm as f64;
+        self.swing = 0.0;
+        self.human = 0.008;
+        // the son's bars in 3/4 against its 6/8: alternating (the
+        // sesquialtera), two and two, or the cadence's alone; a huapango's
+        // cadences now and then
+        let hemi: u8 = match style {
+            MARIACHI_SON => r.pick(&[0b1010, 0b1010, 0b1000, 0b1100]),
+            MARIACHI_HUAPANGO if r.chance(0.5) => 0b1000,
+            _ => 0,
+        };
+        let bar_s = bs as f64 / beat as f64 * 60.0 / self.bpm;
+        // strains of sixteen bars, eight for the bolero's long ones
+        let lb: usize = if bar_s < 1.8 { 16 } else { 8 };
+        let lc = if lb == 16 && r.chance(0.4) { 8 } else { lb };
+        let lf = lb / 2;
+        let (pa, pb, pc, pf) = if minor {
+            (MARIACHI_MIN_A, MARIACHI_MIN_B, MARIACHI_MIN_C, MARIACHI_FANFARE_MIN)
+        } else {
+            (MARIACHI_MAJ_A, MARIACHI_MAJ_B, MARIACHI_MAJ_C, MARIACHI_FANFARE)
+        };
+        let dom = Harm { root: 7, q: Q_DOM7, inv: 0 };
+        let polkeada = style == MARIACHI_POLKA;
+        // a strain's chords: a plan, or two (the first closing on the
+        // dominant); a polkeada's a chord a bar
+        let chords_of = |r: &mut Rng, pool: &[&str], bars: usize| {
+            let mut v = halves(r.pick(pool));
+            if bars == 16 {
+                let n = v.len();
+                v[n - 2] = dom;
+                v[n - 1] = dom;
+                v.extend(halves(r.pick(pool)));
+            }
+            if polkeada {
+                for k in (0..v.len()).step_by(2) {
+                    v[k + 1] = v[k];
+                }
+            }
+            v
+        };
+        let a = chords_of(r, pa, lb);
+        let mut bc = chords_of(r, pb, lb);
+        for _ in 0..4 {
+            if bc != a {
+                break;
+            }
+            bc = chords_of(r, pb, lb);
+        }
+        let c = chords_of(r, pc, lc);
+        let mut f = halves(r.pick(pf));
+        if lf == 8 {
+            f.extend(halves(r.pick(pf)));
+        }
+        let mut strains = Vec::with_capacity(4);
+        for (k, (chords, fanfare)) in [(a, false), (bc, false), (c, false), (f, true)].into_iter().enumerate() {
+            let (mel, ans) = if polkeada && !fanfare {
+                // the polkeada's tunes are a polka's
+                let per_bar: Vec<Harm> = chords.iter().step_by(2).copied().collect();
+                let (mut mel, ans) = polka_tune(r, &per_bar, mode);
+                polka_graces(r, &mut mel, 0.06);
+                (mel, ans)
+            } else {
+                mariachi_tune(r, style, hemi, &chords, bs as u16, beat as u16, mode, fanfare, k == 1)
+            };
+            strains.push(MariachiStrain { chords, mel, ans });
+        }
+        // the form: (section, its part, how soon it goes when the piece runs long: 0 never)
+        let rs = L_KEYS | L_PAD | L_BASS;
+        let tunes = L_LEAD | L_ARP;
+        let harp = if r.chance(if style == MARIACHI_BOLERO { 0.85 } else { 0.6 }) { L_BELL } else { 0 };
+        let zap = if matches!(style, MARIACHI_SON | MARIACHI_HUAPANGO) { L_KICK } else { 0 };
+        let claps = match style {
+            MARIACHI_SON | MARIACHI_POLKA => L_SNARE,
+            MARIACHI_HUAPANGO if r.chance(0.4) => L_SNARE,
+            _ => 0,
+        };
+        let shake = match style {
+            MARIACHI_BOLERO => r.pick(&[L_HAT, L_HAT | L_PERC, 0]),
+            MARIACHI_VALS if r.chance(0.3) => L_PERC,
+            _ => 0,
+        };
+        let (lb, lc, lf) = (lb as u32, lc as u32, lf as u32);
+        let li = lb / 4;
+        let mk = |kind: u8, bars: u32, mask: u32, energy: f32| Sec { kind, bars, mask, energy };
+        let part = |strain: usize, rep: u32, first: u32, role: u8, dress: usize| MariachiSection {
+            strain,
+            rep,
+            first,
+            role,
+            dress,
+        };
+        let intro_role = if r.chance(0.65) { MARIACHI_TRUMPETS } else { MARIACHI_VIOLINS };
+        let verse2 = if r.chance(0.35) { MARIACHI_TRADE } else { MARIACHI_VIOLINS };
+        let chorus = if r.chance(0.6) { MARIACHI_TRUMPETS } else { MARIACHI_TRADE };
+        let bridge = if r.chance(0.7) { MARIACHI_VIOLINS } else { MARIACHI_TRUMPETS };
+        let intro = (mk(INTRO, lf, rs | tunes | L_CTR | harp, 0.65), part(3, 0, 0, intro_role, 1), 0u8);
+        let a0 = (mk(MAIN, lb, rs | tunes | L_DRONE | harp, 0.6), part(0, 0, 0, MARIACHI_VIOLINS, 0), 0);
+        let a1 = (mk(MAIN, lb, rs | tunes | L_CTR | harp, 0.7), part(0, 1, 0, verse2, 0), 4);
+        let inter = |rep: u32, drop: u8| {
+            (mk(BUILD, li, rs | tunes | L_CTR | harp, 0.8), part(3, rep, lf - li, MARIACHI_TRUMPETS, 1), drop)
+        };
+        let full = rs | tunes | L_CTR | L_DRONE | harp;
+        let b0 = (mk(MAIN, lb, full | zap | (shake & L_HAT), 0.85), part(1, 0, 0, chorus, 1), 0);
+        let b1 = (mk(MAIN, lb, full | zap | shake, 0.9), part(1, 1, 0, MARIACHI_TUTTI, 1), 2);
+        let cc = (mk(MAIN, lc, full, 0.6), part(2, 0, 0, bridge, 2), 0);
+        let b2 = (mk(MAIN, lb, full | zap | claps | shake, 1.0), part(1, 2, 0, MARIACHI_TUTTI, 1), 0);
+        let outro = (mk(OUTRO, 2, full | zap | claps, 1.0), part(1, 3, 0, MARIACHI_TUTTI, 1), 0);
+        let mut plan = if r.chance(0.55) {
+            vec![intro, a0, a1, inter(1, 0), b0, b1, cc, inter(2, 3), b2, outro]
+        } else {
+            vec![intro, a0, b0, inter(1, 0), a1, b1, cc, b2, outro]
+        };
+        let secs = |p: &[(Sec, MariachiSection, u8)]| p.iter().map(|x| x.0.bars).sum::<u32>() as f64 * bar_s;
+        while secs(&plan) > 150.0 {
+            let Some(k) = (0..plan.len()).filter(|&k| plan[k].2 > 0).max_by_key(|&k| plan[k].2) else { break };
+            plan.remove(k);
+        }
+        if secs(&plan) < 90.0 {
+            let verse3 = (mk(MAIN, lb, rs | tunes | L_CTR | harp, 0.75), part(0, 2, 0, MARIACHI_TRADE, 0), 0);
+            let k = plan.len() - 2;
+            plan.insert(k, verse3);
+        }
+        self.plan = plan.iter().map(|x| x.0).collect();
+        // the trumpets an octave down if the tunes climb past their comfort
+        let top = strains.iter().flat_map(|s| s.mel.iter().chain(&s.ans)).map(|n| n.pitch).max().unwrap_or(12);
+        self.mc = Mariachi {
+            bar_steps: bs,
+            beat_steps: beat,
+            meter,
+            style,
+            hemi,
+            strains,
+            map: plan.iter().map(|x| x.1).collect(),
+            tonic,
+            tr_oct: if tonic + top > 84 { -12 } else { 0 },
+            button: r.chance(match style {
+                MARIACHI_BOLERO => 0.0,
+                MARIACHI_VALS => 0.4,
+                _ => 0.6,
+            }),
+            call: if r.chance(0.4) { lf / 4 } else { 0 },
+            ..Mariachi::default()
+        };
+        sounds_mariachi(r, s);
+        self.band = band_mariachi(r, s);
+        s.dly.target = (self.step_len() * 3.0) as f32;
     }
 
-    fn mariachi_section(&mut self) {}
+    /// A mariachi section begins: its tune this time through (on a repeat a
+    /// bar figured anew, the answers turned round; ornaments, more each
+    /// time), who leads, a third or a sixth under the tune, which mánico.
+    fn mariachi_section(&mut self) {
+        let sec = self.plan[self.sec];
+        let ms = self.mc.map[self.sec];
+        let (bs, beat) = (self.mc.bar_steps as u16, self.mc.beat_steps as u16);
+        let (style, hemi, mode) = (self.mc.style, self.mc.hemi, self.mode);
+        let st = self.mc.strains[ms.strain].clone();
+        let r = &mut self.rng;
+        let (mut mel, mut ans) = (st.mel, st.ans);
+        let bars = (st.chords.len() / 2) as u16;
+        if ms.rep > 0 && sec.kind == MAIN && r.chance(0.75) {
+            let bar = r.pick(&[1u16, 2, 5, 6]) + if bars > 8 && r.bit_chance() { 8 } else { 0 };
+            let prev = mel.iter().filter(|n| n.step / bs < bar).last().map_or(4, |n| n.pitch);
+            let chord_at = |s0: u16| st.chords[bar as usize * 2 + (s0 as usize * 2 / bs as usize).min(1)];
+            let fig = if style == MARIACHI_POLKA {
+                let kind = r.pick(&MID_FIGS);
+                polka_figure(r, kind, chord_at(0), mode, prev, None, PK_LO, PK_HI)
+            } else {
+                let hb = (hemi >> (bar % 4)) & 1 == 1;
+                let three = hb || (bs == 12 && beat == 4);
+                let tpl = r.pick(mariachi_rhythms(style, bs, three, false, false));
+                let mut dir = if r.bit_chance() { 1 } else { -1 };
+                let leaps = style == MARIACHI_HUAPANGO;
+                mariachi_figure(r, tpl, &chord_at, mode, prev, &mut dir, if three { 4 } else { beat }, false, None, leaps)
+            };
+            mel.retain(|n| n.step / bs != bar);
+            mel.extend(fig.iter().map(|n| PNote { step: n.step + bar * bs, ..*n }));
+            mel.sort_by_key(|n| n.step);
+        }
+        if ms.rep % 2 == 1 {
+            // each bar's answer turned round (a run up now runs down)
+            let mut k = 0;
+            while k < ans.len() {
+                let bar = ans[k].step / bs;
+                let end = (k..ans.len()).find(|&j| ans[j].step / bs != bar).unwrap_or(ans.len());
+                let pitches: Vec<i32> = ans[k..end].iter().map(|n| n.pitch).rev().collect();
+                for (n, p) in ans[k..end].iter_mut().zip(pitches) {
+                    n.pitch = p;
+                }
+                k = end;
+            }
+        }
+        mariachi_ornaments(r, &mut mel, style, 0.06 + 0.05 * ms.rep.min(3) as f32);
+        self.mc.role = ms.role;
+        self.mc.harm = if sec.mask & L_CTR != 0 { r.pick(&[2, 2, 5]) } else { 0 };
+        self.mc.alt = r.bit_chance();
+        self.mc.mel = mel;
+        self.mc.ans = ans;
+        self.mc.sus_v.clear();
+    }
 
+    /// A bar of mariachi: the vihuela's and guitar's mánico, the
+    /// guitarrón's roots and fifths (walking into a new chord at a phrase's
+    /// end), the harp, the tune (violins or trumpets leading, a third or a
+    /// sixth under it, the other section answering), the second violins
+    /// holding the harmony, the zapateado, palmas, maracas or guiro where
+    /// asked; at the end, the closing figure and the last chord.
     fn mariachi(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
-        self.lofi(s, b, sec, m)
+        let ms = self.mc.map[self.sec];
+        let i = self.sec_bar;
+        let last = i + 1 == sec.bars;
+        let minor = MODES[self.mode][2] == 3;
+        let home = Harm { root: 0, q: if minor { Q_MIN } else { Q_MAJ }, inv: 0 };
+        let dom = Harm { root: 7, q: Q_DOM7, inv: 0 };
+        let (chords, next, bi, hold) = {
+            let ch = &self.mc.strains[ms.strain].chords;
+            let nb = (ch.len() / 2) as u32;
+            let bi = (i + ms.first) % nb;
+            let at = |k: u32| ch[(k % (2 * nb)) as usize];
+            let chords = match sec.kind {
+                OUTRO if i == 0 => [dom, dom],
+                OUTRO => [home, home],
+                _ => [at(2 * bi), at(2 * bi + 1)],
+            };
+            let next = if sec.kind == OUTRO {
+                home
+            } else if !last {
+                at(2 * bi + 2)
+            } else {
+                match self.mc.map.get(self.sec + 1) {
+                    Some(n) if self.plan[self.sec + 1].kind != OUTRO => {
+                        self.mc.strains[n.strain].chords[2 * n.first as usize]
+                    }
+                    Some(_) => dom,
+                    None => home,
+                }
+            };
+            // how many half bars each of the bar's chords is held from here
+            // (0: held over from before)
+            let hold = [0u32, 1].map(|hh| {
+                let k = 2 * bi + hh;
+                if !((i == 0 && hh == 0) || at(k + 2 * nb - 1) != at(k)) {
+                    return 0;
+                }
+                let left = 2 * (sec.bars - i) - hh;
+                let mut n = 1;
+                while n < 8 && n < left && at(k + n) == at(k) {
+                    n += 1;
+                }
+                n
+            });
+            (chords, next, bi, hold)
+        };
+        self.mc.mask = [chords[0].mask(self.root), chords[1].mask(self.root)];
+        let hemi = (self.mc.hemi >> (bi % 4)) & 1 == 1;
+        if sec.kind == OUTRO && last {
+            self.mariachi_ending(s, b, m, home);
+            return;
+        }
+        let vb = self.var_b();
+        let alt = self.mc.alt != vb;
+        let strength = 0.85 + 0.15 * sec.energy;
+        // the fanfare's call, alone, before the band comes in
+        let m = if sec.kind == INTRO && i < self.mc.call { m & !(L_KEYS | L_PAD | L_BASS | L_BELL) } else { m };
+        if m & L_KEYS != 0 {
+            self.mariachi_strums(s, b, CH_KEYS, chords, hemi, alt, last && sec.kind != OUTRO, strength);
+        }
+        if m & L_PAD != 0 {
+            self.mariachi_strums(s, b, CH_PAD, chords, hemi, alt, false, strength);
+        }
+        if m & L_BASS != 0 {
+            let walk = last || bi % 4 == 3 || sec.kind == OUTRO;
+            self.mariachi_bass(b, chords, next, hemi, vb, walk, hold[0] == 0);
+        }
+        if m & L_BELL != 0 {
+            self.mariachi_harp(b, chords, hemi, vb);
+        }
+        if sec.kind == OUTRO {
+            self.mariachi_closing(s, b, m, dom);
+        } else {
+            self.mariachi_lines(s, b, sec, m, chords, bi, hold);
+        }
+        let fill = if matches!(sec.kind, MAIN | BUILD) { self.fill(sec) } else { 0 };
+        self.mariachi_hits(b, m & (L_KICK | L_SNARE | L_HAT | L_PERC), hemi, fill, sec.energy, 1.0);
     }
 
-    /// Mariachi's beat in any meter, for a mix.
-    fn mariachi_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
-        self.lofi_beat(s, b, sec, m)
+    /// The vihuela's chord (its five strings within A3-E5, any inversion) or
+    /// the guitar's (from the root up, six strings at most).
+    fn mariachi_voicing(&self, c: Harm, guitar: bool) -> Vec<i32> {
+        let pcs = self.pcs(c);
+        if guitar {
+            let lo = 47 + (self.root + c.root - 47).rem_euclid(12);
+            let mut v = in_range(&pcs, lo, lo + 19);
+            v.truncate(6);
+            v
+        } else {
+            let mut v = in_range(&pcs, 57, 76);
+            let n = v.len();
+            if n > 5 {
+                v.drain(..n - 5);
+            }
+            v
+        }
+    }
+
+    /// A stroke on `ch` across voicing `v` (low to high), ringing `len` steps.
+    fn mariachi_stroke(&mut self, b: &mut Bar, ch: usize, st: f32, v: &[i32], len: f32, vel: f32, kind: u8) {
+        let r = &mut self.rng;
+        let late = r.range(0.0, self.human);
+        let gap = if ch == CH_KEYS { 0.005 } else { 0.009 } * r.range(0.8, 1.25);
+        match kind {
+            MARIACHI_UP => {
+                for (k, &p) in v.iter().rev().take(3).enumerate() {
+                    b.note(st, late + gap * k as f32, ch, p, vel * r.range(0.85, 1.0), len, false);
+                }
+            }
+            MARIACHI_CHOP => {
+                for (k, &p) in v.iter().enumerate() {
+                    b.note(st, late + 0.3 * gap * k as f32, ch, p, vel * 0.8, 0.3, false);
+                }
+            }
+            MARIACHI_RASGUEO => {
+                // down, down, up in a 16th, the last left ringing
+                let third = b.secs(1.0) / 3.0;
+                for j in 0..3 {
+                    let (t, l) = (late + third * j as f32, if j == 2 { len } else { 0.35 });
+                    for k in 0..v.len() {
+                        let p = if j == 2 { v[v.len() - 1 - k] } else { v[k] };
+                        b.note(st, t + 0.6 * gap * k as f32, ch, p, vel * if j == 0 { 0.8 } else { 1.0 }, l, false);
+                    }
+                }
+            }
+            _ => {
+                for (k, &p) in v.iter().enumerate() {
+                    b.note(st, late + gap * k as f32, ch, p, vel * r.range(0.88, 1.0), len, false);
+                }
+            }
+        }
+    }
+
+    /// A bar of a strummed part (the vihuela on CH_KEYS, the guitar on
+    /// CH_PAD) in the style's mánico, its last stroke a rasgueo when
+    /// `rasgueo`; held chords where the instrument at hand cannot be
+    /// strummed (a mix's pad, its attack slow).
+    fn mariachi_strums(
+        &mut self,
+        s: &Synth,
+        b: &mut Bar,
+        ch: usize,
+        chords: [Harm; 2],
+        hemi: bool,
+        alt: bool,
+        rasgueo: bool,
+        vel: f32,
+    ) {
+        let bs = self.mc.bar_steps as f32;
+        let guitar = ch == CH_PAD;
+        let v = [self.mariachi_voicing(chords[0], guitar), self.mariachi_voicing(chords[1], guitar)];
+        if s.ch[ch].patch.a > 0.08 {
+            let two = chords[1] != chords[0];
+            for (hh, vv) in v.iter().enumerate().take(if two { 2 } else { 1 }) {
+                for &n in vv {
+                    b.note(hh as f32 * bs / 2.0, 0.0, ch, n, 0.45 * vel, if two { bs / 2.0 } else { bs }, false);
+                }
+            }
+            return;
+        }
+        let pat = mariachi_manico(self.mc.style, hemi, guitar, alt);
+        for (k, &(st, kind, v0)) in pat.iter().enumerate() {
+            let st = st as f32;
+            let end = pat.get(k + 1).map_or(bs, |x| x.0 as f32);
+            let kind = if rasgueo && k + 1 == pat.len() { MARIACHI_RASGUEO } else { kind };
+            let half = (st * 2.0 >= bs) as usize;
+            self.mariachi_stroke(b, ch, st, &v[half], end - st, v0 * vel, kind);
+        }
+    }
+
+    /// The guitarrón: roots and fifths where the style puts them (the root
+    /// often doubled an octave up, plucked hard), the second chord's root
+    /// where it changes; walking by step into the next chord when `walk` and
+    /// it moves. A waltz's bar on a chord held over plays its fifth.
+    fn mariachi_bass(&mut self, b: &mut Bar, chords: [Harm; 2], next: Harm, hemi: bool, vb: bool, walk: bool, held: bool) {
+        let (bs, style) = (self.mc.bar_steps, self.mc.style);
+        let lo = self.tonic_near(43) - 5;
+        let root = |c: Harm| lo + (self.root + c.bass() - lo).rem_euclid(12);
+        let fifth = |c: Harm| {
+            let r0 = root(c);
+            let f = r0 - 7 + (self.root + c.root + 7 - (r0 - 7)).rem_euclid(12);
+            if f < 33 { f + 12 } else { f }
+        };
+        let (rn, roots, fifths) = (root(next), [root(chords[0]), root(chords[1])], [fifth(chords[0]), fifth(chords[1])]);
+        let scale = |p: i32| MODES[self.mode].contains(&(p - self.root).rem_euclid(12));
+        // (16th, the fifth rather than the root)
+        let pat: &[(u32, bool)] = match style {
+            MARIACHI_SON | MARIACHI_HUAPANGO if hemi => &[(0, false), (4, true), (8, false)],
+            MARIACHI_SON | MARIACHI_HUAPANGO => &[(0, false), (6, true)],
+            MARIACHI_VALS if held => &[(0, true)],
+            MARIACHI_VALS => &[(0, false)],
+            MARIACHI_POLKA => &[(0, false), (4, true)],
+            _ if vb => &[(0, false), (6, true), (8, true)],
+            _ => &[(0, false), (8, true)],
+        };
+        let mut notes: Vec<(u32, i32, f32)> = Vec::with_capacity(6);
+        let mut second = false;
+        for &(st, fifth_) in pat {
+            let hh = (st * 2 >= bs) as usize;
+            let changed = hh == 1 && chords[1] != chords[0] && !second;
+            second |= hh == 1;
+            let p = if changed || !fifth_ { roots[hh] } else { fifths[hh] };
+            notes.push((st, p, if st == 0 { 0.95 } else { 0.8 }));
+        }
+        let cur = notes.last().map_or(roots[1], |n| n.1);
+        if walk && rn != cur {
+            // two steps of the scale into the next root, from below or above;
+            // a waltz's on its second and third beats
+            let wa = if style == MARIACHI_VALS { 4 } else { bs - 4 };
+            let q = if style == MARIACHI_VALS { 4 } else { 2 };
+            notes.retain(|n| n.0 < wa || n.0 == 0);
+            let up = rn >= cur;
+            let path: Vec<i32> = if up {
+                (rn - 4..rn).rev().filter(|&p| scale(p)).take(2).collect()
+            } else {
+                (rn + 1..rn + 5).filter(|&p| scale(p)).take(2).collect()
+            };
+            for (k, &p) in path.iter().rev().enumerate() {
+                notes.push((wa + q * k as u32, p, 0.75));
+            }
+        }
+        let octave = self.rng.chance(match style {
+            MARIACHI_BOLERO => 0.25,
+            MARIACHI_VALS => 0.4,
+            _ => 0.55,
+        });
+        for (k, &(st, p, v)) in notes.iter().enumerate() {
+            let end = notes.get(k + 1).map_or(bs, |n| n.0);
+            let len = (end - st) as f32 * 0.92;
+            let j = self.rng.range(0.0, self.human * 0.5);
+            b.note(st as f32, j, CH_BASS, p, v, len, false);
+            if st == 0 && octave {
+                b.note(0.0, j + 0.004, CH_BASS, p + 12, 0.7 * v, len, false);
+            }
+        }
+    }
+
+    /// The harp: its bass (the root, low) on the bar's accents, the chord's
+    /// tones climbing in eighths between (falling in the B groups; in a
+    /// bolero's, 16ths).
+    fn mariachi_harp(&mut self, b: &mut Bar, chords: [Harm; 2], hemi: bool, vb: bool) {
+        let (bs, beat, style) = (self.mc.bar_steps, self.mc.beat_steps, self.mc.style);
+        let acc = if hemi { 4 } else { beat };
+        let q = if style == MARIACHI_BOLERO && vb { 1 } else { 2 };
+        let lo = self.tonic_near(48) - 5;
+        let tones = [self.arp_tones(chords[0], 55), self.arp_tones(chords[1], 55)];
+        let roots = chords.map(|c| lo + (self.root + c.bass() - lo).rem_euclid(12));
+        let down = vb && style != MARIACHI_BOLERO;
+        let mut k = 0;
+        for st in (0..bs).step_by(q as usize) {
+            let hh = (st * 2 >= bs) as usize;
+            let j = self.rng.range(0.0, self.human);
+            if st == 0 || (st * 2 == bs && st % acc == 0) {
+                b.note(st as f32, j, CH_BELL, roots[hh], 0.6, (2 * acc) as f32, false);
+            } else {
+                let t = &tones[hh];
+                let n = if down { t[t.len() - 1 - k % t.len()] } else { t[k % t.len()] };
+                let v = if st % acc == 0 { 0.55 } else { 0.45 };
+                b.note(st as f32, j, CH_BELL, n, v, (3 * q) as f32, false);
+                k += 1;
+            }
+        }
+    }
+
+    /// The bar's tune and what goes with it: the leading section (violins or
+    /// trumpets; trading two-bar phrases; or everyone, the violins an octave
+    /// above the trumpets), a third or a sixth under it (the second trumpet,
+    /// or the second violins), the other section's answers (the trumpets'
+    /// in thirds), the second violins holding the chords' thirds and
+    /// sevenths where they do not play under the tune.
+    fn mariachi_lines(&mut self, s: &Synth, b: &mut Bar, sec: Sec, m: u32, chords: [Harm; 2], bi: u32, hold: [u32; 2]) {
+        let bs = self.mc.bar_steps;
+        let (tune, tro, role, harm, mode) = (self.mc.tonic, self.mc.tr_oct, self.mc.role, self.mc.harm, self.mode);
+        let pick = |v: &[PNote]| -> Vec<PNote> {
+            v.iter()
+                .filter(|n| n.step as u32 / bs == bi)
+                .map(|n| PNote { step: (n.step as u32 % bs) as u16, ..*n })
+                .collect()
+        };
+        let mel = pick(&self.mc.mel);
+        let ans = pick(&self.mc.ans);
+        let trumpets = match role {
+            MARIACHI_VIOLINS => false,
+            MARIACHI_TRADE => (bi / 2) % 2 == 1,
+            _ => true,
+        };
+        let tutti = role == MARIACHI_TUTTI;
+        let (lead, other) = if trumpets { (CH_ARP, CH_LEAD) } else { (CH_LEAD, CH_ARP) };
+        let plays = |ch: usize| m & if ch == CH_ARP { L_ARP } else { L_LEAD } != 0;
+        let oct = |ch: usize| if ch == CH_ARP { tro } else { 0 };
+        let legato = |ch: usize| if ch == CH_ARP { 0.85 } else { 0.95 };
+        let chord_at = |st: u16| chords[(st as u32 * 2 / bs).min(1) as usize];
+        let vel = 0.72 + 0.25 * sec.energy;
+        // a drone at hand (a mix's, its attack slow) cannot follow a tune: it holds
+        let second = if trumpets { CH_ARP } else { CH_DRONE };
+        let under = harm > 0 && m & L_CTR != 0 && (trumpets || s.ch[CH_DRONE].patch.a <= 0.08);
+        if plays(lead) {
+            for n in &mel {
+                let h = chord_at(n.step);
+                self.mariachi_note(s, b, lead, n, tune + oct(lead) + n.pitch, n.vel * vel, legato(lead), h, false);
+                if under {
+                    // a sixth below too low for the second trumpet: a third above
+                    let mut p = tune + oct(lead) + mariachi_below(mode, h, n.pitch, harm);
+                    if second == CH_ARP && p < 55 {
+                        p += 12;
+                    }
+                    let j = self.rng.range(0.0, self.human);
+                    let len = n.len as f32 * legato(lead);
+                    b.note(n.step as f32, j, second, p, n.vel * vel * 0.75, len, false);
+                }
+                // everyone: the violins an octave above the trumpets
+                if tutti && plays(CH_LEAD) && tune + tro + n.pitch + 12 <= 98 {
+                    self.mariachi_note(s, b, CH_LEAD, n, tune + tro + n.pitch + 12, n.vel * vel * 0.85, 0.95, h, false);
+                }
+            }
+        }
+        if !tutti && plays(other) {
+            // the trumpets' answer an octave up if it would go below their range
+            let low = ans.iter().map(|n| n.pitch).min().unwrap_or(0) - 4;
+            let up = if other == CH_ARP && tune + tro + low < 55 { 12 } else { 0 };
+            for n in &ans {
+                let j = self.rng.range(0.0, self.human);
+                let len = n.len as f32 * legato(other);
+                b.note(n.step as f32, j, other, tune + oct(other) + up + n.pitch, n.vel * vel * 0.9, len, false);
+                if other == CH_ARP && m & L_CTR != 0 {
+                    let p = mariachi_below(mode, chord_at(n.step), n.pitch, 2);
+                    b.note(n.step as f32, j, CH_ARP, tune + tro + up + p, n.vel * vel * 0.7, len, false);
+                }
+            }
+        }
+        if m & L_DRONE != 0 && !(under && second == CH_DRONE) {
+            for (hh, &c) in chords.iter().enumerate() {
+                if hold[hh] == 0 {
+                    continue;
+                }
+                let iv = q_iv(c.q);
+                let pcs: Vec<i32> =
+                    [iv[1], *iv.get(3).unwrap_or(&iv[2])].iter().map(|x| (self.root + c.root + x).rem_euclid(12)).collect();
+                let v = voicing_pcs(&pcs, tune - 5, tune + 9, &self.mc.sus_v, false);
+                let len = hold[hh] as f32 * bs as f32 / 2.0 + 0.5;
+                for &p in &v {
+                    b.note(hh as f32 * bs as f32 / 2.0, 0.0, CH_DRONE, p, 0.35 + 0.1 * sec.energy, len, false);
+                }
+                self.mc.sus_v = v;
+            }
+        }
+    }
+
+    /// A note of a tune on `ch` with its ornament (unless `plain`): a grace
+    /// note, a trill or a turn (on the chord-scale's neighbours), a falsete;
+    /// slid into on a mono channel (the first violins).
+    fn mariachi_note(&mut self, s: &Synth, b: &mut Bar, ch: usize, n: &PNote, p: i32, vel: f32, legato: f32, h: Harm, plain: bool) {
+        let mono = s.ch[ch].mono;
+        let st = n.step as f32;
+        let len = n.len as f32 * legato;
+        let j = self.rng.range(0.0, self.human);
+        let step_s = b.secs(1.0);
+        let g = match n.grace {
+            _ if plain => 0,
+            MARIACHI_TRILL if !mono => 0,
+            g => g,
+        };
+        match g {
+            0 => b.note(st, j, ch, p, vel, len, false),
+            g @ (MARIACHI_TRILL | MARIACHI_TURN) => {
+                let sc = chord_scale(self.mode, h);
+                let inscale = |q: i32| sc.contains(&(q - self.root).rem_euclid(12));
+                let up = (1..=3).map(|d| p + d).find(|&q| inscale(q)).unwrap_or(p + 2);
+                let down = (1..=3).map(|d| p - d).find(|&q| inscale(q)).unwrap_or(p - 2);
+                let d = 0.06;
+                let k = if g == MARIACHI_TRILL { ((len * step_s * 0.5) / d).clamp(2.0, 10.0) as usize } else { 3 };
+                for x in 0..k {
+                    let q = if g == MARIACHI_TURN { [up, p, down][x] } else if x % 2 == 0 { p } else { up };
+                    b.note(st, j + d * x as f32, ch, q, vel * if x == 0 { 1.0 } else { 0.85 }, 1.5 * d / step_s, mono && x > 0);
+                }
+                let t = d * k as f32;
+                b.note(st, j + t, ch, p, vel, (len - t / step_s).max(0.5), mono);
+            }
+            MARIACHI_FALSETE => {
+                b.note(st, j, ch, p - 5, vel * 0.7, 0.08 / step_s, false);
+                b.note(st, j + 0.06, ch, p, vel, (len - 0.06 / step_s).max(0.5), mono);
+            }
+            g => {
+                b.note(st, j, ch, p + g as i32, vel * 0.7, 0.06 / step_s, false);
+                b.note(st, j + 0.045, ch, p, vel, (len - 0.045 / step_s).max(0.5), mono);
+            }
+        }
+    }
+
+    /// The bar before the last, on the dominant: the trumpets (in thirds)
+    /// and the violins (an octave above) climb its arpeggio to the leading
+    /// tone; the second violins hold its seventh.
+    fn mariachi_closing(&mut self, s: &Synth, b: &mut Bar, m: u32, dom: Harm) {
+        let (bs, style) = (self.mc.bar_steps, self.mc.style);
+        let (tune, tro) = (self.mc.tonic, self.mc.tr_oct);
+        let q = if style == MARIACHI_BOLERO { 4 } else { 2 };
+        let n = (bs / q) as usize;
+        let ct = in_range(&dom.pcs(), -20, 11);
+        let fig = &ct[ct.len().saturating_sub(n)..];
+        for (k, &p) in fig.iter().enumerate() {
+            let st = (k as u32 * q) as f32;
+            let lastn = k + 1 == fig.len();
+            let len = if lastn { (bs as f32 - st) + 0.5 } else { q as f32 * 0.85 };
+            let v = 0.75 + 0.25 * k as f32 / fig.len() as f32;
+            let j = self.rng.range(0.0, self.human);
+            if m & L_ARP != 0 {
+                b.note(st, j, CH_ARP, tune + tro + p, v, len, false);
+                if k > 0 {
+                    b.note(st, j, CH_ARP, tune + tro + fig[k - 1], v * 0.75, len, false);
+                }
+            }
+            if m & L_LEAD != 0 {
+                let note = PNote { step: st as u16, len: if lastn { bs as u16 - st as u16 } else { q as u16 }, pitch: p, vel: v, grace: 0 };
+                self.mariachi_note(s, b, CH_LEAD, &note, tune + 12 + p, v, 0.9, dom, true);
+            }
+        }
+        if m & L_DRONE != 0 {
+            let v = voicing_pcs(&[(self.root + 11).rem_euclid(12), (self.root + 5).rem_euclid(12)], tune - 5, tune + 9, &self.mc.sus_v, false);
+            for &p in &v {
+                b.note(0.0, 0.0, CH_DRONE, p, 0.5, bs as f32 + 0.5, false);
+            }
+            self.mc.sus_v = v;
+        }
+    }
+
+    /// The last bar: everyone on the tonic. Held (the vihuela's rasgueo and
+    /// the guitar left ringing, the guitarrón's octave, the harp swept up,
+    /// the trumpets high, the violins trilling), or two stabs, the second the
+    /// louder; a stomp and palmas with them.
+    fn mariachi_ending(&mut self, s: &Synth, b: &mut Bar, m: u32, home: Harm) {
+        let bs = self.mc.bar_steps as f32;
+        let (tune, tro, button) = (self.mc.tonic, self.mc.tr_oct, self.mc.button);
+        let third = if home.q == Q_MIN { 3 } else { 4 };
+        let beat = self.mc.beat_steps as f32;
+        let second = if bs / beat == 3.0 { 2.0 * beat } else { bs / 2.0 };
+        let stabs: &[(f32, f32, f32)] =
+            if button { &[(0.0, 1.5, 0.85), (second, bs - second + 2.0, 1.0)] } else { &[(0.0, bs + 4.0, 1.0)] };
+        let mixed = self.guest.is_some();
+        let vk = [self.mariachi_voicing(home, false), self.mariachi_voicing(home, true)];
+        let lo = self.tonic_near(43) - 5;
+        let root = lo + (self.root - lo).rem_euclid(12);
+        for &(st, len, v) in stabs {
+            if m & L_KICK != 0 || mixed {
+                b.hit(st, 0.0, CH_KICK, 0, v);
+            }
+            if m & L_SNARE != 0 || mixed {
+                b.hit(st, 0.0, CH_SNARE, 0, 0.8 * v);
+            }
+            if m & L_KEYS != 0 {
+                let kind = if button { MARIACHI_DOWN } else { MARIACHI_RASGUEO };
+                self.mariachi_stroke(b, CH_KEYS, st, &vk[0], len, v, kind);
+            }
+            if m & L_PAD != 0 {
+                self.mariachi_stroke(b, CH_PAD, st, &vk[1], len, v * 0.9, MARIACHI_DOWN);
+            }
+            if m & L_BASS != 0 {
+                b.note(st, 0.0, CH_BASS, root, v, len, false);
+                b.note(st, 0.004, CH_BASS, root + 12, 0.75 * v, len, false);
+            }
+            if m & L_ARP != 0 {
+                for p in [tune + tro + third, tune + tro + 7] {
+                    b.note(st, 0.0, CH_ARP, p, 0.95 * v, len, false);
+                }
+            }
+            if m & L_LEAD != 0 {
+                let n = PNote { step: st as u16, len: len as u16, pitch: 12, vel: v, grace: if button { 0 } else { MARIACHI_TRILL } };
+                self.mariachi_note(s, b, CH_LEAD, &n, tune + 12, v, 1.0, home, false);
+            }
+            if m & L_DRONE != 0 {
+                b.note(st, 0.0, CH_DRONE, tune + third, 0.6 * v, len, false);
+                b.note(st, 0.0, CH_DRONE, tune + 7, 0.55 * v, len, false);
+            }
+        }
+        if !button && m & L_BELL != 0 {
+            // the harp swept up the chord, into the downbeat's ring
+            for (k, &p) in in_range(&self.pcs(home), 48, 84).iter().enumerate() {
+                b.note(0.0, 0.025 * k as f32, CH_BELL, p, 0.55, bs, false);
+            }
+        }
+    }
+
+    /// Mariachi's percussion, the `layers` asked for, in any meter: L_KICK
+    /// the zapateado (heel stomps on the accents, toe taps on the eighths
+    /// between, a shuffle in the B groups, a run of taps closing a group:
+    /// `fill`), L_SNARE palmas (on a compound meter's accents, else off the
+    /// beat), L_HAT maracas in eighths, L_PERC the guiro (a long scrape on
+    /// the accents, short ones between); in 6/8 turned to 3/4 (`hemi`) the
+    /// accents are the three quarters.
+    fn mariachi_hits(&mut self, b: &mut Bar, layers: u32, hemi: bool, fill: u8, e: f32, quiet: f32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        let beats = bs / beat;
+        let vb = self.var_b();
+        let h = self.human;
+        let r = &mut self.rng;
+        let acc = if hemi { 4 } else { beat };
+        let last = bs - acc;
+        let lift = quiet * (0.8 + 0.2 * e);
+        if layers & L_KICK != 0 {
+            for st in (0..bs).step_by(2) {
+                let on = st % acc == 0;
+                if fill == 2 && st > last {
+                    continue;
+                }
+                if on {
+                    b.hit(st as f32, r.range(0.0, h), CH_KICK, 0, lift * if st == 0 { 0.95 } else { 0.82 });
+                } else if r.chance(0.85) {
+                    b.hit(st as f32, r.range(0.0, h), CH_KICK, 1, lift * r.range(0.4, 0.55));
+                }
+                if vb && !on && st + 1 < bs && r.chance(0.3) {
+                    b.hit((st + 1) as f32, r.range(0.0, h), CH_KICK, 1, lift * 0.35);
+                }
+            }
+            if fill == 2 {
+                // a redoble: taps in 16ths, louder to the bar line
+                for st in last + 1..bs {
+                    b.hit(st as f32, r.range(0.0, h), CH_KICK, 1, lift * (0.35 + 0.45 * (st - last) as f32 / acc as f32));
+                }
+            }
+        }
+        if layers & L_SNARE != 0 {
+            let at: &[u32] = match (beat, beats) {
+                _ if hemi => &[0, 4, 8],
+                (4, 2) => &[2, 6],
+                (4, 3) => &[4, 8],
+                (4, _) => &[4, 12],
+                (_, 3) => &[0, 6, 12],
+                _ => &[0, 6],
+            };
+            for &st in at.iter().filter(|&&st| st < bs) {
+                b.hit(st as f32, r.range(0.0, h), CH_SNARE, 0, lift * (0.55 + 0.25 * e));
+            }
+            if vb {
+                b.hit((bs - 2) as f32, r.range(0.0, h), CH_SNARE, 1, lift * 0.4);
+            }
+        }
+        if layers & L_HAT != 0 {
+            for st in (0..bs).step_by(2) {
+                let on = st % acc == 0;
+                let kind = if fill > 0 && st + 2 >= bs { HAT_O } else { HAT_C };
+                b.hit(st as f32, r.range(0.0, h), CH_HAT, kind, lift * if on { 0.5 } else { 0.32 } * r.range(0.8, 1.0));
+                if vb && !on && r.chance(0.5) {
+                    b.hit((st + 1) as f32, r.range(0.0, h), CH_HAT, HAT_C, lift * 0.22);
+                }
+            }
+        }
+        if layers & L_PERC != 0 {
+            for st in (0..bs).step_by(2) {
+                let on = st % acc == 0;
+                if on || r.chance(0.6) {
+                    b.hit(st as f32, r.range(0.0, h), CH_PERC, SHAKER, lift * if on { 0.5 } else { 0.3 });
+                }
+            }
+        }
+    }
+
+    /// Mariachi's beat in any meter, for a mix: the zapateado where there is
+    /// a beat at all (in 6/8, every other bar turned to 3/4 in half the
+    /// sections: the son's hemiola), palmas when it is strong, maracas once
+    /// under way (softly in a break), the guiro in a strong section's B
+    /// groups; each where the section asks or the writer's arrangement (`m`)
+    /// has those drums (nothing in an intro, else).
+    fn mariachi_beat(&mut self, _s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        if self.sec_bar == 0 {
+            self.mc.dhemi = bs == 12 && beat == 6 && self.rng.chance(0.5);
+        }
+        let hemi = self.mc.dhemi && self.sec_bar % 2 == 1;
+        let (e, full) = (sec.energy, sec.kind == MAIN);
+        let vb = self.var_b();
+        let fill = if full || sec.kind == BUILD { self.fill(sec) } else { 0 };
+        let mut layers = 0;
+        if full || matches!(sec.kind, BUILD | OUTRO) || m & L_KICK != 0 {
+            layers |= L_KICK;
+        }
+        if (full && e >= 0.8) || (sec.kind == BUILD && e >= 0.7) || m & L_SNARE != 0 {
+            layers |= L_SNARE;
+        }
+        if (full && (e >= 0.6 || vb)) || sec.kind == BREAK || m & (L_HAT | L_OHAT) != 0 {
+            layers |= L_HAT;
+        }
+        if (full && e >= 0.75 && vb) || m & L_PERC != 0 {
+            layers |= L_PERC;
+        }
+        let quiet = if sec.kind == BREAK && m & (L_KICK | L_HAT | L_OHAT) == 0 { 0.6 } else { 1.0 };
+        self.mariachi_hits(b, layers, hemi, fill, e, quiet);
     }
 }
 
@@ -9500,6 +10307,11 @@ fn palette(g: usize, ch: usize) -> Option<&'static [(&'static str, Make)]> {
         (TAVERN, CH_KEYS) => P_TAV_PLUCK,
         (TAVERN, CH_DRONE | CH_PAD) => P_TAV_DRONE,
         (TAVERN, CH_BASS) => P_TAV_BASS,
+        (MARIACHI, CH_LEAD) => P_MARIACHI_LEAD,
+        (MARIACHI, CH_ARP | CH_BELL) => P_MARIACHI_SECOND,
+        (MARIACHI, CH_KEYS) => P_MARIACHI_STRUM,
+        (MARIACHI, CH_PAD | CH_DRONE) => P_MARIACHI_SUSTAIN,
+        (MARIACHI, CH_BASS) => P_MARIACHI_BASS,
         _ => return None,
     })
 }
@@ -9534,6 +10346,10 @@ fn kit_palette(g: usize, ch: usize) -> Option<&'static [(&'static str, MakeKit)]
         (TAVERN, CH_KICK) => K_TAV_KICK,
         (TAVERN, CH_HAT) => K_TAV_HAT,
         (TAVERN, CH_PERC) => K_TAV_PERC,
+        (MARIACHI, CH_KICK) => K_MARIACHI_KICK,
+        (MARIACHI, CH_SNARE) => K_MARIACHI_SNARE,
+        (MARIACHI, CH_HAT) => K_MARIACHI_HAT,
+        (MARIACHI, CH_PERC) => K_MARIACHI_PERC,
         _ => return None,
     })
 }
@@ -10309,18 +11125,904 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
     s.m.target = 0.2;
 }
 
-// -- mariachi (placeholders)
+// -- mariachi
 
-/// A mariachi piece's state: its meter (16ths a bar and a beat, and its name).
+/// Mariachi's styles, one a piece: the son jalisciense (6/8 against 3/4, the
+/// sesquialtera), the huapango (6/8, its strum syncopated, its tunes leaping
+/// to long high notes), the ranchera valseada (3/4), the ranchera polkeada
+/// (2/4) and the slow bolero ranchero (4/4).
+const MARIACHI_SON: u8 = 0;
+const MARIACHI_HUAPANGO: u8 = 1;
+const MARIACHI_VALS: u8 = 2;
+const MARIACHI_POLKA: u8 = 3;
+const MARIACHI_BOLERO: u8 = 4;
+/// Harmonic minor (its row in `MODES`): a minor piece's V7 has its leading tone.
+const MARIACHI_MINOR: usize = 6;
+/// Who leads a section: the violins, the trumpets, the two trading two-bar
+/// phrases, or everyone (the trumpets, the violins an octave above them).
+const MARIACHI_VIOLINS: u8 = 0;
+const MARIACHI_TRUMPETS: u8 = 1;
+const MARIACHI_TRADE: u8 = 2;
+const MARIACHI_TUTTI: u8 = 3;
+/// The vihuela's and guitar's strokes: down (low string to high), up (the
+/// top strings, high to low), a chop (muted at once: the mánico's
+/// percussive stroke), a rasgueo (a fan of three strokes in a 16th).
+const MARIACHI_DOWN: u8 = 0;
+const MARIACHI_UP: u8 = 1;
+const MARIACHI_CHOP: u8 = 2;
+const MARIACHI_RASGUEO: u8 = 3;
+/// Ornaments, in a `PNote`'s grace (small values are grace notes, as in a
+/// polka): a trill, a turn, a falsete (the huapango's break up to a high note).
+const MARIACHI_TRILL: i8 = 20;
+const MARIACHI_TURN: i8 = 21;
+const MARIACHI_FALSETE: i8 = 22;
+/// A tune's range, semitones about its tonic.
+const MARIACHI_LO: i32 = -3;
+const MARIACHI_HI: i32 = 14;
+
+/// Eight-bar plans (a chord a bar; A+B, two): verses (A); choruses (B), away
+/// from home at first; the contrasting part (C: a major piece's to the
+/// subdominant or the relative minor, a minor piece's to the relative
+/// major), back on the dominant; and four-bar fanfares, to the dominant. A
+/// minor piece's V7 has its leading tone (harmonic minor); I7 is V7/IV.
+const MARIACHI_MAJ_A: &[&str] = &[
+    "I I V7 V7 V7 V7 I I",
+    "I I IV IV V7 V7 I I",
+    "I IV V7 I I IV V7 I",
+    "I I7 IV IV V7 V7 I I",
+    "I V7 V7 I I V7 V7 I",
+    "I I V7/V V7/V V7 V7 I I",
+    "I vi ii V7 I vi V7 I",
+    "I IV I V7 I IV I+V7 I",
+];
+const MARIACHI_MAJ_B: &[&str] = &[
+    "IV IV I I V7 V7 I I",
+    "I7 IV V7 I I7 IV V7 I",
+    "IV I V7 I IV I V7 I",
+    "V7 V7 I I V7 V7 I I",
+    "vi vi V7/V V7 IV I V7 I",
+    "I7 I7 IV IV V7/V V7/V V7 I",
+    "IV IV I vi ii V7 I I",
+];
+const MARIACHI_MAJ_C: &[&str] = &[
+    "vi vi V7/vi V7/vi V7/vi V7/vi vi V7",
+    "I7 I7 IV IV iv iv I V7",
+    "IV IV I I V7/V V7/V V7 V7",
+    "vi V7/vi vi vi IV I V7/V V7",
+    "I7 IV iv I vi V7/V V7 V7",
+];
+const MARIACHI_MIN_A: &[&str] = &[
+    "i i V7 V7 V7 V7 i i",
+    "i iv V7 i i iv V7 i",
+    "i i iv iv V7 V7 i i",
+    "i V7 i V7 iv i V7 i",
+    "i I7 iv iv V7 V7 i i",
+];
+const MARIACHI_MIN_B: &[&str] = &[
+    "iv iv i i V7 V7 i i",
+    "I7 iv V7 i I7 iv V7 i",
+    "bVI bVI V7 V7 iv i V7 i",
+    "iv V7 i bVI iv i V7 i",
+];
+const MARIACHI_MIN_C: &[&str] = &[
+    "bIII bIII bVII7 bVII7 bIII bIII V7 V7",
+    "bVII7 bVII7 bIII bIII iv iv V7 V7",
+    "bIII bVII7 bIII bVI iv i V7 V7",
+    "iv iv bIII bIII bVI bVI V7 V7",
+];
+const MARIACHI_FANFARE: &[&str] = &["I I V7 V7", "I IV V7 V7", "I V7 I V7", "IV V7 I V7", "I I IV+V7 V7"];
+const MARIACHI_FANFARE_MIN: &[&str] = &["i i V7 V7", "i iv V7 V7", "iv V7 i V7", "i i iv+V7 V7"];
+
+/// A mariachi strain: its chords (two a bar), its tune and the other
+/// section's answers (pitches in semitones about the tune's tonic).
+#[derive(Clone)]
+struct MariachiStrain {
+    chords: Vec<Harm>,
+    mel: Vec<PNote>,
+    ans: Vec<PNote>,
+}
+
+/// A section of a mariachi piece: its strain, which time through, the
+/// strain's bar it starts on, who leads, which of the instrument pairs.
+#[derive(Clone, Copy, Default)]
+struct MariachiSection {
+    strain: usize,
+    rep: u32,
+    first: u32,
+    role: u8,
+    dress: usize,
+}
+
+/// The mariachi piece in play.
 #[derive(Default)]
 struct Mariachi {
+    /// 16ths a bar and a beat, the meter's name, the style
     bar_steps: u32,
     beat_steps: u32,
     meter: &'static str,
+    style: u8,
+    /// which bars of each four turn to 3/4 against the 6/8 (bit k: bar k)
+    hemi: u8,
+    /// verses (A), choruses (B), the contrasting part (C), the fanfare
+    strains: Vec<MariachiStrain>,
+    map: Vec<MariachiSection>,
+    /// this time through: the tune (varied) and answers, who leads, the
+    /// harmony under the tune (chord-scale steps below: 2 a third, 5 a
+    /// sixth; 0 none), whether the vihuela plays its second mánico
+    mel: Vec<PNote>,
+    ans: Vec<PNote>,
+    role: u8,
+    harm: usize,
+    alt: bool,
+    /// the tune's tonic (MIDI), the trumpets' octave (0 or -12), whether the
+    /// piece ends on two stabs (else on a held chord)
+    tonic: i32,
+    tr_oct: i32,
+    button: bool,
+    /// the bar's chords (for the stats), the second violins' held notes
+    mask: [u16; 2],
+    sus_v: Vec<i32>,
+    /// as a mix's drummer: whether this section's 6/8 bars alternate with 3/4
+    dhemi: bool,
+    /// the bars the fanfare plays alone before the band comes in
+    call: u32,
 }
 
+/// A mánico: a style's strokes in a bar (16th, stroke, strength), the
+/// vihuela's (two ways) or the guitar's; the son's (and a huapango's
+/// cadence) in 6/8, or in 3/4 against it.
+fn mariachi_manico(style: u8, hemi: bool, guitar: bool, alt: bool) -> &'static [(u8, u8, f32)] {
+    const D: u8 = MARIACHI_DOWN;
+    const U: u8 = MARIACHI_UP;
+    const C: u8 = MARIACHI_CHOP;
+    let six = matches!(style, MARIACHI_SON | MARIACHI_HUAPANGO);
+    match (style, six && hemi, guitar, alt) {
+        (_, true, false, false) => &[(0, D, 1.0), (2, U, 0.5), (4, D, 0.9), (6, C, 0.6), (8, D, 0.9), (10, U, 0.5)],
+        (_, true, false, true) => &[(0, D, 1.0), (2, C, 0.55), (4, D, 0.92), (6, C, 0.55), (8, D, 0.92), (10, C, 0.55)],
+        (_, true, true, _) => &[(0, D, 0.9), (4, D, 0.8), (8, D, 0.8)],
+        (MARIACHI_SON, _, false, false) => {
+            &[(0, D, 1.0), (2, U, 0.5), (4, D, 0.72), (6, D, 0.95), (8, C, 0.62), (10, U, 0.5)]
+        }
+        (MARIACHI_SON, _, false, true) => &[(0, D, 1.0), (2, C, 0.6), (4, U, 0.5), (6, D, 0.95), (8, C, 0.6), (10, U, 0.5)],
+        (MARIACHI_SON, _, true, _) => &[(0, D, 0.9), (4, U, 0.45), (6, D, 0.85), (10, U, 0.45)],
+        (MARIACHI_HUAPANGO, _, false, false) => &[
+            (0, D, 1.0),
+            (1, U, 0.4),
+            (2, C, 0.55),
+            (4, D, 0.9),
+            (5, U, 0.4),
+            (6, C, 0.55),
+            (8, D, 0.9),
+            (9, U, 0.4),
+            (10, C, 0.55),
+        ],
+        (MARIACHI_HUAPANGO, _, false, true) => {
+            &[(0, D, 1.0), (2, U, 0.45), (3, D, 0.6), (4, C, 0.6), (6, D, 0.95), (8, U, 0.45), (9, D, 0.6), (10, C, 0.6)]
+        }
+        (MARIACHI_HUAPANGO, _, true, _) => &[(0, D, 0.85), (3, U, 0.4), (6, D, 0.8), (9, U, 0.4)],
+        (MARIACHI_VALS, _, false, false) => &[(0, C, 0.35), (4, D, 0.85), (6, U, 0.45), (8, D, 0.8), (10, U, 0.45)],
+        (MARIACHI_VALS, _, false, true) => &[(4, D, 0.85), (6, U, 0.4), (8, D, 0.8), (10, C, 0.5), (11, U, 0.35)],
+        (MARIACHI_VALS, _, true, _) => &[(4, D, 0.7), (8, D, 0.65)],
+        (MARIACHI_POLKA, _, false, false) => &[(0, C, 0.35), (2, D, 0.85), (3, U, 0.4), (4, C, 0.35), (6, D, 0.85), (7, U, 0.4)],
+        (MARIACHI_POLKA, _, false, true) => &[(2, D, 0.85), (3, U, 0.45), (6, D, 0.85), (7, U, 0.45)],
+        (MARIACHI_POLKA, _, true, _) => &[(2, D, 0.7), (6, D, 0.7)],
+        (_, _, false, false) => &[(4, D, 0.6), (6, U, 0.42), (10, D, 0.55), (12, D, 0.6), (14, U, 0.42)],
+        (_, _, false, true) => &[(2, U, 0.36), (4, D, 0.6), (8, C, 0.42), (10, U, 0.42), (12, D, 0.6), (14, U, 0.42)],
+        _ => &[(0, D, 0.7), (4, D, 0.65), (6, U, 0.5), (8, D, 0.65), (12, D, 0.65), (14, U, 0.5)],
+    }
+}
+
+/// Rhythms a bar of tune is made of ((16th, length) lists): by style and
+/// meter (`three`: a bar of three quarters, a valseada's or the son's 3/4
+/// against its 6/8); a cadence's (its last note the landing); a fanfare's
+/// (tattoos of repeated notes, dotted figures).
+fn mariachi_rhythms(style: u8, bs: u16, three: bool, cadence: bool, fanfare: bool) -> &'static [&'static [(u16, u16)]] {
+    match (bs, three, cadence, fanfare) {
+        (8, _, true, _) => &[&[(0, 1), (1, 1), (2, 6)], &[(0, 2), (2, 6)], &[(0, 4), (4, 4)]],
+        (8, _, _, true) => &[&[(0, 1), (1, 1), (2, 2), (4, 1), (5, 1), (6, 2)], &[(0, 3), (3, 1), (4, 4)], &[(0, 1), (1, 1), (2, 2), (4, 4)]],
+        (8, _, _, _) => &[&[(0, 2), (2, 2), (4, 2), (6, 2)], &[(0, 4), (4, 2), (6, 2)], &[(0, 3), (3, 1), (4, 4)], &[(0, 2), (2, 2), (4, 4)]],
+        (16, _, true, true) => &[&[(0, 1), (1, 1), (2, 2), (4, 12)], &[(0, 3), (3, 1), (4, 12)]],
+        (16, _, true, _) => &[&[(0, 4), (4, 4), (8, 8)], &[(0, 2), (2, 2), (4, 12)], &[(0, 16)], &[(0, 6), (6, 10)]],
+        (16, _, _, true) => &[
+            &[(0, 1), (1, 1), (2, 2), (4, 4), (8, 1), (9, 1), (10, 2), (12, 4)],
+            &[(0, 3), (3, 1), (4, 4), (8, 8)],
+            &[(0, 2), (2, 1), (3, 1), (4, 4), (8, 2), (10, 2), (12, 4)],
+        ],
+        (16, _, _, _) => &[
+            &[(0, 6), (6, 2), (8, 8)],
+            &[(0, 3), (3, 3), (6, 2), (8, 8)],
+            &[(0, 4), (4, 4), (8, 4), (12, 4)],
+            &[(0, 2), (2, 4), (6, 2), (8, 6), (14, 2)],
+            &[(0, 8), (8, 4), (12, 4)],
+            &[(0, 4), (4, 2), (6, 2), (8, 8)],
+            &[(2, 2), (4, 4), (8, 2), (10, 6)],
+        ],
+        (_, true, true, _) => &[&[(0, 4), (4, 8)], &[(0, 2), (2, 2), (4, 8)], &[(0, 12)]],
+        (_, false, true, _) if style == MARIACHI_HUAPANGO => &[&[(0, 2), (2, 2), (4, 8)], &[(0, 12)], &[(0, 4), (4, 8)]],
+        (_, false, true, _) => &[&[(0, 2), (2, 2), (4, 2), (6, 6)], &[(0, 4), (4, 2), (6, 6)], &[(0, 6), (6, 6)]],
+        (_, true, _, true) => &[&[(0, 1), (1, 1), (2, 2), (4, 4), (8, 4)], &[(0, 3), (3, 1), (4, 4), (8, 4)], &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 4)]],
+        (_, false, _, true) => &[
+            &[(0, 1), (1, 1), (2, 2), (4, 2), (6, 2), (8, 4)],
+            &[(0, 2), (2, 2), (4, 2), (6, 6)],
+            &[(0, 1), (1, 1), (2, 1), (3, 1), (4, 2), (6, 2), (8, 2), (10, 2)],
+            &[(0, 4), (4, 2), (6, 4), (10, 2)],
+        ],
+        (_, true, _, _) if style == MARIACHI_VALS => &[
+            &[(0, 8), (8, 4)],
+            &[(0, 4), (4, 4), (8, 4)],
+            &[(0, 6), (6, 2), (8, 4)],
+            &[(0, 4), (4, 2), (6, 2), (8, 4)],
+            &[(0, 2), (2, 2), (4, 4), (8, 4)],
+            &[(0, 4), (4, 8)],
+        ],
+        (_, true, _, _) => &[
+            &[(0, 4), (4, 4), (8, 4)],
+            &[(0, 2), (2, 2), (4, 4), (8, 4)],
+            &[(0, 4), (4, 2), (6, 2), (8, 4)],
+            &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 4)],
+            &[(0, 4), (4, 4), (8, 2), (10, 2)],
+        ],
+        _ if style == MARIACHI_HUAPANGO => &[
+            &[(0, 2), (2, 2), (4, 8)],
+            &[(0, 2), (2, 4), (6, 2), (8, 4)],
+            &[(0, 4), (4, 2), (6, 6)],
+            &[(0, 6), (6, 6)],
+            &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 2), (10, 2)],
+            &[(0, 2), (2, 4), (6, 6)],
+        ],
+        _ => &[
+            &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 2), (10, 2)],
+            &[(0, 4), (4, 2), (6, 4), (10, 2)],
+            &[(0, 2), (2, 2), (4, 2), (6, 4), (10, 2)],
+            &[(0, 4), (4, 2), (6, 2), (8, 2), (10, 2)],
+            &[(0, 3), (3, 1), (4, 2), (6, 3), (9, 1), (10, 2)],
+            &[(0, 6), (6, 2), (8, 2), (10, 2)],
+        ],
+    }
+}
+
+/// A bar of tune in rhythm `tpl` over the chords (`chord_at` a 16th), from
+/// near `prev`: its first note, and those on a beat (`beat` 16ths) or long,
+/// on a chord tone (the next one along, mostly); the rest stepping through
+/// the chord-scale (now and then skipping to a chord tone, or repeating),
+/// turning at the range's edges. A fanfare's on chord tones alone, repeated
+/// or climbing. A cadence's last note on the chord tone nearest `land`.
+/// With `leaps` (a huapango's) a long note after a short one now and then
+/// jumps a sixth or more, to come down after.
+fn mariachi_figure(
+    r: &mut Rng,
+    tpl: &[(u16, u16)],
+    chord_at: &dyn Fn(u16) -> Harm,
+    mode: usize,
+    prev: i32,
+    dir: &mut i32,
+    beat: u16,
+    fanfare: bool,
+    land: Option<i32>,
+    leaps: bool,
+) -> Vec<PNote> {
+    let (lo, hi) = (MARIACHI_LO, MARIACHI_HI);
+    let mut p = prev;
+    let mut v = Vec::with_capacity(tpl.len());
+    for (k, &(st, len)) in tpl.iter().enumerate() {
+        let h = chord_at(st);
+        let ct = in_range(&h.pcs(), lo, hi);
+        let strong = st % beat == 0 || len >= beat;
+        let along = |v: &[i32], from: i32, by: i32| v[(nearest(v, from) as i32 + by).clamp(0, v.len() as i32 - 1) as usize];
+        p = match land {
+            Some(goal) if k + 1 == tpl.len() => ct[nearest(&ct, goal)],
+            _ if fanfare => {
+                if k > 0 && r.chance(0.4) {
+                    ct[nearest(&ct, p)]
+                } else {
+                    along(&ct, p, *dir)
+                }
+            }
+            _ if k == 0 => ct[nearest(&ct, p + 2 * *dir)],
+            _ if strong => match r.weighted(&[0.6, 0.15, 0.12, 0.13]) {
+                0 => along(&ct, p, *dir),
+                1 => along(&ct, p, -*dir),
+                2 => along(&ct, p, 2 * *dir),
+                _ => ct[nearest(&ct, p)],
+            },
+            _ => match r.weighted(&[0.6, 0.25, 0.15]) {
+                0 => along(&in_range(&chord_scale(mode, h), lo, hi), p, *dir),
+                1 => along(&ct, p, *dir),
+                _ => p,
+            },
+        };
+        let short_before = k > 0 && tpl[k - 1].1 < len;
+        if leaps && len >= 4 && short_before && land.is_none_or(|_| k + 1 < tpl.len()) && r.chance(0.65) {
+            let from = v.last().map_or(p, |n: &PNote| n.pitch);
+            if let Some(&q) = ct.iter().find(|&&q| q >= from + 7) {
+                p = q;
+                *dir = -1;
+            }
+        }
+        if p >= hi - 2 {
+            *dir = -1;
+        } else if p <= lo + 2 {
+            *dir = 1;
+        } else if strong && r.chance(0.2) {
+            *dir = -*dir;
+        }
+        let vel = if st == 0 {
+            0.92
+        } else if st % beat == 0 {
+            0.84
+        } else {
+            0.76
+        } + r.range(-0.04, 0.04);
+        v.push(PNote { step: st, len, pitch: p, vel, grace: 0 });
+    }
+    v
+}
+
+/// A bar of tune moved onto other chords: the tones of its chord to the
+/// nearest of the new one's, the rest to the nearest of its scale.
+fn mariachi_refit(notes: &[PNote], from: &dyn Fn(u16) -> Harm, to: &dyn Fn(u16) -> Harm, mode: usize) -> Vec<PNote> {
+    notes
+        .iter()
+        .map(|n| {
+            let (f, t) = (from(n.step), to(n.step));
+            if f == t {
+                return *n;
+            }
+            let set = if f.pcs().contains(&n.pitch.rem_euclid(12)) { t.pcs() } else { chord_scale(mode, t) };
+            let v = in_range(&set, MARIACHI_LO, MARIACHI_HI);
+            PNote { pitch: v[nearest(&v, n.pitch)], ..*n }
+        })
+        .collect()
+}
+
+/// A strain's tune: four-bar phrases, the first two bars a motif that comes
+/// back fitted to the chords in bars 5 and 6, bar 4 resting (a half
+/// cadence), bar 8 home; a sixteen-bar strain's first eight close on the
+/// dominant and come again with a new ending; the son's bars in 3/4 where
+/// its mánico turns (`hemi`). Where the tune holds a long note the other
+/// section answers (scale runs or arpeggios, below it). A fanfare: chord
+/// tones in tattoos and dotted figures, its second phrase echoing the first,
+/// closing on the dominant, the answers in 16th runs. A chorus (`high`)
+/// starts higher.
+fn mariachi_tune(
+    r: &mut Rng,
+    style: u8,
+    hemi: u8,
+    chords: &[Harm],
+    bs: u16,
+    beat: u16,
+    mode: usize,
+    fanfare: bool,
+    high: bool,
+) -> (Vec<PNote>, Vec<PNote>) {
+    let bars = chords.len() / 2;
+    let chord_at = |bar: usize, st: u16| chords[bar * 2 + (st as usize * 2 / bs as usize).min(1)];
+    let mut out: Vec<Vec<PNote>> = Vec::with_capacity(bars);
+    let mut prev: i32 = if high { r.pick(&[9, 11, 12]) } else { r.pick(&[0, 4, 7, 7]) };
+    let mut dir = 1;
+    for bar in 0..bars {
+        let pos = bar % 8;
+        let hb = (hemi >> (bar % 4)) & 1 == 1;
+        let three = hb || (bs == 12 && beat == 4);
+        let last = bar + 1 == bars;
+        let cad = last || (!fanfare && (pos == 3 || pos == 7));
+        let back = if !fanfare && bar >= 8 && bar + 2 < bars && r.chance(0.85) {
+            Some(bar - 8)
+        } else if bar >= 4 && (fanfare || pos == 4 || pos == 5) && !last && r.chance(0.8) {
+            Some(bar - 4)
+        } else {
+            None
+        };
+        let notes = match back {
+            Some(src) => mariachi_refit(&out[src], &|st| chord_at(src, st), &|st| chord_at(bar, st), mode),
+            None => {
+                let tpl = r.pick(mariachi_rhythms(style, bs, three, cad, fanfare));
+                // home at the end (a fanfare's end, and a part's on the
+                // dominant, the nearest of its tones), else a fifth or a third
+                let home = chord_at(bar, bs - 1).root == 0;
+                let land = cad.then(|| {
+                    let target: [i32; 3] = if last && home { [0, 12, 4] } else { [7, 4, 2] };
+                    let want: Vec<i32> =
+                        target.iter().map(|&x| x + 12 * ((prev - x) as f32 / 12.0).round() as i32).collect();
+                    want[nearest(&want, prev)].clamp(MARIACHI_LO, MARIACHI_HI)
+                });
+                let eb = if three { 4 } else { beat };
+                let leaps = style == MARIACHI_HUAPANGO && !fanfare;
+                mariachi_figure(r, tpl, &|st| chord_at(bar, st), mode, prev, &mut dir, eb, fanfare, land, leaps)
+            }
+        };
+        prev = notes.last().map_or(prev, |n| n.pitch);
+        out.push(notes);
+    }
+    let mut mel = Vec::new();
+    let mut ans = Vec::new();
+    for (bar, notes) in out.iter().enumerate() {
+        let st0 = bs * bar as u16;
+        mel.extend(notes.iter().map(|n| PNote { step: n.step + st0, ..*n }));
+        let Some(l) = notes.last() else { continue };
+        let cad = bar % 8 == 3 || bar % 8 == 7 || bar + 1 == bars;
+        if l.step > bs / 2 || l.len < 4 || !r.chance(if cad { 0.8 } else { 0.4 }) {
+            continue;
+        }
+        let h = chord_at(bar, bs - 1);
+        let run = fanfare || (bs == 16 && r.chance(0.4));
+        let q = if run { 1 } else { 2 };
+        let start = l.step + 2;
+        let v = if run || r.bit_chance() {
+            in_range(&chord_scale(mode, h), MARIACHI_LO - 7, MARIACHI_HI - 5)
+        } else {
+            in_range(&h.pcs(), MARIACHI_LO - 7, MARIACHI_HI - 5)
+        };
+        let j = nearest(&v, l.pitch - 5) as isize;
+        let n = ((bs - start) / q).min(8);
+        // up or down, whichever has room; turning back at the range's edge
+        let (top, room) = (v.len() as isize - 1, n as isize - 1);
+        let up = if j + room > top { false } else if j - room < 0 { true } else { r.bit_chance() };
+        for k in 0..n as isize {
+            let mut i = j + if up { k } else { -k };
+            if i > top {
+                i = 2 * top - i;
+            } else if i < 0 {
+                i = -i;
+            }
+            let pitch = v[i.clamp(0, top) as usize];
+            ans.push(PNote { step: st0 + start + k as u16 * q, len: q, pitch, vel: 0.72 + r.range(-0.04, 0.04), grace: 0 });
+        }
+    }
+    (mel, ans)
+}
+
+/// Ornaments on a tune's long notes, each with chance `p`: trills and turns,
+/// grace notes; in a huapango a leap up to a long note breaks into falsete.
+fn mariachi_ornaments(r: &mut Rng, mel: &mut [PNote], style: u8, p: f32) {
+    let mut prev: Option<i32> = None;
+    for n in mel.iter_mut() {
+        if n.grace == 0 && n.len >= 4 {
+            if style == MARIACHI_HUAPANGO && prev.is_some_and(|q| n.pitch - q >= 5) && r.chance(0.85) {
+                n.grace = MARIACHI_FALSETE;
+            } else if r.chance(p) {
+                n.grace = r.pick(&[MARIACHI_TRILL, MARIACHI_TRILL, MARIACHI_TURN, -1, 2]);
+            }
+        }
+        prev = Some(n.pitch);
+    }
+}
+
+/// The tone `steps` chord-scale steps below `p` (2: a third, 5: a sixth) over `h`.
+fn mariachi_below(mode: usize, h: Harm, p: i32, steps: usize) -> i32 {
+    let sc = in_range(&chord_scale(mode, h), p - 14, p + 1);
+    sc[nearest(&sc, p).saturating_sub(steps)]
+}
+
+// the instruments
+
+fn mariachi_violins(r: &mut Rng) -> Patch {
+    // a section: three saws a little apart, a bright body (the vowel e), the
+    // bow's hiss, a wide quick vibrato
+    Patch {
+        unison: 3,
+        detune: r.range(10.0, 16.0),
+        width: 0.5,
+        vowel: 2,
+        noise: 0.015,
+        cutoff: r.range(4500.0, 5500.0),
+        keytrack: 0.3,
+        a: 0.04,
+        d: 0.3,
+        s: 0.9,
+        r: 0.18,
+        vib: r.range(0.22, 0.3),
+        vib_rate: r.range(5.8, 6.6),
+        glide: 0.03,
+        gain: 0.45,
+        ..PATCH
+    }
+}
+
+fn mariachi_violins_sweet(r: &mut Rng) -> Patch {
+    Patch {
+        detune: r.range(7.0, 11.0),
+        vowel: 1,
+        noise: 0.01,
+        cutoff: r.range(3000.0, 3800.0),
+        a: 0.06,
+        vib: r.range(0.18, 0.24),
+        vib_rate: r.range(5.4, 6.0),
+        ..mariachi_violins(r)
+    }
+}
+
+fn mariachi_viola(r: &mut Rng) -> Patch {
+    Patch {
+        unison: 2,
+        detune: r.range(6.0, 9.0),
+        vowel: 4,
+        cutoff: r.range(2400.0, 3000.0),
+        a: 0.06,
+        vib: 0.16,
+        vib_rate: 5.5,
+        gain: 0.5,
+        ..mariachi_violins(r)
+    }
+}
+
+fn mariachi_violins_long(r: &mut Rng) -> Patch {
+    Patch { a: r.range(0.25, 0.4), d: 1.0, r: 0.6, ..mariachi_violins_sweet(r) }
+}
+
+fn mariachi_trumpet(r: &mut Rng) -> Patch {
+    // bright and open, a brassy bloom in the filter, a strong vibrato
+    Patch {
+        unison: 2,
+        detune: r.range(4.0, 7.0),
+        width: 0.15,
+        cutoff: r.range(1700.0, 2300.0),
+        res: 0.2,
+        env_amt: 1.5,
+        fdec: 0.12,
+        keytrack: 0.6,
+        a: 0.012,
+        d: 0.35,
+        s: 0.85,
+        r: 0.08,
+        vib: r.range(0.16, 0.24),
+        vib_rate: r.range(5.8, 6.6),
+        glide: 0.012,
+        drive: 0.35,
+        gain: 0.28,
+        ..PATCH
+    }
+}
+
+fn mariachi_flugel(r: &mut Rng) -> Patch {
+    // a darker, rounder trumpet (a flugelhorn's)
+    Patch {
+        wave2: Wave::Sine,
+        mix2: 0.3,
+        cutoff: r.range(900.0, 1200.0),
+        res: 0.1,
+        env_amt: 1.2,
+        fdec: 0.15,
+        vib: r.range(0.1, 0.15),
+        drive: 0.0,
+        gain: 0.32,
+        ..mariachi_trumpet(r)
+    }
+}
+
+fn mariachi_vihuela(r: &mut Rng) -> Patch {
+    // small and high, its strings short and bright, strummed hard
+    Patch {
+        ks: r.range(0.35, 0.55),
+        ks_tone: r.range(0.86, 0.94),
+        cutoff: 7000.0,
+        keytrack: 0.0,
+        drive: r.range(0.2, 0.45),
+        a: 0.001,
+        d: 2.0,
+        s: 1.0,
+        r: 0.05,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn mariachi_jarana(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        ks: r.range(0.6, 0.9),
+        ks_tone: 0.8,
+        drive: 0.1,
+        a: 0.001,
+        d: 2.0,
+        s: 1.0,
+        r: 0.06,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn mariachi_guitar(r: &mut Rng) -> Patch {
+    // a Spanish guitar's nylon strings, damped quickly for the chops
+    Patch {
+        ks: r.range(1.4, 2.0),
+        ks_tone: r.range(0.55, 0.65),
+        cutoff: 4000.0,
+        keytrack: 0.3,
+        a: 0.001,
+        d: 3.0,
+        s: 1.0,
+        r: 0.08,
+        gain: 0.5,
+        ..PATCH
+    }
+}
+
+fn mariachi_requinto(r: &mut Rng) -> Patch {
+    Patch {
+        filter: false,
+        ks: r.range(1.0, 1.4),
+        ks_tone: 0.78,
+        a: 0.001,
+        d: 3.0,
+        s: 1.0,
+        r: 0.1,
+        gain: 0.48,
+        ..PATCH
+    }
+}
+
+fn mariachi_guitarron(r: &mut Rng) -> Patch {
+    // the deep acoustic bass: a string plucked hard, its snap a brief
+    // opening of the filter, a little grit
+    Patch {
+        ks: r.range(1.0, 1.5),
+        ks_tone: r.range(0.5, 0.6),
+        cutoff: r.range(500.0, 700.0),
+        env_amt: 2.0,
+        fdec: 0.06,
+        keytrack: 0.3,
+        drive: 0.4,
+        a: 0.001,
+        d: 2.0,
+        s: 1.0,
+        r: 0.12,
+        gain: 0.85,
+        ..PATCH
+    }
+}
+
+fn mariachi_guitarron_round(r: &mut Rng) -> Patch {
+    Patch { ks_tone: 0.4, cutoff: r.range(750.0, 900.0), env_amt: 0.8, drive: 0.0, ..mariachi_guitarron(r) }
+}
+
+fn mariachi_arpa(r: &mut Rng) -> Patch {
+    Patch { filter: false, ks: r.range(2.5, 3.5), ks_tone: 0.7, a: 0.001, d: 4.0, s: 1.0, r: 0.8, gain: 0.5, ..PATCH }
+}
+
+/// The tarima under the dancers' feet: [a heel stomp, a toe tap].
+fn mariachi_kit_tarima(r: &mut Rng) -> Vec<DrumPatch> {
+    let stomp = DrumPatch {
+        tone: 1.0,
+        f0: r.range(150.0, 180.0),
+        f1: r.range(85.0, 100.0),
+        pdec: 0.012,
+        tdec: 0.12,
+        noise: 0.7,
+        nmode: 0,
+        ncut: r.range(900.0, 1300.0),
+        nres: 0.2,
+        ndec: 0.05,
+        click: 0.3,
+        gain: 0.85,
+        ..DRUM
+    };
+    let tap = DrumPatch {
+        tone: 0.6,
+        f0: 420.0,
+        f1: 360.0,
+        tdec: 0.04,
+        noise: 0.6,
+        nmode: 1,
+        ncut: 2200.0,
+        nres: 0.3,
+        ndec: 0.025,
+        click: 0.2,
+        gain: 0.5,
+        ..stomp
+    };
+    vec![stomp, tap]
+}
+
+/// A cajón, played with the heel and the hand: [the low slap, the high one].
+fn mariachi_kit_cajon(r: &mut Rng) -> Vec<DrumPatch> {
+    let low = DrumPatch {
+        tone: 1.0,
+        f0: r.range(130.0, 150.0),
+        f1: r.range(70.0, 80.0),
+        pdec: 0.015,
+        tdec: 0.18,
+        noise: 0.4,
+        nmode: 1,
+        ncut: 1500.0,
+        nres: 0.2,
+        ndec: 0.06,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![low, DrumPatch { tone: 0.4, f0: 300.0, f1: 260.0, tdec: 0.05, noise: 0.8, ncut: 3000.0, ndec: 0.05, gain: 0.5, ..low }]
+}
+
+/// Palmas, many hands: [a clap, a softer one].
+fn mariachi_kit_palmas(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(1100.0, 1500.0),
+        nres: 0.25,
+        ndec: 0.09,
+        claps: 3,
+        gain: 0.8,
+        ..DRUM
+    };
+    vec![c, DrumPatch { claps: 2, ndec: 0.05, gain: 0.5, ..c }]
+}
+
+/// Maracas: [a short shake, a long one].
+fn mariachi_kit_maracas(r: &mut Rng) -> Vec<DrumPatch> {
+    let c = DrumPatch {
+        noise: 1.0,
+        nmode: 2,
+        ncut: r.range(4500.0, 6000.0),
+        nres: 0.1,
+        ndec: 0.05,
+        natt: 0.012,
+        gain: 0.55,
+        ..DRUM
+    };
+    vec![c, DrumPatch { ndec: 0.16, natt: 0.03, ..c }]
+}
+
+/// Percussion: [a clave, a cajón low, mid and high, the guiro's scrape].
+fn mariachi_kit_guiro(r: &mut Rng) -> Vec<DrumPatch> {
+    let f = r.range(2300.0, 2700.0);
+    let clave = DrumPatch { tone: 0.9, f0: f, f1: f, tdec: 0.05, gain: 0.55, ..DRUM };
+    let cajon = |f: f32| DrumPatch {
+        tone: 1.0,
+        f0: f * 1.3,
+        f1: f,
+        pdec: 0.015,
+        tdec: 0.12,
+        noise: 0.35,
+        nmode: 1,
+        ncut: 1800.0,
+        ndec: 0.04,
+        gain: 0.7,
+        ..DRUM
+    };
+    let guiro = DrumPatch {
+        noise: 1.0,
+        nmode: 1,
+        ncut: r.range(2800.0, 3600.0),
+        nres: 0.45,
+        ndec: 0.03,
+        claps: 8,
+        gain: 0.5,
+        ..DRUM
+    };
+    vec![clave, cajon(110.0), cajon(160.0), cajon(240.0), guiro]
+}
+
+// the palettes: a mariachi piece's own, by part
+const P_MARIACHI_VIOLIN: &[(&str, Make)] = &[
+    ("violin section", mariachi_violins),
+    ("sweet violins", mariachi_violins_sweet),
+    ("fiddle", fiddle),
+    ("flute", flute),
+];
+const P_MARIACHI_VIOLIN2: &[(&str, Make)] = &[
+    ("violin section", mariachi_violins),
+    ("sweet violins", mariachi_violins_sweet),
+    ("violas", mariachi_viola),
+    ("string ensemble", pad_strings),
+];
+const P_MARIACHI_TRUMPET: &[(&str, Make)] = &[
+    ("mariachi trumpets", mariachi_trumpet),
+    ("flugelhorns", mariachi_flugel),
+    ("trumpets", trumpet),
+    ("muted trumpets", muted_trumpet),
+];
+const P_MARIACHI_VIHUELA: &[(&str, Make)] =
+    &[("vihuela", mariachi_vihuela), ("jarana", mariachi_jarana), ("cittern", cittern)];
+const P_MARIACHI_GUITAR: &[(&str, Make)] = &[
+    ("Spanish guitar", mariachi_guitar),
+    ("nylon guitar", nylon),
+    ("requinto", mariachi_requinto),
+    ("lute", lute),
+];
+const P_MARIACHI_BASS: &[(&str, Make)] = &[
+    ("guitarrón", mariachi_guitarron),
+    ("round guitarrón", mariachi_guitarron_round),
+    ("upright bass", bass_upright),
+];
+const P_MARIACHI_HARP: &[(&str, Make)] = &[
+    ("arpa", mariachi_arpa),
+    ("harp", harp),
+    ("salterio", psaltery),
+    ("requinto", mariachi_requinto),
+];
+// lent to another genre's parts, in a mix
+const P_MARIACHI_LEAD: &[(&str, Make)] = &[
+    ("violin section", mariachi_violins),
+    ("mariachi trumpet", mariachi_trumpet),
+    ("sweet violins", mariachi_violins_sweet),
+    ("flugelhorn", mariachi_flugel),
+];
+const P_MARIACHI_SECOND: &[(&str, Make)] = &[
+    ("arpa", mariachi_arpa),
+    ("mariachi trumpet", mariachi_trumpet),
+    ("salterio", psaltery),
+    ("requinto", mariachi_requinto),
+];
+const P_MARIACHI_STRUM: &[(&str, Make)] = &[
+    ("vihuela", mariachi_vihuela),
+    ("jarana", mariachi_jarana),
+    ("Spanish guitar", mariachi_guitar),
+    ("requinto", mariachi_requinto),
+];
+const P_MARIACHI_SUSTAIN: &[(&str, Make)] = &[
+    ("violins, held", mariachi_violins_long),
+    ("sweet violins", mariachi_violins_sweet),
+    ("violas", mariachi_viola),
+    ("string ensemble", pad_strings),
+];
+const K_MARIACHI_KICK: &[(&str, MakeKit)] = &[("tarima", mariachi_kit_tarima), ("cajón", mariachi_kit_cajon)];
+const K_MARIACHI_SNARE: &[(&str, MakeKit)] = &[("palmas", mariachi_kit_palmas), ("hand claps", kit_hand_clap)];
+const K_MARIACHI_HAT: &[(&str, MakeKit)] = &[("maracas", mariachi_kit_maracas), ("shaker", kit_shaker)];
+const K_MARIACHI_PERC: &[(&str, MakeKit)] =
+    &[("guiro, clave, cajón", mariachi_kit_guiro), ("clave, congas", kit_perc_hand)];
+
+fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
+    let mut b = Band::default();
+    b.tone(r, s, CH_LEAD, P_MARIACHI_VIOLIN, 76.0);
+    b.tone(r, s, CH_DRONE, P_MARIACHI_VIOLIN2, 70.0);
+    b.tone(r, s, CH_ARP, P_MARIACHI_TRUMPET, 70.0);
+    b.tone(r, s, CH_KEYS, P_MARIACHI_VIHUELA, 64.0);
+    b.tone(r, s, CH_PAD, P_MARIACHI_GUITAR, 55.0);
+    b.tone(r, s, CH_BASS, P_MARIACHI_BASS, 40.0);
+    b.tone(r, s, CH_BELL, P_MARIACHI_HARP, 67.0);
+    b.kit(r, s, CH_KICK, K_MARIACHI_KICK);
+    b.kit(r, s, CH_SNARE, K_MARIACHI_SNARE);
+    b.kit(r, s, CH_HAT, K_MARIACHI_HAT);
+    b.kit(r, s, CH_PERC, K_MARIACHI_PERC);
+    b
+}
+
+/// Mariachi's sounds: the violins (the first mono, sliding into their
+/// ornaments; the second under them), the trumpets, the vihuela and guitar
+/// either side, the guitarrón in the middle, the harp; the tarima, palmas,
+/// maracas and guiro; a room with some air (a plaza's), a little echo on the
+/// trumpets.
 fn sounds_mariachi(r: &mut Rng, s: &mut Synth) {
-    sounds_lofi(r, s)
+    let ch = &mut s.ch;
+    ch[CH_LEAD].patch = mariachi_violins(r);
+    ch[CH_LEAD].mono = true;
+    ch[CH_DRONE].patch = mariachi_violins(r);
+    ch[CH_DRONE].mono = false;
+    ch[CH_ARP].patch = mariachi_trumpet(r);
+    ch[CH_ARP].mono = false;
+    ch[CH_KEYS].patch = mariachi_vihuela(r);
+    ch[CH_PAD].patch = mariachi_guitar(r);
+    ch[CH_BASS].patch = mariachi_guitarron(r);
+    ch[CH_BASS].mono = false;
+    ch[CH_BELL].patch = mariachi_arpa(r);
+    ch[CH_KICK].drums = mariachi_kit_tarima(r);
+    ch[CH_SNARE].drums = mariachi_kit_palmas(r);
+    ch[CH_HAT].drums = mariachi_kit_maracas(r);
+    ch[CH_PERC].drums = mariachi_kit_guiro(r);
+    mix(&mut ch[CH_LEAD], 0.85, 0.2, 0.25, 0.04, 0.0);
+    mix(&mut ch[CH_DRONE], 0.2, 0.05, 0.28, 0.0, 0.0);
+    mix(&mut ch[CH_ARP], 0.55, -0.2, 0.25, 0.06, 0.0);
+    mix(&mut ch[CH_KEYS], 0.32, 0.35, 0.12, 0.0, 0.0);
+    mix(&mut ch[CH_PAD], 0.26, -0.35, 0.12, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], 0.5, 0.0, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_BELL], 0.34, 0.15, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_KICK], 0.55, 0.0, 0.12, 0.0, 0.0);
+    mix(&mut ch[CH_SNARE], 0.35, 0.1, 0.2, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], 0.3, 0.3, 0.1, 0.0, 0.0);
+    mix(&mut ch[CH_PERC], 0.35, -0.3, 0.12, 0.0, 0.0);
+    s.rev.fb = r.range(0.78, 0.83);
+    s.rev.damp = 0.45;
+    s.rev_wet = 0.2;
+    s.dly.fb = 0.15;
+    s.dly.lpk = 0.3;
+    s.dly_rev = 0.15;
+    s.r2mode = R2_OFF;
+    s.fx.crackle = 0.0;
+    s.fx.wind_to = 0.0;
+    s.fx.rain_to = 0.0;
+    s.m.gain = 1.9;
+    s.m.target = 0.23;
 }
 
 // ---------------------------------------------------------------- the engine
@@ -10893,6 +12595,15 @@ mod tests {
                 }
             }
         }
+        let mariachi = [MARIACHI_MAJ_A, MARIACHI_MAJ_B, MARIACHI_MAJ_C, MARIACHI_MIN_A, MARIACHI_MIN_B, MARIACHI_MIN_C];
+        for (pool, bars) in mariachi.iter().map(|p| (p, 8)).chain([(&MARIACHI_FANFARE, 4), (&MARIACHI_FANFARE_MIN, 4)]) {
+            for plan in pool.iter() {
+                assert_eq!(plan.split_whitespace().count(), bars, "{plan}");
+                for tok in plan.split_whitespace().flat_map(|t| t.split('+')) {
+                    assert!(parse_harm(tok).is_some(), "{tok} in {plan}");
+                }
+            }
+        }
         assert_eq!(parse_harm("V7/V"), Some(Harm { root: 2, q: Q_DOM7, inv: 0 }));
         assert_eq!(parse_harm("bVImaj7^1"), Some(Harm { root: 8, q: Q_MAJ7, inv: 1 }));
         assert_eq!(parse_harm("ii7"), Some(Harm { root: 2, q: Q_MIN7, inv: 0 }));
@@ -10907,6 +12618,7 @@ mod tests {
         assert_eq!(render(TAVERN, 5, 2.0), render(TAVERN, 5, 2.0));
         assert_eq!(render(SKA, 5, 2.0), render(SKA, 5, 2.0));
         assert_ne!(render(SKA, 5, 2.0), render(SKA, 6, 2.0));
+        assert_eq!(render(MARIACHI, 5, 2.0), render(MARIACHI, 5, 2.0));
     }
 
     #[test]
@@ -10931,7 +12643,8 @@ mod tests {
     /// inside its bar, drums in every full section, the effects channel open;
     /// techno's kick on the one, polka+techno's clap on the second beat; the
     /// tavern writer's frame drum (its second stroke) gone under another
-    /// drummer but for the piece's last bar.
+    /// drummer but for the piece's last bar (under a drummer whose own kick
+    /// has a second stroke, mariachi's toe taps, it cannot be told apart).
     #[test]
     fn mixes_drum_in_the_writers_meter() {
         for p in 0..NG {
@@ -10956,7 +12669,7 @@ mod tests {
                                 let at = (t as f64 - t0) / step;
                                 assert!((-0.01..bs as f64).contains(&at), "{} seed {seed}: a hit at {at} of {bs}", name(id));
                                 assert!(
-                                    ending || !(p == TAVERN && g != TAVERN && ch as usize == CH_KICK && kind == 1),
+                                    ending || !(p == TAVERN && !matches!(g, TAVERN | MARIACHI) && ch as usize == CH_KICK && kind == 1),
                                     "{}: the writer's frame drum",
                                     name(id)
                                 );
