@@ -424,6 +424,10 @@ struct Patch {
     /// does), `r` the release (0: the instrument's own). Pitch, glide, bend,
     /// vibrato, tremolo, velocity and gain as any voice's.
     samp: u16,
+    /// a recording shaped by `d` and `s` too (its decay to a sustain level),
+    /// as the oscillators are: a synthesiser's held tone, recorded, played
+    /// as its pluck or stab (the SoundFont's synthesisers never die away)
+    shaped: bool,
 }
 
 /// The vowels' first three formants, Hz.
@@ -477,6 +481,7 @@ const PATCH: Patch = Patch {
     vowel: 0,
     bend: 0.0,
     samp: 0,
+    shaped: false,
 };
 
 /// Where a sampled patch starts (`samp` set): no filter, the instrument's
@@ -673,8 +678,9 @@ impl Voice {
         self.hold = len;
         self.age = 0;
         if sampled {
-            // the attack, level 1 while held, the release (or the instrument's own)
-            self.amp.set(p.a, p.d, 1.0, if p.r > 0.0 { p.r } else { self.sm.rel });
+            // the attack, level 1 while held (or the patch's decay to its
+            // sustain), the release (or the instrument's own)
+            self.amp.set(p.a, p.d, if p.shaped { p.s } else { 1.0 }, if p.r > 0.0 { p.r } else { self.sm.rel });
         } else {
             self.amp.set(p.a, p.d, p.s, p.r);
         }
@@ -10024,6 +10030,14 @@ fn rec_through(p: Patch, id: Option<u16>, note: f32) -> Patch {
     levelled(&p, note, Patch { samp, ..p })
 }
 
+/// `rec_through`, the recording shaped by the patch's decay and sustain as
+/// well (`Patch::shaped`): a synthesiser's pluck or stab played from a
+/// recording of a synthesiser's held tone, dying away as the patch does.
+fn rec_shaped(p: Patch, id: Option<u16>, note: f32) -> Patch {
+    let Some(samp) = id else { return p };
+    levelled(&p, note, Patch { samp, shaped: true, ..p })
+}
+
 /// A kit's kinds played by recorded hits when the samples are in (`ids`,
 /// one for each kind in order; None, or a kind past the list, keeps the
 /// synthesiser's), each at its kind's gain (`samples::CAL_DRUM` brings a
@@ -10856,15 +10870,11 @@ fn vox_chop(r: &mut Rng) -> Patch {
 
 /// A short bright pluck (techno's hook).
 ///
-/// Kept the synthesiser's when the samples are in: a recorded voice holds
-/// level while its gate is open (`Patch::samp`), and the SoundFont's
-/// synthesisers are looped waves that never die away, so the pluck would
-/// become a held note (one note's 10 ms envelope, measured: the
-/// synthesiser's -30 dB in 0.11-0.17 s, a recorded saw's level the whole
-/// gate, 9-20 dB apart on average); and the palettes lend it to other
-/// genres' parts with long notes.
+/// Recorded: the SoundFont's square or saw lead, shaped by the patch's
+/// decay (`rec_shaped`: the leads never die away by themselves) under its
+/// filter's sweep.
 fn pluck_hook(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
         pw: 0.3,
         cutoff: r.range(900.0, 1600.0),
@@ -10878,20 +10888,23 @@ fn pluck_hook(r: &mut Rng) -> Patch {
         r: 0.08,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    rec_shaped(p, samples::gm(lead_of(p.wave)), 70.0)
+}
+
+/// The SoundFont's lead for an oscillator's wave (its recordings of a
+/// synthesiser's square and saw).
+fn lead_of(w: Wave) -> &'static str {
+    if w == Wave::Square { "Square Lead" } else { "Saw Lead" }
 }
 
 /// A saw or square pluck (synthwave's arpeggio).
 ///
-/// Kept the synthesiser's when the samples are in: a recorded voice holds
-/// level while its gate is open (`Patch::samp`), and the SoundFont's
-/// synthesisers are looped waves that never die away, so the pluck would
-/// become a held note (one note's 10 ms envelope, measured: the
-/// synthesiser's -30 dB in 0.11-0.17 s, a recorded saw's level the whole
-/// gate, 9-20 dB apart on average); and the palettes lend it to other
-/// genres' parts with long notes.
+/// Recorded: the SoundFont's square or saw lead, shaped by the patch's
+/// decay (`rec_shaped`: the leads never die away by themselves) under its
+/// filter's sweep.
 fn arp_pluck(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
         pw: r.range(0.3, 0.5),
         cutoff: r.range(1000.0, 2200.0),
@@ -10905,7 +10918,8 @@ fn arp_pluck(r: &mut Rng) -> Patch {
         r: 0.12,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    rec_shaped(p, samples::gm(lead_of(p.wave)), 70.0)
 }
 
 /// A glassy FM tone; recorded, the FM electric piano (a DX7's), which dies
@@ -10927,15 +10941,8 @@ fn glass_fm(r: &mut Rng) -> Patch {
 }
 
 /// A chord stab: two saws, the filter snapping shut, dying away.
-///
-/// Kept the synthesiser's when the samples are in: a recorded voice holds
-/// level while its gate is open (`Patch::samp`), and the SoundFont's
-/// synthesisers are looped waves that never die away, so the stab would
-/// become a held note (one note's 10 ms envelope, measured: the
-/// synthesiser's -30 dB in 0.11-0.17 s, a recorded saw's level the whole
-/// gate, 9-20 dB apart on average); and the palettes lend it to other
-/// genres' parts with long notes.
-fn stab_saw(r: &mut Rng) -> Patch {
+/// (The synthesiser's; `stab_saw` the one played.)
+fn stab_saw_synth(r: &mut Rng) -> Patch {
     Patch {
         unison: 2,
         detune: 12.0,
@@ -10954,9 +10961,17 @@ fn stab_saw(r: &mut Rng) -> Patch {
     }
 }
 
-/// A dub chord: the stab, darker (the synthesiser's, as `stab_saw` is).
+/// The chord stab, recorded: the SoundFont's saw lead (two saws a little
+/// apart, as the patch's are), shaped by the patch's decay (`rec_shaped`)
+/// under its filter snapping shut.
+fn stab_saw(r: &mut Rng) -> Patch {
+    rec_shaped(stab_saw_synth(r), samples::gm("Saw Lead"), 62.0)
+}
+
+/// A dub chord: the stab, darker.
 fn stab_dub(r: &mut Rng) -> Patch {
-    Patch { cutoff: r.range(400.0, 700.0), res: 0.4, env_amt: 1.5, fdec: 0.1, d: 0.25, ..stab_saw(r) }
+    let p = Patch { cutoff: r.range(400.0, 700.0), res: 0.4, env_amt: 1.5, fdec: 0.1, d: 0.25, ..stab_saw_synth(r) };
+    rec_shaped(p, samples::gm("Saw Lead"), 62.0)
 }
 
 /// An organ stab: the organ pad's patch, short (the synthesiser's; its own
@@ -11815,6 +11830,9 @@ fn techno_rec_trim(ch: usize, acid: bool, samp: u16) -> f32 {
         // a sung voice speaks slowly where the chop's saw snaps
         CH_LEAD if is_gm(samp, "Synth Voice") => 10.2,
         CH_KEYS if is_gm(samp, "Percussive Organ") => 4.7,
+        // the stabs (shaped by their patch's decay: +0.7 and +0.9 dB in the
+        // two bass styles)
+        CH_KEYS if is_gm(samp, "Saw Lead") => 0.8,
         _ => 0.0,
     }
 }
@@ -11832,6 +11850,9 @@ fn synthwave_rec_trim(ch: usize, samp: u16) -> f32 {
         CH_PAD if is_gm(samp, "Warm Pad") => -2.5,
         CH_LEAD if is_gm(samp, "Charang") => -1.9,
         CH_BELL if is_gm(samp, "FM Electric Piano") => -1.3,
+        // the saw arpeggio, shaped by its patch's decay (the square's within
+        // half a dB)
+        CH_ARP if is_gm(samp, "Saw Lead") => 1.0,
         _ => 0.0,
     }
 }
@@ -12178,8 +12199,8 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
     };
     ch[CH_BASS].patch = rec_through(bass, samples::gm(rec_bass), 40.0);
     ch[CH_BASS].mono = true;
-    // the stabs: the synthesiser's (as `stab_saw` is)
-    ch[CH_KEYS].patch = Patch {
+    // the stabs (recorded as `stab_saw` is)
+    let stab = Patch {
         wave: Wave::Saw,
         unison: 2,
         detune: 12.0,
@@ -12196,6 +12217,7 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.3,
         ..PATCH
     };
+    ch[CH_KEYS].patch = rec_shaped(stab, samples::gm("Saw Lead"), 62.0);
     let pad = Patch {
         wave: Wave::Saw,
         unison: 3,
@@ -12215,8 +12237,8 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
     };
     // recorded: Synth Strings 1 (two detuned saw stacks) under its filter
     ch[CH_PAD].patch = rec_through(pad, samples::gm("Synth Strings 1"), 60.0);
-    // the hook: a short bright pluck (the synthesiser's, as `pluck_hook` is)
-    ch[CH_LEAD].patch = Patch {
+    // the hook: a short bright pluck (recorded as `pluck_hook` is)
+    let hook = Patch {
         wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
         pw: 0.3,
         cutoff: r.range(900.0, 1600.0),
@@ -12231,6 +12253,7 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         gain: 0.3,
         ..PATCH
     };
+    ch[CH_LEAD].patch = rec_shaped(hook, samples::gm(lead_of(hook.wave)), 70.0);
     ch[CH_LEAD].mono = false;
     mix(&mut ch[CH_LEAD], 0.3, r.range(-0.3, 0.3), 0.25, 0.4, 0.3);
     mix(&mut ch[CH_KICK], 0.6, 0.0, 0.0, 0.0, 0.0);
@@ -12334,8 +12357,8 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
     // recorded: Polysynth (a stack of detuned saws) under its filter
     ch[CH_PAD].patch = rec_through(pad, samples::gm("Polysynth"), 62.0);
     let sq = r.chance(0.4);
-    // the arpeggio: the synthesiser's (as `arp_pluck` is)
-    ch[CH_ARP].patch = Patch {
+    // the arpeggio (recorded as `arp_pluck` is)
+    let arp = Patch {
         wave: if sq { Wave::Square } else { Wave::Saw },
         pw: r.range(0.3, 0.5),
         cutoff: r.range(1000.0, 2200.0),
@@ -12350,6 +12373,7 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
         gain: 0.3,
         ..PATCH
     };
+    ch[CH_ARP].patch = rec_shaped(arp, samples::gm(lead_of(arp.wave)), 70.0);
     let lead = Patch {
         wave: if sq { Wave::Saw } else { Wave::Square },
         unison: 3,
