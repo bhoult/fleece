@@ -11015,25 +11015,20 @@ fn shaker_rec(kind: usize) -> Option<u16> {
     }
 }
 
-/// A tambourine: 0 a hit, 1 a longer shake (the CC0 one's, else the kit's).
+/// A tambourine: 0 a hit, 1 a shake (the CC0 one's, else the kit's).
 fn tambourine_rec(kind: usize) -> Option<u16> {
-    let arts: &[&str] = if kind == 0 { &["hit", "short", "tap", "shake"] } else { &["shake", "long", "roll", "hit"] };
-    arts.iter().find_map(|a| samples::multi("tambourine", a)).or_else(|| samples::drum("Standard", 54))
+    samples::multi("tambourine", if kind == 0 { "hit" } else { "shake" }).or_else(|| samples::drum("Standard", 54))
 }
 
-/// A frame drum's (or the bodhrán's) stroke: 0 the open bass, 1 a higher
-/// one, 2 the rim; the CC0 frame drum's, else a taiko's and the toms'.
+/// A frame drum's (or the bodhrán's) stroke: 0 the large drum's open hit,
+/// 1 its muted one (the bodhrán's high stroke), 2 the small drum's muted
+/// one; the CC0 frame drums', else a taiko's and the kit's toms'.
 fn frame_drum(kind: usize) -> Option<u16> {
-    let arts: &[&str] = match kind {
-        0 => &["bass", "low", "open", "hit"],
-        1 => &["high", "muted", "tone", "slap", "hit"],
-        _ => &["rim", "tap", "edge", "high", "hit"],
-    };
-    arts.iter().find_map(|a| samples::multi("frame_drum", a)).or_else(|| match kind {
-        0 => samples::gm("Taiko Drum"),
-        1 => samples::drum("Standard", 45),
-        _ => samples::drum("Standard", 48),
-    })
+    match kind {
+        0 => samples::multi("frame_drum", "hit").or_else(|| samples::gm("Taiko Drum")),
+        1 => samples::multi("frame_drum", "muted").or_else(|| samples::drum("Standard", 45)),
+        _ => samples::multi("frame_drum", "small_muted").or_else(|| samples::drum("Standard", 48)),
+    }
 }
 
 /// Finger cymbals (else the kit's open triangle).
