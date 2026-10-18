@@ -9681,12 +9681,13 @@ fn loudness_in(p: &Patch, note: f32, bank: Option<&Bank>) -> f32 {
     if v.sm.n > 0 {
         // a recording speaks in its own time (a bowed string's swell): its
         // loudest 0.12 s of the gate's first 0.45 s
-        let mut e = Vec::with_capacity(700);
+        const N: usize = (0.45 * SR) as usize / BLOCK;
+        let mut e = [0.0f32; N];
         let mut buf = [[0.0f32; 2]; BLOCK];
-        for _ in 0..(0.45 * SR) as usize / BLOCK {
+        for x in e.iter_mut() {
             buf.fill([0.0; 2]);
             v.render(1.0, &mut buf, bank);
-            e.push(buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>());
+            *x = buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>();
         }
         let (skip, w) = ((0.03 * SR) as usize / BLOCK, (0.12 * SR) as usize / BLOCK);
         let most = e[skip..].windows(w).map(|x| x.iter().sum::<f32>()).fold(0.0, f32::max);

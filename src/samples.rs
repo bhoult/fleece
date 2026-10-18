@@ -1581,7 +1581,7 @@ pub fn list_cli() {
                 println!("  skipped: {w}");
             }
         }
-        Err(e) => println!("nothing loaded: {e}"),
+        Err(e) => println!("nothing loaded: {e} (tools/get-samples.sh fetches the samples)"),
     }
 }
 
