@@ -27,13 +27,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Genre names, shown on screen in capitals (the app's font has only A-Z, 0-9 and " -.:/!+()[],%").
-pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN"];
+pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN", "SKA", "MARIACHI"];
 const AMBIENT: usize = 0;
 const TECHNO: usize = 1;
 const SYNTHWAVE: usize = 2;
 const LOFI: usize = 3;
 const POLKA: usize = 4;
 const TAVERN: usize = 5;
+const SKA: usize = 6;
+const MARIACHI: usize = 7;
 /// How many genres.
 const NG: usize = GENRES.len();
 /// The music's ids: a genre alone (below `NG`), or a mix of a primary genre and a
@@ -42,7 +44,7 @@ const NG: usize = GENRES.len();
 /// tempo, near enough), and each part has an instrument of each.
 pub const IDS: usize = NG * (NG + 1);
 /// Each genre's tempo, about (a mix's lies 60 % of the way to its drummer's).
-const MID_BPM: [f64; NG] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0];
+const MID_BPM: [f64; NG] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0, 140.0, 120.0];
 
 /// The id of `primary` alone, or mixed with `secondary` (another genre).
 pub fn mix_id(primary: usize, secondary: Option<usize>) -> usize {
@@ -1669,6 +1671,8 @@ impl Synth {
             SYNTHWAVE => 1.1,
             LOFI => 0.8,
             TAVERN => 0.65,
+            SKA => 0.85,
+            MARIACHI => 0.85,
             _ => 0.9,
         };
         let (writer, drummer) = parts(genre);
@@ -2440,6 +2444,8 @@ struct Song {
     log: Vec<(f64, i32, usize, &'static str)>,
     pk: Polka,
     tv: Tavern,
+    sk: Ska,
+    mc: Mariachi,
     /// a mix's drummer (the genre `genre` writes for), a synthesiser its
     /// drums are made on, and its patterns
     guest: Option<usize>,
@@ -2510,6 +2516,8 @@ impl Song {
             log: Vec::new(),
             pk: Polka::default(),
             tv: Tavern::default(),
+            sk: Ska::default(),
+            mc: Mariachi::default(),
             guest,
             scratch: guest.map(|g| Box::new(Synth::new(g))),
             dr: Drummer::default(),
@@ -2524,13 +2532,20 @@ impl Song {
         match self.genre {
             POLKA => 8,
             TAVERN => self.tv.bar_steps.max(1),
+            SKA => self.sk.bar_steps.max(1),
+            MARIACHI => self.mc.bar_steps.max(1),
             _ => 16,
         }
     }
 
     /// 16ths a beat: 6 in 6/8 and 9/8 (the beat a dotted quarter), else 4.
     fn beat_steps(&self) -> u32 {
-        if self.genre == TAVERN { self.tv.beat_steps.max(1) } else { 4 }
+        match self.genre {
+            TAVERN => self.tv.beat_steps.max(1),
+            SKA => self.sk.beat_steps.max(1),
+            MARIACHI => self.mc.beat_steps.max(1),
+            _ => 4,
+        }
     }
 
     /// A 16th, in samples.
@@ -2714,6 +2729,8 @@ impl Song {
             SYNTHWAVE => self.synthwave(s, &mut b, sec, m),
             LOFI => self.lofi(s, &mut b, sec, m),
             TAVERN => self.tavern(s, &mut b, sec, m),
+            SKA => self.ska(s, &mut b, sec, m),
+            MARIACHI => self.mariachi(s, &mut b, sec, m),
             _ => self.polka(&mut b, sec),
         }
         // a mix: the drummer's beat for the writer's (but for polka's and
@@ -2760,6 +2777,8 @@ impl Song {
             SYNTHWAVE => [1.5, 2.0, 0.0, 0.0, 0.0, 5.0, 1.5],
             LOFI => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
             TAVERN => [2.0, 3.0, 0.0, 0.0, 3.0, 2.0, 0.0],
+            SKA => [4.0, 1.0, 0.0, 0.0, 2.0, 1.0, 0.0],
+            MARIACHI => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0],
             // polka: major mostly, now and then a minor one
             _ => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         };
@@ -2780,6 +2799,8 @@ impl Song {
             SYNTHWAVE => self.piece_synthwave(s),
             LOFI => self.piece_lofi(s),
             TAVERN => self.piece_tavern(s),
+            SKA => self.piece_ska(s),
+            MARIACHI => self.piece_mariachi(s),
             _ => self.piece_polka(s),
         }
         self.fuse(s);
@@ -2791,6 +2812,8 @@ impl Song {
             (TAVERN, T_WALTZ) => "3/4",
             (TAVERN, _) if self.tv.bar_steps == 12 => "3/4 ballad",
             (TAVERN, _) => "4/4 ballad",
+            (SKA, _) => self.sk.meter,
+            (MARIACHI, _) => self.mc.meter,
             _ => "4/4",
         };
         self.log.push((self.bpm, self.root, self.mode, meter));
@@ -2880,6 +2903,8 @@ impl Song {
                 }
             }
             TAVERN => self.tavern_section(),
+            SKA => self.ska_section(),
+            MARIACHI => self.mariachi_section(),
             _ => self.polka_section(),
         }
         self.dress(s, dress);
@@ -4531,6 +4556,24 @@ impl Song {
     }
 
     /// The electric piano's chord, rolled upward.
+    // -- ska (placeholders: lo-fi's music until ska is written)
+
+    fn piece_ska(&mut self, s: &mut Synth) {
+        self.piece_lofi(s);
+        self.sk = Ska { bar_steps: 16, beat_steps: 4, meter: "4/4" };
+    }
+
+    fn ska_section(&mut self) {}
+
+    fn ska(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        self.lofi(s, b, sec, m)
+    }
+
+    /// Ska's beat in any meter, for a mix.
+    fn ska_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        self.lofi_beat(s, b, sec, m)
+    }
+
     fn strum(&mut self, b: &mut Bar, step: f32, c: Harm, steps: f32, vel: f32) {
         let v = self.voicing(c, 50, 74, &self.keys_v, true);
         let gap = self.rng.range(0.006, 0.02);
@@ -4685,6 +4728,8 @@ impl Song {
             Some(SYNTHWAVE) => self.synthwave_beat(b, sec, m),
             Some(LOFI) => self.lofi_beat(s, b, sec, m),
             Some(POLKA) => self.polka_beat(b, sec, m),
+            Some(SKA) => self.ska_beat(s, b, sec, m),
+            Some(MARIACHI) => self.mariachi_beat(s, b, sec, m),
             Some(_) => self.tavern_drums(b, sec, m),
             None => {}
         }
@@ -5103,6 +5148,24 @@ impl Song {
                 }
             }
         }
+    }
+
+    // -- mariachi (placeholders: lo-fi's music until mariachi is written)
+
+    fn piece_mariachi(&mut self, s: &mut Synth) {
+        self.piece_lofi(s);
+        self.mc = Mariachi { bar_steps: 16, beat_steps: 4, meter: "4/4" };
+    }
+
+    fn mariachi_section(&mut self) {}
+
+    fn mariachi(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        self.lofi(s, b, sec, m)
+    }
+
+    /// Mariachi's beat in any meter, for a mix.
+    fn mariachi_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        self.lofi_beat(s, b, sec, m)
     }
 }
 
@@ -5838,6 +5901,20 @@ fn sounds_tavern(r: &mut Rng, s: &mut Synth) {
 
 /// A bassline changed in `k` places: a note on or off, another note, an
 /// accent or a slide.
+// -- ska (placeholders)
+
+/// A ska piece's state: its meter (16ths a bar and a beat, and its name).
+#[derive(Default)]
+struct Ska {
+    bar_steps: u32,
+    beat_steps: u32,
+    meter: &'static str,
+}
+
+fn sounds_ska(r: &mut Rng, s: &mut Synth) {
+    sounds_lofi(r, s)
+}
+
 fn mutate_bass(r: &mut Rng, p: &[Step; 16], mode: usize, k: usize) -> [Step; 16] {
     let mut p = *p;
     for _ in 0..k {
@@ -7617,6 +7694,8 @@ fn sounds(g: usize, r: &mut Rng, s: &mut Synth) {
             let trumpet = r.bit_chance();
             sounds_polka(r, s, trumpet)
         }
+        SKA => sounds_ska(r, s),
+        MARIACHI => sounds_mariachi(r, s),
         _ => sounds_tavern(r, s),
     }
 }
@@ -8367,6 +8446,20 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
     s.fx.wind_to = 0.0;
     s.m.gain = 1.3;
     s.m.target = 0.2;
+}
+
+// -- mariachi (placeholders)
+
+/// A mariachi piece's state: its meter (16ths a bar and a beat, and its name).
+#[derive(Default)]
+struct Mariachi {
+    bar_steps: u32,
+    beat_steps: u32,
+    meter: &'static str,
+}
+
+fn sounds_mariachi(r: &mut Rng, s: &mut Synth) {
+    sounds_lofi(r, s)
 }
 
 // ---------------------------------------------------------------- the engine
