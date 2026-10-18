@@ -4707,7 +4707,7 @@ impl Song {
             ..Ska::default()
         };
         sounds_ska(r, s, two_tone);
-        self.band = band_ska(r, s);
+        self.band = band_ska(r, s, two_tone);
         // the soloists, each in its register, as loud as the lead's horn
         let orig = s.ch[CH_LEAD].patch;
         let mut who: Vec<usize> = (0..SKA_SOLOISTS.len()).collect();
@@ -5090,7 +5090,9 @@ impl Song {
     /// k) a second stab on the 16th after, softer (the organ's bubble, the
     /// guitar's double chop); spread `spread` seconds a string, top first
     /// (an upstroke). Held chords instead when `hold`, or when the sound
-    /// swells in too slowly to stab. The last voicing back.
+    /// swells in too slowly to stab. In the first wave on the straight
+    /// off-beat, a hair behind it (the shuffle is the drums' and the
+    /// horns'), as the records have it. The last voicing back.
     #[allow(clippy::too_many_arguments)]
     fn ska_offbeats(
         &mut self,
@@ -5122,16 +5124,17 @@ impl Song {
             }
             return v1;
         }
+        let swung = self.sk.two_tone;
         for k in 0..4 {
             let st = (4 * k + 2) as f32;
             let v = if k < 2 { &v0 } else { &v1 };
-            let late = self.ska_late(b, st) + self.rng.range(0.0, h);
+            let late = if swung { self.ska_late(b, st) } else { 0.004 } + self.rng.range(0.0, h);
             for (j, &n) in v.iter().rev().enumerate() {
                 let vv = vel * self.rng.range(0.88, 1.0);
                 b.note(st, late + spread * j as f32, ch, n, vv, len, false);
             }
             if twice >> k & 1 == 1 {
-                let late = self.ska_late(b, st + 1.0) + self.rng.range(0.0, h);
+                let late = if swung { self.ska_late(b, st + 1.0) } else { 0.004 } + self.rng.range(0.0, h);
                 for &n in v.iter() {
                     b.note(st + 1.0, late, ch, n, vel * 0.68, len * 0.8, false);
                 }
@@ -5150,7 +5153,8 @@ impl Song {
         if m & L_KEYS != 0 {
             let twice = if self.sk.two_tone && vb { 0b1010 } else { 0 };
             let prev = std::mem::take(&mut self.keys_v);
-            let spread = self.rng.range(0.004, 0.008);
+            // the first wave's chop tighter
+            let spread = self.rng.range(0.004, 0.008) * if self.sk.two_tone { 1.0 } else { 0.4 };
             self.keys_v =
                 self.ska_offbeats(s, b, CH_KEYS, c, (57, 72), &prev, 0.6 + 0.2 * e, 1.2, twice, spread, false);
         }
@@ -8419,9 +8423,10 @@ fn ska_kit_splash(r: &mut Rng) -> Vec<DrumPatch> {
     vec![DrumPatch { ndec: r.range(0.7, 1.0), ncut: r.range(5500.0, 7000.0), ..crash(r)[0] }]
 }
 
-/// Ska's instruments: the skank's (guitars, pianos, an organ stab), the
-/// organs, the pianos, the basses, the lead horns, the second horns, the
-/// low ones; the kits; the soloists (and their registers).
+/// Ska's instruments: the skank's (guitars, pianos, an organ stab; the
+/// first wave's guitars alone), the organs, the pianos, the basses, the
+/// lead horns, the second horns, the low ones; the kits; the soloists (and
+/// their registers).
 const P_SKA_CHOP: &[(&str, Make)] = &[
     ("muted guitar chop", ska_guitar_chop),
     ("clean guitar skank", ska_guitar_clean),
@@ -8429,6 +8434,8 @@ const P_SKA_CHOP: &[(&str, Make)] = &[
     ("bright upright piano", ska_piano_bright),
     ("organ stab", stab_organ),
 ];
+const P_SKA_GUITAR: &[(&str, Make)] =
+    &[("muted guitar chop", ska_guitar_chop), ("clean guitar skank", ska_guitar_clean)];
 const P_SKA_ORGAN: &[(&str, Make)] =
     &[("Farfisa", ska_farfisa), ("Vox Continental", ska_vox), ("Hammond", ska_hammond), ("organ", pad_organ)];
 const P_SKA_PIANO: &[(&str, Make)] =
@@ -8463,9 +8470,10 @@ const K_SKA_CYM: &[(&str, MakeKit)] = &[("crash", crash), ("splash", ska_kit_spl
 const SKA_SOLOISTS: &[(&str, Make, i32)] =
     &[("tenor sax", sax, 62), ("trumpet", trumpet, 72), ("trombone", trombone, 58), ("alto sax", ska_alto, 67)];
 
-fn band_ska(r: &mut Rng, s: &Synth) -> Band {
+fn band_ska(r: &mut Rng, s: &Synth, two_tone: bool) -> Band {
     let mut b = Band::default();
-    b.tone(r, s, CH_KEYS, P_SKA_CHOP, 64.0);
+    // the first wave's skank always a guitar's (the piano plays it on its own)
+    b.tone(r, s, CH_KEYS, if two_tone { P_SKA_CHOP } else { P_SKA_GUITAR }, 64.0);
     b.tone(r, s, CH_PAD, P_SKA_ORGAN, 62.0);
     b.tone(r, s, CH_DRONE, P_SKA_PIANO, 60.0);
     b.tone(r, s, CH_BASS, P_SKA_BASS, 40.0);
@@ -8484,7 +8492,8 @@ fn band_ska(r: &mut Rng, s: &Synth) -> Band {
 /// wave), the muted guitar's chop, a Hammond (first wave) or a Farfisa or
 /// Vox (2-tone), the piano, an upright or fingered bass (a picked one in
 /// 2-tone), trumpet or alto, trombone or tenor, baritone; a room; the
-/// first wave's record a little dull and crackling.
+/// first wave's record a little dull and crackling, light in the bass, the
+/// chop forward.
 fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     let ch = &mut s.ch;
     ch[CH_KICK].drums = ska_kit_kick(r);
@@ -8507,10 +8516,13 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     ch[CH_LEAD].patch = if two_tone && r.bit_chance() { ska_alto(r) } else { trumpet(r) };
     ch[CH_BELL].patch = if r.chance(0.6) { trombone(r) } else { sax(r) };
     ch[CH_ARP].patch = ska_bari(r);
-    // each role as loud whichever instrument it drew (the band's others are levelled to these)
+    // each role as loud whichever instrument it drew (the band's others are
+    // levelled to these); on a first-wave record the bass thinner and the
+    // chop forward, up in the middle with the horns
+    let first = !two_tone;
     for (c, note, db) in [
-        (CH_BASS, 40.0, -18.0),
-        (CH_KEYS, 64.0, -26.0),
+        (CH_BASS, 40.0, if first { -21.0 } else { -18.0 }),
+        (CH_KEYS, 64.0, if first { -21.0 } else { -26.0 }),
         (CH_PAD, 62.0, -21.0),
         (CH_DRONE, 60.0, -19.0),
         (CH_LEAD, 72.0, -19.0),
@@ -8531,8 +8543,9 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     ] {
         ch[c].mono = mono;
     }
-    mix(&mut ch[CH_KICK], 0.6, 0.0, 0.05, 0.0, 0.0);
-    mix(&mut ch[CH_SNARE], 0.45, 0.08, 0.18, 0.0, 0.0);
+    // the first wave's jazz kit light: a felt beater's thud, the cross-stick soft
+    mix(&mut ch[CH_KICK], if first { 0.35 } else { 0.6 }, 0.0, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_SNARE], if first { 0.32 } else { 0.45 }, 0.08, 0.18, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.7, 0.25, 0.06, 0.0, 0.0);
     mix(&mut ch[CH_PERC], 0.35, -0.2, 0.12, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.32, -0.3, 0.15, 0.0, 0.0);
