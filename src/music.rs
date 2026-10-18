@@ -8000,13 +8000,13 @@ const P_TAV_PLUCK: &[(&str, Make)] = &[
     ("nylon-strung guitar", nylon),
 ];
 const P_TAV_DRONE: &[(&str, Make)] =
-    &[("hurdy-gurdy drone", drone_reed), ("bagpipe drone", pipe_drone), ("voices", drone_choir)];
+    &[("hurdy-gurdy drone", tav_drone_gurdy), ("bagpipe drone", pipe_drone), ("voices", drone_choir)];
 const P_TAV_BASS: &[(&str, Make)] = &[("bass viol", viol), ("plucked bass", bass_upright)];
 const K_TAV_KICK: &[(&str, MakeKit)] = &[("frame drum", kit_frame)];
 const K_TAV_HAT: &[(&str, MakeKit)] = &[("shaker", kit_shaker)];
 const K_TAV_PERC: &[(&str, MakeKit)] = &[("woodblock and bones", kit_bones)];
 
-fn chanter(r: &mut Rng) -> Patch {
+fn chanter_synth(r: &mut Rng) -> Patch {
     // a bagpipe's chanter: a narrow pulse, nasal, loud and steady
     Patch {
         wave: Wave::Square,
@@ -8024,7 +8024,11 @@ fn chanter(r: &mut Rng) -> Patch {
     }
 }
 
-fn gurdy(r: &mut Rng) -> Patch {
+fn chanter(r: &mut Rng) -> Patch {
+    rec(chanter_synth(r), samples::gm("Bagpipe"), 74.0)
+}
+
+fn gurdy_synth(r: &mut Rng) -> Patch {
     // a hurdy-gurdy's melody string: a saw buzzing through a nasal vowel
     Patch {
         unison: 2,
@@ -8046,7 +8050,11 @@ fn gurdy(r: &mut Rng) -> Patch {
     }
 }
 
-fn crumhorn(r: &mut Rng) -> Patch {
+fn gurdy(r: &mut Rng) -> Patch {
+    rec_gurdy(gurdy_synth(r), 74.0)
+}
+
+fn crumhorn_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.5,
@@ -8063,11 +8071,21 @@ fn crumhorn(r: &mut Rng) -> Patch {
     }
 }
 
-fn psaltery(r: &mut Rng) -> Patch {
+fn crumhorn(r: &mut Rng) -> Patch {
+    rec_crumhorn(crumhorn_synth(r))
+}
+
+fn psaltery_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(2.5, 3.5), ks_tone: 0.85, a: 0.001, d: 4.0, s: 1.0, r: 0.5, gain: 0.45, ..PATCH }
 }
 
-fn pipe_drone(r: &mut Rng) -> Patch {
+/// The psaltery (and mariachi's salterio): a psaltery's recording, plucked
+/// (else a hammered dulcimer's, the nearest).
+fn psaltery(r: &mut Rng) -> Patch {
+    rec(psaltery_synth(r), multi_or("psaltery", "pluck", "Dulcimer"), 74.0)
+}
+
+fn pipe_drone_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.35,
@@ -8085,7 +8103,11 @@ fn pipe_drone(r: &mut Rng) -> Patch {
     }
 }
 
-fn viol(r: &mut Rng) -> Patch {
+fn pipe_drone(r: &mut Rng) -> Patch {
+    rec(pipe_drone_synth(r), samples::gm("Bagpipe"), 45.0)
+}
+
+fn viol_synth(r: &mut Rng) -> Patch {
     Patch {
         vowel: 4,
         noise: 0.02,
@@ -8102,8 +8124,36 @@ fn viol(r: &mut Rng) -> Patch {
     }
 }
 
+/// The bass viol: a cello's recording.
+fn viol(r: &mut Rng) -> Patch {
+    rec(viol_synth(r), samples::gm("Cello"), 43.0)
+}
+
+/// The hurdy-gurdy's melody string: no recording of one; a fiddle's,
+/// through the patch's nasal vowel and low-pass, a little buzz on it (the
+/// wheel's).
+fn rec_gurdy(p: Patch, note: f32) -> Patch {
+    let keep = |q| Patch { vowel: p.vowel, filter: true, cutoff: p.cutoff, keytrack: p.keytrack, drive: 0.4, ..q };
+    rec_keep(p, samples::gm("Fiddle"), note, keep)
+}
+
+/// The crumhorn: no recording of one; a clarinet's (a capped reed in a
+/// cylinder, the odd harmonics, as the crumhorn's) through the patch's
+/// resonant low-pass, an octave up (its buzz).
+fn rec_crumhorn(p: Patch) -> Patch {
+    rec_lp(p, samples::gm("Clarinet"), 74.0, 2.0, p.res)
+}
+
+/// The hurdy-gurdy's drones: a cello's recording through the reed drone's
+/// nasal vowel and low-pass (the wheel bowing two strings).
+fn tav_drone_gurdy(r: &mut Rng) -> Patch {
+    let p = drone_reed_synth(r);
+    let keep = |q| Patch { vowel: p.vowel, filter: true, cutoff: p.cutoff, res: p.res, keytrack: p.keytrack, ..q };
+    rec_keep(p, samples::gm("Cello"), 45.0, keep)
+}
+
 /// The bodhran (or a frame drum): [the open bass stroke, the muted high one].
-fn kit_bodhran(r: &mut Rng) -> Vec<DrumPatch> {
+fn kit_bodhran_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let bass = DrumPatch {
         tone: 1.0,
         f0: r.range(130.0, 150.0),
@@ -8120,13 +8170,21 @@ fn kit_bodhran(r: &mut Rng) -> Vec<DrumPatch> {
     let top = DrumPatch { f0: 260.0, f1: 220.0, tdec: 0.08, noise: 0.6, ncut: 1200.0, ndec: 0.05, gain: 0.55, ..bass };
     vec![bass, top]
 }
-fn kit_frame(r: &mut Rng) -> Vec<DrumPatch> {
-    let bass = kit_kick_frame(r)[0];
+
+fn kit_bodhran(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_bodhran_synth(r), &[(frame_drum(0), 0.0), (frame_drum(1), 0.0)])
+}
+fn kit_frame_synth(r: &mut Rng) -> Vec<DrumPatch> {
+    let bass = kit_kick_frame_synth(r)[0];
     vec![bass, DrumPatch { f0: 240.0, f1: 200.0, tdec: 0.1, noise: 0.5, ncut: 1500.0, ndec: 0.06, gain: 0.5, ..bass }]
 }
+
+fn kit_frame(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_frame_synth(r), &[(frame_drum(0), 0.0), (frame_drum(1), 0.0)])
+}
 /// Percussion: [spoons, a low and a high frame-drum stroke, finger cymbals, shaker].
-fn kit_bones(r: &mut Rng) -> Vec<DrumPatch> {
-    let mut v = kit_spoons(r);
+fn kit_bones_synth(r: &mut Rng) -> Vec<DrumPatch> {
+    let mut v = kit_spoons_synth(r);
     v[0] = DrumPatch {
         tone: 0.6,
         f0: 1800.0,
@@ -8141,6 +8199,12 @@ fn kit_bones(r: &mut Rng) -> Vec<DrumPatch> {
         ..DRUM
     };
     v
+}
+
+/// The bones (castanets' recording), the frame drum's strokes, finger
+/// cymbals, a shaker.
+fn kit_bones(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_bones_synth(r), &[(samples::gm("Castanets"), 0.0), (frame_drum(1), 0.0), (frame_drum(2), 0.0), (finger_cymbals(), 0.0), (shaker_rec(0), 0.0)])
 }
 
 fn band_tavern(r: &mut Rng, s: &Synth) -> Band {
@@ -8162,7 +8226,7 @@ fn sounds_tavern(r: &mut Rng, s: &mut Synth) {
     ch[CH_LEAD].mono = true;
     ch[CH_BELL].patch = recorder(r);
     ch[CH_KEYS].patch = lute(r);
-    ch[CH_DRONE].patch = drone_reed(r);
+    ch[CH_DRONE].patch = tav_drone_gurdy(r);
     ch[CH_BASS].patch = viol(r);
     ch[CH_BASS].mono = true;
     ch[CH_KICK].drums = kit_bodhran(r);
@@ -8925,7 +8989,7 @@ fn ska_piano_bright(r: &mut Rng) -> Patch {
 
 /// A Farfisa: thin, bright and buzzing (a narrow pulse, a saw an octave
 /// up), a quick vibrato.
-fn ska_farfisa(r: &mut Rng) -> Patch {
+fn ska_farfisa_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: r.range(0.22, 0.32),
@@ -8946,8 +9010,14 @@ fn ska_farfisa(r: &mut Rng) -> Patch {
     }
 }
 
+/// The Farfisa: no recording of one; the nearest reeds, an accordion's
+/// (one reed, not the musette's), its quick vibrato kept.
+fn ska_farfisa(r: &mut Rng) -> Patch {
+    rec_keep(ska_farfisa_synth(r), samples::gm("Accordion"), 62.0, |q| Patch { vib: 0.06, vib_rate: 6.5, ..q })
+}
+
 /// A Vox Continental: hollow (squares at the note and the octave), reedy, still.
-fn ska_vox(r: &mut Rng) -> Patch {
+fn ska_vox_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.5,
@@ -8964,6 +9034,12 @@ fn ska_vox(r: &mut Rng) -> Patch {
         gain: 0.11,
         ..PATCH
     }
+}
+
+/// The Vox Continental: no recording of one; a reed organ's (hollow,
+/// reedy, still).
+fn ska_vox(r: &mut Rng) -> Patch {
+    rec(ska_vox_synth(r), samples::gm("Reed Organ"), 62.0)
 }
 
 /// A Hammond: drawbars (sines at the note and the octave, the sub-octave
@@ -9085,7 +9161,7 @@ fn ska_alto(r: &mut Rng) -> Patch {
 }
 
 /// A melodica: a free reed blown, plain and a little nasal.
-fn ska_melodica(r: &mut Rng) -> Patch {
+fn ska_melodica_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: r.range(0.38, 0.45),
@@ -9104,6 +9180,12 @@ fn ska_melodica(r: &mut Rng) -> Patch {
         gain: 0.4,
         ..PATCH
     }
+}
+
+/// The melodica: no recording of one; a harmonica's, held straight (the
+/// same free reed, blown).
+fn ska_melodica(r: &mut Rng) -> Patch {
+    rec(ska_melodica_synth(r), harmonica_rec("sus"), 72.0)
 }
 
 /// A flugelhorn: a trumpet's darker, rounder cousin.
@@ -9181,7 +9263,7 @@ fn ska_kit_kick_room(r: &mut Rng) -> Vec<DrumPatch> {
 
 /// The soft kick: recorded, a jazz kit's other bass drum.
 fn ska_kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
-    ska_kit_rec(kit_kick_soft(r), "Jazz", &[35])
+    ska_kit_rec(kit_kick_soft_synth(r), "Jazz", &[35])
 }
 
 /// The cross-stick (the stick laid across the rim: a woody click with a
@@ -9247,7 +9329,7 @@ fn ska_kit_hats(r: &mut Rng) -> Vec<DrumPatch> {
 
 /// A ride: recorded, a standard kit's.
 fn ska_kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
-    ska_kit_rec(kit_ride(r), "Standard", &[51, 51])
+    ska_kit_rec(kit_ride_synth(r), "Standard", &[51, 51])
 }
 
 /// A crash: recorded, a standard kit's.
@@ -9271,7 +9353,7 @@ fn ska_kit_toms(r: &mut Rng) -> Vec<DrumPatch> {
         ..DRUM
     };
     let base = r.range(95.0, 115.0);
-    let jingle = kit_tambourine(r)[0];
+    let jingle = kit_tambourine_synth(r)[0];
     let cross = ska_kit_cross_synth(r)[0];
     let v = vec![cross, tom(base), tom(base * 1.33), tom(base * 1.7), DrumPatch { gain: 0.5, ..jingle }];
     // recorded: a kit in a room, its side stick, three toms, a tambourine
@@ -9468,11 +9550,11 @@ fn ska_rec_trim(style: u8, ch: usize) -> f32 {
 /// contrabass plucked), the trumpet, the tenor sax, the trombone, the tenor
 /// horn (a trombone, mellower), the muted trumpet.
 fn ska_piano_rec(r: &mut Rng) -> Patch {
-    ska_rec(piano(r), samples::gm("Grand Piano"))
+    ska_rec(piano_synth(r), samples::gm("Grand Piano"))
 }
 
 fn ska_organ_rec(r: &mut Rng) -> Patch {
-    let p = pad_organ(r);
+    let p = pad_organ_synth(r);
     Patch { a: p.a, ..ska_rec(p, samples::gm("Rock Organ")) }
 }
 
@@ -9482,23 +9564,23 @@ fn ska_organ_stab_rec(r: &mut Rng) -> Patch {
 }
 
 fn ska_upright_rec(r: &mut Rng) -> Patch {
-    ska_rec(bass_upright(r), samples::multi("contrabass", "pizz"))
+    ska_rec(bass_upright_synth(r), samples::multi("contrabass", "pizz"))
 }
 
 fn ska_trumpet_rec(r: &mut Rng) -> Patch {
-    ska_rec(trumpet(r), samples::multi("trumpet", "auto"))
+    ska_rec(trumpet_synth(r), samples::multi("trumpet", "auto"))
 }
 
 fn ska_sax_rec(r: &mut Rng) -> Patch {
-    ska_rec(sax(r), samples::multi("tenor_sax", "auto"))
+    ska_rec(sax_synth(r), samples::multi("tenor_sax", "auto"))
 }
 
 fn ska_trombone_rec(r: &mut Rng) -> Patch {
-    ska_rec(trombone(r), samples::multi("trombone", "auto"))
+    ska_rec(trombone_synth(r), samples::multi("trombone", "auto"))
 }
 
 fn ska_horn_rec(r: &mut Rng) -> Patch {
-    let p = horn(r);
+    let p = horn_synth(r);
     match samples::multi("trombone", "auto") {
         Some(id) => Patch { filter: true, cutoff: 1.5 * p.cutoff, keytrack: 0.5, res: 0.0, ..ska_rec(p, Some(id)) },
         None => p,
@@ -9506,7 +9588,7 @@ fn ska_horn_rec(r: &mut Rng) -> Patch {
 }
 
 fn ska_muted_rec(r: &mut Rng) -> Patch {
-    ska_rec(muted_trumpet(r), samples::gm("Harmon Mute Trumpet"))
+    ska_rec(muted_trumpet_synth(r), samples::gm("Harmon Mute Trumpet"))
 }
 
 /// Ska's instruments: the skank's (guitars, pianos, an organ stab; the
@@ -10063,7 +10145,8 @@ impl Band {
 
 // -- pads
 
-fn pad_strings(r: &mut Rng) -> Patch {
+/// A string section, slow to speak (the synthesiser's).
+fn pad_strings_synth(r: &mut Rng) -> Patch {
     Patch {
         unison: 3,
         detune: r.range(18.0, 28.0),
@@ -10080,6 +10163,10 @@ fn pad_strings(r: &mut Rng) -> Patch {
         gain: 0.14,
         ..PATCH
     }
+}
+
+fn pad_strings(r: &mut Rng) -> Patch {
+    rec(pad_strings_synth(r), samples::gm("Strings Slow"), 60.0)
 }
 
 fn pad_brass(r: &mut Rng) -> Patch {
@@ -10101,7 +10188,8 @@ fn pad_brass(r: &mut Rng) -> Patch {
     }
 }
 
-fn pad_choir(r: &mut Rng) -> Patch {
+/// Voices: "ah", "oh" or "oo" (the synthesiser's).
+fn pad_choir_synth(r: &mut Rng) -> Patch {
     Patch {
         unison: 3,
         detune: r.range(8.0, 14.0),
@@ -10118,6 +10206,12 @@ fn pad_choir(r: &mut Rng) -> Patch {
         gain: 0.3,
         ..PATCH
     }
+}
+
+/// The choir on its vowel: "ah" the choir's, "oh" and "oo" the voices'.
+fn pad_choir(r: &mut Rng) -> Patch {
+    let p = pad_choir_synth(r);
+    rec(p, samples::gm(if p.vowel == 1 { "Choir Aahs" } else { "Voice Oohs" }), 60.0)
 }
 
 fn pad_glass(r: &mut Rng) -> Patch {
@@ -10176,7 +10270,8 @@ fn pad_warm(r: &mut Rng) -> Patch {
     }
 }
 
-fn pad_organ(r: &mut Rng) -> Patch {
+/// A drawbar organ (the synthesiser's).
+fn pad_organ_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.5,
@@ -10195,6 +10290,12 @@ fn pad_organ(r: &mut Rng) -> Patch {
         gain: 0.12,
         ..PATCH
     }
+}
+
+/// The drawbar organ recorded, its speaker's tremolo kept.
+fn pad_organ(r: &mut Rng) -> Patch {
+    let p = pad_organ_synth(r);
+    rec_keep(p, samples::gm("Drawbar Organ"), 60.0, |q| Patch { trem: p.trem, vib_rate: p.vib_rate, ..q })
 }
 
 fn pad_dark(r: &mut Rng) -> Patch {
@@ -10216,7 +10317,7 @@ fn pad_dark(r: &mut Rng) -> Patch {
 
 // -- keys and mallets
 
-fn ep_rhodes(r: &mut Rng) -> Patch {
+fn ep_rhodes_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(1.2, 2.0),
@@ -10236,7 +10337,11 @@ fn ep_rhodes(r: &mut Rng) -> Patch {
     }
 }
 
-fn ep_wurli(r: &mut Rng) -> Patch {
+fn ep_rhodes(r: &mut Rng) -> Patch {
+    rec_rhodes(ep_rhodes_synth(r), 62.0)
+}
+
+fn ep_wurli_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(2.0, 3.0),
@@ -10254,7 +10359,13 @@ fn ep_wurli(r: &mut Rng) -> Patch {
     }
 }
 
-fn piano_felt(r: &mut Rng) -> Patch {
+/// The Wurlitzer: no recording of one; an FM electric piano through its
+/// amplifier (the drive's bark, the tremolo).
+fn ep_wurli(r: &mut Rng) -> Patch {
+    rec_through(ep_wurli_synth(r), samples::gm("FM Electric Piano"), 62.0)
+}
+
+fn piano_felt_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Tri,
         wave2: Wave::Sine,
@@ -10273,7 +10384,11 @@ fn piano_felt(r: &mut Rng) -> Patch {
     }
 }
 
-fn piano(r: &mut Rng) -> Patch {
+fn piano_felt(r: &mut Rng) -> Patch {
+    rec_felt(piano_felt_synth(r), 62.0)
+}
+
+fn piano_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(1.0, 1.5),
@@ -10291,7 +10406,11 @@ fn piano(r: &mut Rng) -> Patch {
     }
 }
 
-fn vibes(r: &mut Rng) -> Patch {
+fn piano(r: &mut Rng) -> Patch {
+    rec(piano_synth(r), samples::gm("Grand Piano"), 62.0)
+}
+
+fn vibes_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(0.8, 1.2),
@@ -10308,7 +10427,11 @@ fn vibes(r: &mut Rng) -> Patch {
     }
 }
 
-fn marimba(r: &mut Rng) -> Patch {
+fn vibes(r: &mut Rng) -> Patch {
+    rec_vibes(vibes_synth(r), 66.0)
+}
+
+fn marimba_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(2.0, 3.0),
@@ -10323,7 +10446,11 @@ fn marimba(r: &mut Rng) -> Patch {
     }
 }
 
-fn celesta(r: &mut Rng) -> Patch {
+fn marimba(r: &mut Rng) -> Patch {
+    rec(marimba_synth(r), multi_or("marimba", "hit", "Marimba"), 72.0)
+}
+
+fn celesta_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(1.2, 1.8),
@@ -10338,15 +10465,27 @@ fn celesta(r: &mut Rng) -> Patch {
     }
 }
 
-fn kalimba(r: &mut Rng) -> Patch {
+fn celesta(r: &mut Rng) -> Patch {
+    rec(celesta_synth(r), samples::gm("Celesta"), 76.0)
+}
+
+fn kalimba_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(0.6, 1.0), ks_tone: 0.75, a: 0.001, d: 3.0, s: 1.0, r: 0.2, gain: 0.5, ..PATCH }
 }
 
-fn harp(r: &mut Rng) -> Patch {
+fn kalimba(r: &mut Rng) -> Patch {
+    rec(kalimba_synth(r), multi_or("kalimba", "pluck", "Kalimba"), 72.0)
+}
+
+fn harp_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(2.0, 3.0), ks_tone: 0.55, a: 0.001, d: 4.0, s: 1.0, r: 0.6, gain: 0.5, ..PATCH }
 }
 
-fn music_box(r: &mut Rng) -> Patch {
+fn harp(r: &mut Rng) -> Patch {
+    rec(harp_synth(r), multi_or("harp", "pluck", "Harp"), 72.0)
+}
+
+fn music_box_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(0.8, 1.2),
@@ -10361,7 +10500,11 @@ fn music_box(r: &mut Rng) -> Patch {
     }
 }
 
-fn glockenspiel(r: &mut Rng) -> Patch {
+fn music_box(r: &mut Rng) -> Patch {
+    rec(music_box_synth(r), samples::gm("Music Box"), 76.0)
+}
+
+fn glockenspiel_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         fm: r.range(1.5, 2.1),
@@ -10374,6 +10517,10 @@ fn glockenspiel(r: &mut Rng) -> Patch {
         gain: 0.26,
         ..PATCH
     }
+}
+
+fn glockenspiel(r: &mut Rng) -> Patch {
+    rec(glockenspiel_synth(r), multi_or("glockenspiel", "hit", "Glockenspiel"), 76.0)
 }
 
 fn bell_fm(r: &mut Rng) -> Patch {
@@ -10391,8 +10538,12 @@ fn bell_fm(r: &mut Rng) -> Patch {
     }
 }
 
-fn dulcimer(r: &mut Rng) -> Patch {
+fn dulcimer_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(1.2, 1.8), ks_tone: 0.9, a: 0.001, d: 3.0, s: 1.0, r: 0.4, gain: 0.45, ..PATCH }
+}
+
+fn dulcimer(r: &mut Rng) -> Patch {
+    rec(dulcimer_synth(r), samples::gm("Dulcimer"), 74.0)
 }
 
 fn glass_arp(_: &mut Rng) -> Patch {
@@ -10415,7 +10566,7 @@ fn glass_arp(_: &mut Rng) -> Patch {
 
 // -- plucked strings
 
-fn nylon(r: &mut Rng) -> Patch {
+fn nylon_synth(r: &mut Rng) -> Patch {
     Patch {
         ks: r.range(1.8, 2.5),
         ks_tone: 0.45,
@@ -10430,15 +10581,29 @@ fn nylon(r: &mut Rng) -> Patch {
     }
 }
 
-fn lute(r: &mut Rng) -> Patch {
+fn nylon(r: &mut Rng) -> Patch {
+    rec(nylon_synth(r), samples::gm("Nylon String Guitar"), 60.0)
+}
+
+fn lute_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(1.4, 2.0), ks_tone: 0.5, a: 0.001, d: 3.0, s: 1.0, r: 0.3, gain: 0.5, ..PATCH }
 }
 
-fn cittern(r: &mut Rng) -> Patch {
+/// The lute: a nylon-strung guitar's recording, its top softened.
+fn lute(r: &mut Rng) -> Patch {
+    rec_lp(lute_synth(r), samples::gm("Nylon String Guitar"), 60.0, 1.5, 0.0)
+}
+
+fn cittern_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(0.8, 1.2), ks_tone: 0.8, a: 0.001, d: 2.0, s: 1.0, r: 0.25, gain: 0.45, ..PATCH }
 }
 
-fn banjo(r: &mut Rng) -> Patch {
+/// The cittern: wire strings (the SoundFont's "Mandolin", a steel-strung guitar's).
+fn cittern(r: &mut Rng) -> Patch {
+    rec(cittern_synth(r), samples::gm("Mandolin"), 60.0)
+}
+
+fn banjo_synth(r: &mut Rng) -> Patch {
     Patch {
         filter: false,
         ks: r.range(0.5, 0.8),
@@ -10453,8 +10618,16 @@ fn banjo(r: &mut Rng) -> Patch {
     }
 }
 
-fn pizzicato(r: &mut Rng) -> Patch {
+fn banjo(r: &mut Rng) -> Patch {
+    rec(banjo_synth(r), samples::gm("Banjo"), 62.0)
+}
+
+fn pizzicato_synth(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(0.3, 0.45), ks_tone: 0.5, a: 0.001, d: 1.0, s: 1.0, r: 0.1, gain: 0.5, ..PATCH }
+}
+
+fn pizzicato(r: &mut Rng) -> Patch {
+    rec(pizzicato_synth(r), multi_or("violins", "pizz", "Strings Pizzicato"), 70.0)
 }
 
 // -- leads
@@ -10505,7 +10678,7 @@ fn lead_sync(r: &mut Rng) -> Patch {
     }
 }
 
-fn sax(r: &mut Rng) -> Patch {
+fn sax_synth(r: &mut Rng) -> Patch {
     Patch {
         fm: r.range(1.8, 2.6),
         ratio: 1.0,
@@ -10525,7 +10698,11 @@ fn sax(r: &mut Rng) -> Patch {
     }
 }
 
-fn flute(r: &mut Rng) -> Patch {
+fn sax(r: &mut Rng) -> Patch {
+    rec(sax_synth(r), multi_or("tenor_sax", "auto", "Tenor Sax"), 70.0)
+}
+
+fn flute_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
@@ -10544,7 +10721,11 @@ fn flute(r: &mut Rng) -> Patch {
     }
 }
 
-fn ocarina(_: &mut Rng) -> Patch {
+fn flute(r: &mut Rng) -> Patch {
+    rec(flute_synth(r), flute_rec(), 74.0)
+}
+
+fn ocarina_synth(_: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
@@ -10563,7 +10744,11 @@ fn ocarina(_: &mut Rng) -> Patch {
     }
 }
 
-fn recorder(r: &mut Rng) -> Patch {
+fn ocarina(r: &mut Rng) -> Patch {
+    rec(ocarina_synth(r), ocarina_rec(), 67.0)
+}
+
+fn recorder_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
@@ -10584,7 +10769,11 @@ fn recorder(r: &mut Rng) -> Patch {
     }
 }
 
-fn whistle(r: &mut Rng) -> Patch {
+fn recorder(r: &mut Rng) -> Patch {
+    rec(recorder_synth(r), multi_or("recorder", "auto", "Recorder"), 74.0)
+}
+
+fn whistle_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Sine,
         noise: r.range(0.04, 0.06),
@@ -10602,7 +10791,12 @@ fn whistle(r: &mut Rng) -> Patch {
     }
 }
 
-fn muted_trumpet(r: &mut Rng) -> Patch {
+/// The tin whistle (and polka's piccolo): the piccolo's recording.
+fn whistle(r: &mut Rng) -> Patch {
+    rec(whistle_synth(r), samples::gm("Piccolo"), 79.0)
+}
+
+fn muted_trumpet_synth(r: &mut Rng) -> Patch {
     Patch {
         vowel: 2,
         cutoff: r.range(1800.0, 2400.0),
@@ -10621,7 +10815,11 @@ fn muted_trumpet(r: &mut Rng) -> Patch {
     }
 }
 
-fn trumpet(r: &mut Rng) -> Patch {
+fn muted_trumpet(r: &mut Rng) -> Patch {
+    rec(muted_trumpet_synth(r), samples::gm("Harmon Mute Trumpet"), 72.0)
+}
+
+fn trumpet_synth(r: &mut Rng) -> Patch {
     Patch {
         unison: 2,
         detune: 4.0,
@@ -10643,7 +10841,11 @@ fn trumpet(r: &mut Rng) -> Patch {
     }
 }
 
-fn clarinet(r: &mut Rng) -> Patch {
+fn trumpet(r: &mut Rng) -> Patch {
+    rec(trumpet_synth(r), trumpet_rec(), 72.0)
+}
+
+fn clarinet_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.5,
@@ -10665,7 +10867,11 @@ fn clarinet(r: &mut Rng) -> Patch {
     }
 }
 
-fn trombone(r: &mut Rng) -> Patch {
+fn clarinet(r: &mut Rng) -> Patch {
+    rec(clarinet_synth(r), clarinet_rec(), 70.0)
+}
+
+fn trombone_synth(r: &mut Rng) -> Patch {
     Patch {
         cutoff: r.range(700.0, 1000.0),
         res: 0.15,
@@ -10684,7 +10890,11 @@ fn trombone(r: &mut Rng) -> Patch {
     }
 }
 
-fn fiddle(r: &mut Rng) -> Patch {
+fn trombone(r: &mut Rng) -> Patch {
+    rec(trombone_synth(r), multi_or("trombone", "auto", "Trombone"), 60.0)
+}
+
+fn fiddle_synth(r: &mut Rng) -> Patch {
     Patch {
         unison: 2,
         detune: 4.0,
@@ -10704,6 +10914,133 @@ fn fiddle(r: &mut Rng) -> Patch {
         ..PATCH
     }
 }
+
+/// The fiddle: a solo violin's recording, bowed through every note (its
+/// spiccato would chop a reel's eighths).
+fn fiddle(r: &mut Rng) -> Patch {
+    rec(fiddle_synth(r), multi_or("violin", "sus", "Fiddle"), 74.0)
+}
+
+// the acoustic instruments recorded: each synthesiser patch made first (the
+// same draws), then played by a recording when the samples are in (`rec`;
+// a CC0 multi where there is one, the SoundFont's otherwise)
+
+/// `rec`, with `keep` given back to the recorded patch what of `p` it plays
+/// through (a Rhodes amplifier's tremolo, a Farfisa's vibrato, a felt
+/// piano's low-pass), levelled after.
+fn rec_keep(p: Patch, id: Option<u16>, note: f32, keep: impl FnOnce(Patch) -> Patch) -> Patch {
+    match id {
+        Some(_) => levelled(&p, note, keep(rec(p, id, note))),
+        None => p,
+    }
+}
+
+/// `rec_keep`'s usual: a low-pass at `k` times the patch's cutoff, no
+/// resonance unless `res`, no envelope (a felt hammer, a darker horn).
+fn rec_lp(p: Patch, id: Option<u16>, note: f32, k: f32, res: f32) -> Patch {
+    rec_keep(p, id, note, |q| Patch { filter: true, cutoff: k * p.cutoff, keytrack: p.keytrack, res, env_amt: 0.0, ..q })
+}
+
+/// `rec_kit`, each kind (a recording and a trim, dB) as loud as its kind's
+/// gain has it, `db` more: the kit's recordings measured against the
+/// synthesiser's hits over whole pieces.
+fn rec_kit_db(v: Vec<DrumPatch>, ids: &[(Option<u16>, f32)]) -> Vec<DrumPatch> {
+    v.into_iter()
+        .enumerate()
+        .map(|(k, d)| match ids.get(k) {
+            Some(&(Some(samp), db)) => DrumPatch { samp, gain: d.gain * 10f32.powf(db / 20.0), ..DRUM },
+            _ => d,
+        })
+        .collect()
+}
+
+/// A CC0 multi's articulation when it is installed, else the SoundFont's
+/// preset `gm`.
+fn multi_or(instrument: &str, articulation: &str, gm: &str) -> Option<u16> {
+    samples::multi(instrument, articulation).or_else(|| samples::gm(gm))
+}
+
+/// A Rhodes: the tine piano's recording, its amplifier's tremolo kept.
+fn rec_rhodes(p: Patch, note: f32) -> Patch {
+    rec_keep(p, samples::gm("Tine Electric Piano"), note, |q| Patch { trem: p.trem, vib_rate: p.vib_rate, ..q })
+}
+
+/// A felt piano: the mellow grand's recording through the patch's low-pass
+/// (a little higher, the felt's).
+fn rec_felt(p: Patch, note: f32) -> Patch {
+    rec_lp(p, samples::gm("Mellow Grand Piano"), note, 2.0, 0.0)
+}
+
+/// A vibraphone, its motor's tremolo kept.
+fn rec_vibes(p: Patch, note: f32) -> Patch {
+    let id = multi_or("vibraphone", "soft", "Vibraphone");
+    rec_keep(p, id, note, |q| Patch { trem: p.trem, vib_rate: p.vib_rate, ..q })
+}
+
+/// The flute: staccato on short notes, else held with vibrato.
+fn flute_rec() -> Option<u16> {
+    multi_or("flute", "auto", "Flute")
+}
+
+/// The ocarina: held with vibrato (it has no staccato).
+fn ocarina_rec() -> Option<u16> {
+    samples::multi("ocarina", "vib").or_else(|| samples::multi("ocarina", "sus")).or_else(|| samples::gm("Ocarina"))
+}
+
+fn trumpet_rec() -> Option<u16> {
+    multi_or("trumpet", "auto", "Trumpet")
+}
+
+fn clarinet_rec() -> Option<u16> {
+    multi_or("clarinet", "auto", "Clarinet")
+}
+
+fn tuba_rec() -> Option<u16> {
+    multi_or("tuba", "auto", "Tuba")
+}
+
+/// A chromatic harmonica, `art` ("vib" or "sus"; it has no staccato).
+fn harmonica_rec(art: &str) -> Option<u16> {
+    let other = if art == "vib" { "sus" } else { "vib" };
+    samples::multi("harmonica", art).or_else(|| samples::multi("harmonica", other)).or_else(|| samples::gm("Harmonica"))
+}
+
+/// A shaker: 0 a short shake, 1 a long one (the CC0 large shaker's, the
+/// small one's having a handling rumble under it; else the kit's maracas
+/// and shaker).
+fn shaker_rec(kind: usize) -> Option<u16> {
+    match kind {
+        0 => samples::multi("shaker", "large_hit").or_else(|| samples::drum("Standard", 70)),
+        _ => samples::multi("shaker", "large").or_else(|| samples::drum("Standard", 82)),
+    }
+}
+
+/// A tambourine: 0 a hit, 1 a longer shake (the CC0 one's, else the kit's).
+fn tambourine_rec(kind: usize) -> Option<u16> {
+    let arts: &[&str] = if kind == 0 { &["hit", "short", "tap", "shake"] } else { &["shake", "long", "roll", "hit"] };
+    arts.iter().find_map(|a| samples::multi("tambourine", a)).or_else(|| samples::drum("Standard", 54))
+}
+
+/// A frame drum's (or the bodhrán's) stroke: 0 the open bass, 1 a higher
+/// one, 2 the rim; the CC0 frame drum's, else a taiko's and the toms'.
+fn frame_drum(kind: usize) -> Option<u16> {
+    let arts: &[&str] = match kind {
+        0 => &["bass", "low", "open", "hit"],
+        1 => &["high", "muted", "tone", "slap", "hit"],
+        _ => &["rim", "tap", "edge", "high", "hit"],
+    };
+    arts.iter().find_map(|a| samples::multi("frame_drum", a)).or_else(|| match kind {
+        0 => samples::gm("Taiko Drum"),
+        1 => samples::drum("Standard", 45),
+        _ => samples::drum("Standard", 48),
+    })
+}
+
+/// Finger cymbals (else the kit's open triangle).
+fn finger_cymbals() -> Option<u16> {
+    samples::multi("finger_cymbals", "hit").or_else(|| samples::drum("Standard", 81))
+}
+
 
 /// A musette accordion: three reeds a little apart (the synthesiser's).
 fn accordion_synth(r: &mut Rng) -> Patch {
@@ -10732,11 +11069,15 @@ fn accordion(r: &mut Rng) -> Patch {
     rec(accordion_synth(r), samples::gm("Italian Accordion"), 74.0)
 }
 
-fn bandoneon(r: &mut Rng) -> Patch {
+fn bandoneon_synth(r: &mut Rng) -> Patch {
     Patch { unison: 2, detune: r.range(2.0, 5.0), semi2: 0.0, cutoff: r.range(2000.0, 2600.0), ..accordion_synth(r) }
 }
 
-fn harmonica(r: &mut Rng) -> Patch {
+fn bandoneon(r: &mut Rng) -> Patch {
+    rec(bandoneon_synth(r), samples::gm("Bandoneon"), 74.0)
+}
+
+fn harmonica_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.3,
@@ -10755,8 +11096,17 @@ fn harmonica(r: &mut Rng) -> Patch {
     }
 }
 
+fn harmonica(r: &mut Rng) -> Patch {
+    rec(harmonica_synth(r), harmonica_rec("vib"), 74.0)
+}
+
+fn horn_synth(r: &mut Rng) -> Patch {
+    Patch { cutoff: r.range(900.0, 1300.0), unison: 2, detune: 5.0, width: 0.2, ..trombone_synth(r) }
+}
+
+/// The tenor horn: a French horn's recording.
 fn horn(r: &mut Rng) -> Patch {
-    Patch { cutoff: r.range(900.0, 1300.0), unison: 2, detune: 5.0, width: 0.2, ..trombone(r) }
+    rec(horn_synth(r), multi_or("horn", "auto", "French Horns"), 62.0)
 }
 
 fn hoover(r: &mut Rng) -> Patch {
@@ -10978,7 +11328,7 @@ fn bass_moog(r: &mut Rng) -> Patch {
     }
 }
 
-fn bass_upright(r: &mut Rng) -> Patch {
+fn bass_upright_synth(r: &mut Rng) -> Patch {
     Patch {
         ks: r.range(1.0, 1.6),
         ks_tone: 0.35,
@@ -10991,6 +11341,10 @@ fn bass_upright(r: &mut Rng) -> Patch {
         gain: 0.8,
         ..PATCH
     }
+}
+
+fn bass_upright(r: &mut Rng) -> Patch {
+    rec(bass_upright_synth(r), multi_or("contrabass", "pizz", "Acoustic Bass"), 40.0)
 }
 
 fn bass_synth(r: &mut Rng) -> Patch {
@@ -11045,7 +11399,7 @@ fn bass_acid_saw(r: &mut Rng) -> Patch {
     rec_through(bass_acid(r, Wave::Saw), samples::gm("Saw Lead"), 40.0)
 }
 
-fn tuba(r: &mut Rng) -> Patch {
+fn tuba_synth(r: &mut Rng) -> Patch {
     Patch {
         wave2: Wave::Sine,
         mix2: 0.7,
@@ -11063,7 +11417,11 @@ fn tuba(r: &mut Rng) -> Patch {
     }
 }
 
-fn bass_accordion(r: &mut Rng) -> Patch {
+fn tuba(r: &mut Rng) -> Patch {
+    rec(tuba_synth(r), tuba_rec(), 40.0)
+}
+
+fn bass_accordion_synth(r: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Square,
         pw: 0.4,
@@ -11076,6 +11434,12 @@ fn bass_accordion(r: &mut Rng) -> Patch {
         gain: 0.6,
         ..PATCH
     }
+}
+
+/// The bass accordion's reeds: a bandoneon's recording (the lowest the
+/// free reeds go).
+fn bass_accordion(r: &mut Rng) -> Patch {
+    rec(bass_accordion_synth(r), samples::gm("Bandoneon"), 40.0)
 }
 
 fn drone_hum(r: &mut Rng) -> Patch {
@@ -11096,11 +11460,15 @@ fn drone_hum(r: &mut Rng) -> Patch {
     }
 }
 
-fn drone_choir(r: &mut Rng) -> Patch {
-    Patch { vowel: r.pick(&[4, 5]), unison: 2, detune: 8.0, width: 0.6, a: 3.0, r: 5.0, keytrack: 0.0, ..pad_choir(r) }
+fn drone_choir_synth(r: &mut Rng) -> Patch {
+    Patch { vowel: r.pick(&[4, 5]), unison: 2, detune: 8.0, width: 0.6, a: 3.0, r: 5.0, keytrack: 0.0, ..pad_choir_synth(r) }
 }
 
-fn drone_reed(r: &mut Rng) -> Patch {
+fn drone_choir(r: &mut Rng) -> Patch {
+    rec(drone_choir_synth(r), samples::gm("Voice Oohs"), 38.0)
+}
+
+fn drone_reed_synth(r: &mut Rng) -> Patch {
     // a hurdy-gurdy or a bagpipe's drone: a buzzing, nasal saw
     Patch {
         unison: 2,
@@ -11116,6 +11484,11 @@ fn drone_reed(r: &mut Rng) -> Patch {
         gain: 0.4,
         ..PATCH
     }
+}
+
+/// The reed drone: a reed organ's recording.
+fn drone_reed(r: &mut Rng) -> Patch {
+    rec(drone_reed_synth(r), samples::gm("Reed Organ"), 45.0)
 }
 
 // -- drum kits (each channel's kinds in their order)
@@ -11136,10 +11509,14 @@ fn kit_kick_deep(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_kick_linn(r: &mut Rng) -> Vec<DrumPatch> {
     vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)]
 }
-fn kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
+fn kit_kick_soft_synth(r: &mut Rng) -> Vec<DrumPatch> {
     vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)]
 }
-fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
+
+fn kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_kick_soft_synth(r), &[(samples::drum("Room", 35), 0.0)])
+}
+fn kit_kick_frame_synth(r: &mut Rng) -> Vec<DrumPatch> {
     vec![DrumPatch {
         tone: 1.0,
         f0: r.range(100.0, 120.0),
@@ -11153,6 +11530,10 @@ fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.9,
         ..DRUM
     }]
+}
+
+fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_kick_frame_synth(r), &[(frame_drum(0), 0.0)])
 }
 
 /// Snares and claps: [the main hit, a softer one for rolls and ghosts].
@@ -11190,7 +11571,7 @@ fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
     };
     vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }]
 }
-fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
+fn kit_brush_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         tone: 0.15,
         f0: 220.0,
@@ -11207,7 +11588,11 @@ fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
     };
     vec![c, DrumPatch { ndec: 0.12, gain: 0.6, ..c }]
 }
-fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
+
+fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_brush_synth(r), &[(samples::drum("Brush", 39), 0.0), (samples::drum("Brush", 38), 0.0)])
+}
+fn kit_hand_clap_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         noise: 1.0,
         nmode: 1,
@@ -11221,6 +11606,10 @@ fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
     vec![c, DrumPatch { claps: 0, gain: 0.5, ..c }]
 }
 
+fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_hand_clap_synth(r), &[(samples::multi("claps", "solo"), 0.0), (samples::multi("claps", "solo"), 0.0)])
+}
+
 /// Hats: [closed, open].
 fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
     hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8)
@@ -11228,7 +11617,7 @@ fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_hats_909(r: &mut Rng) -> Vec<DrumPatch> {
     hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8)
 }
-fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
+fn kit_shaker_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         noise: 1.0,
         nmode: 1,
@@ -11241,7 +11630,11 @@ fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
     };
     vec![c, DrumPatch { ndec: 0.2, ..c }]
 }
-fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
+
+fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_shaker_synth(r), &[(shaker_rec(0), 0.0), (shaker_rec(1), 0.0)])
+}
+fn kit_tambourine_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         noise: 1.0,
         nmode: 2,
@@ -11256,7 +11649,11 @@ fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
     };
     vec![c, DrumPatch { ndec: 0.35, ..c }]
 }
-fn kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
+
+fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_tambourine_synth(r), &[(tambourine_rec(0), 0.0), (tambourine_rec(1), 0.0)])
+}
+fn kit_ride_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         tone: 0.12,
         f0: 480.0,
@@ -11274,8 +11671,12 @@ fn kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
     vec![DrumPatch { ndec: 0.25, ..c }, c]
 }
 
+fn kit_ride(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_ride_synth(r), &[(samples::drum("Standard", 51), 0.0), (samples::drum("Standard", 51), 0.0)])
+}
+
 /// Percussion: [rim (or a click), tom low, mid, high, shaker].
-fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
+fn kit_perc_hand_synth(r: &mut Rng) -> Vec<DrumPatch> {
     // clave, congas and a bongo, a shaker
     let conga = |f: f32| DrumPatch {
         tone: 1.0,
@@ -11292,7 +11693,13 @@ fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
     };
     let clave = DrumPatch { tone: 0.9, f0: 2500.0, f1: 2500.0, tdec: 0.05, gain: 0.6, ..DRUM };
     let base = r.range(260.0, 320.0);
-    vec![clave, conga(base), conga(base * 1.3), conga(base * 1.8), kit_shaker(r)[0]]
+    vec![clave, conga(base), conga(base * 1.3), conga(base * 1.8), kit_shaker_synth(r)[0]]
+}
+
+fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
+    // a clave, the low and the open high conga, the low bongo, a shaker
+    let std = |k: u8| samples::drum("Standard", k);
+    rec_kit_db(kit_perc_hand_synth(r), &[(std(75), 0.0), (std(64), 0.0), (std(63), 0.0), (std(61), 0.0), (shaker_rec(0), 0.0)])
 }
 fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
     // a cowbell, electronic toms, a woodblock
@@ -11339,7 +11746,7 @@ fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
     let base = r.range(90.0, 120.0);
     vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood]
 }
-fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
+fn kit_spoons_synth(r: &mut Rng) -> Vec<DrumPatch> {
     // spoons (two clicks), a frame drum's rim, finger cymbals
     let spoons = DrumPatch {
         noise: 1.0,
@@ -11365,7 +11772,13 @@ fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.7,
         ..DRUM
     };
-    vec![spoons, tom(140.0), tom(190.0), ding, kit_shaker(r)[0]]
+    vec![spoons, tom(140.0), tom(190.0), ding, kit_shaker_synth(r)[0]]
+}
+
+/// The spoons (castanets' recording), the frame drum's strokes, finger
+/// cymbals, a shaker.
+fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit_db(kit_spoons_synth(r), &[(samples::drum("Standard", 85), 0.0), (frame_drum(1), 0.0), (frame_drum(2), 0.0), (finger_cymbals(), 0.0), (shaker_rec(0), 0.0)])
 }
 
 // -- the genres' palettes (each role's tuned original comes on top)
@@ -11493,9 +11906,16 @@ const P_POLKA_OTHER: &[(&str, Make)] = &[
     ("glockenspiel", glockenspiel),
     ("piccolo", whistle),
 ];
-const K_POLKA_KICK: &[(&str, MakeKit)] = &[("deep bass drum", kit_kick_deep)];
+const K_POLKA_KICK: &[(&str, MakeKit)] = &[("deep bass drum", polka_kit_bass_drum)];
 const K_POLKA_SNARE: &[(&str, MakeKit)] = &[("brushes", kit_brush), ("hand claps", kit_hand_clap)];
 const K_POLKA_HAT: &[(&str, MakeKit)] = &[("tambourine", kit_tambourine), ("ride", kit_ride)];
+
+/// Polka's deep bass drum: the deep kick's (the same draws), recorded, a
+/// concert bass drum.
+fn polka_kit_bass_drum(r: &mut Rng) -> Vec<DrumPatch> {
+    let v = vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)];
+    rec_kit_db(v, &[(samples::gm("Concert Bass Drum"), 0.0)])
+}
 
 fn band_ambient(r: &mut Rng, s: &Synth) -> Band {
     let mut b = Band::default();
@@ -11680,9 +12100,17 @@ fn sounds(g: usize, r: &mut Rng, s: &mut Synth) {
     }
 }
 
+/// `percs` recorded: the side stick, the low floor tom, the low and the
+/// high-mid toms, a shaker (ambient's and lo-fi's).
+fn rec_percs(v: Vec<DrumPatch>) -> Vec<DrumPatch> {
+    let std = |k: u8| samples::drum("Standard", k);
+    rec_kit_db(v, &[(std(37), 0.0), (std(41), 0.0), (std(45), 0.0), (std(48), 0.0), (shaker_rec(0), 0.0)])
+}
+
 fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
     let ch = &mut s.ch;
-    ch[CH_PAD].patch = Patch {
+    // the pad: recorded, the string pad's (strings, slow to swell)
+    let pad = Patch {
         wave: if r.chance(0.65) { Wave::Saw } else { Wave::Tri },
         unison: 3,
         detune: r.range(6.0, 12.0),
@@ -11702,7 +12130,9 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.16,
         ..PATCH
     };
-    ch[CH_DRONE].patch = Patch {
+    ch[CH_PAD].patch = rec(pad, samples::gm("Warm Pad"), 60.0);
+    // the drone: recorded, a double bass bowed, through the hum's low-pass
+    let drone = Patch {
         wave: Wave::Sine,
         wave2: Wave::Saw,
         mix2: r.range(0.08, 0.18),
@@ -11717,7 +12147,8 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.5,
         ..PATCH
     };
-    ch[CH_BELL].patch = Patch {
+    ch[CH_DRONE].patch = rec_through(drone, samples::gm("Contrabass"), 38.0);
+    let bell = Patch {
         filter: false,
         fm: r.range(1.5, 3.0),
         ratio: r.pick(&[3.5, 1.41, 2.0, 4.0, 2.76]),
@@ -11729,7 +12160,17 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.3,
         ..PATCH
     };
-    ch[CH_ARP].patch = Patch {
+    // the bell recorded as its partials go: the even ones a vibraphone's, the
+    // odd ones a celesta's, the glassy ones a glockenspiel's, the
+    // inharmonic ones tubular bells'
+    let id = match bell.ratio {
+        x if x == 2.0 => multi_or("vibraphone", "soft", "Vibraphone"),
+        x if x == 4.0 => samples::gm("Celesta"),
+        x if x == 3.5 => multi_or("glockenspiel", "hit", "Glockenspiel"),
+        _ => samples::gm("Tubular Bells"),
+    };
+    ch[CH_BELL].patch = rec(bell, id, 76.0);
+    let arp = Patch {
         wave: Wave::Tri,
         wave2: Wave::Sine,
         mix2: 0.6,
@@ -11744,8 +12185,10 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.25,
         ..PATCH
     };
-    // the pulse bass: soft round plucks
-    ch[CH_BASS].patch = Patch {
+    // the glass pluck: a celesta recorded
+    ch[CH_ARP].patch = rec(arp, samples::gm("Celesta"), 72.0);
+    // the pulse bass: soft round plucks (recorded, a fretless bass's)
+    let bass = Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
         mix2: 0.3,
@@ -11760,9 +12203,10 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.7,
         ..PATCH
     };
+    ch[CH_BASS].patch = rec(bass, samples::gm("Fretless Bass"), 40.0);
     ch[CH_BASS].mono = true;
     // the ocarina: a sine and a little triangle, breathy, its vibrato late
-    ch[CH_LEAD].patch = Patch {
+    let lead = Patch {
         wave: Wave::Sine,
         wave2: Wave::Tri,
         mix2: 0.3,
@@ -11778,10 +12222,14 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.35,
         ..PATCH
     };
+    ch[CH_LEAD].patch = rec(lead, ocarina_rec(), 67.0);
     ch[CH_LEAD].mono = false;
     mix(&mut ch[CH_LEAD], 0.3, r.range(-0.3, 0.3), 0.6, 0.3, 0.0);
-    ch[CH_KICK].drums = vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)];
-    ch[CH_HAT].drums = vec![DrumPatch {
+    // the drums recorded: a soft kick (a felt beater's), a shaker, a
+    // side stick and toms
+    let soft = vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)];
+    ch[CH_KICK].drums = rec_kit_db(soft, &[(samples::drum("Room", 35), 0.0)]);
+    let hat = vec![DrumPatch {
         noise: 1.0,
         nmode: 1,
         ncut: r.range(5000.0, 7000.0),
@@ -11791,6 +12239,7 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
         gain: 0.6,
         ..DRUM
     }];
+    ch[CH_HAT].drums = rec_kit_db(hat, &[(shaker_rec(0), 0.0)]);
     mix(&mut ch[CH_PAD], 0.5, 0.0, 0.6, 0.0, 0.0);
     mix(&mut ch[CH_DRONE], 0.5, 0.0, 0.3, 0.0, 0.0);
     mix(&mut ch[CH_BELL], 0.4, r.range(-0.3, 0.3), 0.8, 0.4, 0.0);
@@ -11798,7 +12247,7 @@ fn sounds_ambient(r: &mut Rng, s: &mut Synth) {
     mix(&mut ch[CH_BASS], 0.5, 0.0, 0.1, 0.0, 0.0);
     mix(&mut ch[CH_KICK], 0.45, 0.0, 0.2, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.25, 0.3, 0.4, 0.2, 0.0);
-    ch[CH_PERC].drums = percs(r);
+    ch[CH_PERC].drums = rec_percs(percs(r));
     mix(&mut ch[CH_PERC], 0.18, -0.3, 0.5, 0.25, 0.0);
     ch[CH_PERC].lp_base = 4000.0;
     ch[CH_PERC].lp = 4000.0;
@@ -12105,7 +12554,9 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
 
 fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
     let ch = &mut s.ch;
-    ch[CH_KICK].drums = vec![kick(r, (110.0, 140.0), (48.0, 56.0), (0.35, 0.5), 0.05, 0.8)];
+    // the drums recorded: a kit in a room (the channels' low-passes make it dusty)
+    let boom = vec![kick(r, (110.0, 140.0), (48.0, 56.0), (0.35, 0.5), 0.05, 0.8)];
+    ch[CH_KICK].drums = rec_kit_db(boom, &[(samples::drum("Room", 36), 0.0)]);
     let snare = DrumPatch {
         tone: 0.5,
         f0: 210.0,
@@ -12136,8 +12587,9 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
         gain: 0.7,
         ..DRUM
     };
-    ch[CH_SNARE].drums = vec![snare, rim];
-    ch[CH_HAT].drums = {
+    let std = |k: u8| samples::drum("Standard", k);
+    ch[CH_SNARE].drums = rec_kit_db(vec![snare, rim], &[(std(38), 0.0), (std(37), 0.0)]);
+    let hats = {
         let c = DrumPatch {
             noise: 1.0,
             nmode: 1,
@@ -12149,9 +12601,11 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
         };
         vec![c, DrumPatch { ndec: 0.2, ..c }]
     };
-    ch[CH_PERC].drums = percs(r);
+    ch[CH_HAT].drums = rec_kit_db(hats, &[(std(42), 0.0), (std(46), 0.0)]);
+    ch[CH_PERC].drums = rec_percs(percs(r));
+    // the keys: a Rhodes (recorded, its tremolo kept) or a felt piano
     ch[CH_KEYS].patch = if r.chance(0.7) {
-        Patch {
+        let rhodes = Patch {
             filter: false,
             fm: r.range(1.2, 2.0),
             ratio: 1.0,
@@ -12167,9 +12621,10 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
             vib_rate: r.range(3.0, 5.0),
             gain: 0.3,
             ..PATCH
-        }
+        };
+        rec_rhodes(rhodes, 62.0)
     } else {
-        Patch {
+        let felt = Patch {
             wave: Wave::Tri,
             wave2: Wave::Sine,
             mix2: 0.6,
@@ -12184,9 +12639,11 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
             r: 0.3,
             gain: 0.32,
             ..PATCH
-        }
+        };
+        rec_felt(felt, 62.0)
     };
-    ch[CH_BASS].patch = Patch {
+    // the bass: recorded, an electric bass played with the fingers
+    let bass = Patch {
         wave: Wave::Tri,
         wave2: Wave::Saw,
         mix2: 0.25,
@@ -12204,6 +12661,7 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
         gain: 0.8,
         ..PATCH
     };
+    ch[CH_BASS].patch = rec(bass, samples::gm("Fingered Bass"), 40.0);
     ch[CH_BASS].mono = true;
     let vibes = Patch {
         filter: false,
@@ -12235,6 +12693,8 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
         gain: 0.3,
         ..PATCH
     };
+    // recorded: the vibraphone (its motor's tremolo kept) and the flute
+    let (vibes, flute) = (rec_vibes(vibes, 70.0), rec(flute, flute_rec(), 74.0));
     // the second voice is whichever of vibes and flute the lead is not
     let (lead, second) = if r.chance(0.5) { (vibes, flute) } else { (flute, vibes) };
     ch[CH_LEAD].patch = lead;
@@ -12275,7 +12735,10 @@ fn sounds_lofi(r: &mut Rng, s: &mut Synth) {
 
 fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
     let ch = &mut s.ch;
-    ch[CH_KICK].drums = vec![kick(r, (100.0, 130.0), (52.0, 60.0), (0.25, 0.35), 0.08, 0.4)];
+    // the drums recorded: a kit in a room
+    let std = |k: u8| samples::drum("Standard", k);
+    let thump = vec![kick(r, (100.0, 130.0), (52.0, 60.0), (0.25, 0.35), 0.08, 0.4)];
+    ch[CH_KICK].drums = rec_kit_db(thump, &[(samples::drum("Room", 36), 0.0)]);
     let snare = DrumPatch {
         tone: 0.45,
         f0: 260.0,
@@ -12292,11 +12755,12 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
         gain: 0.8,
         ..DRUM
     };
-    ch[CH_SNARE].drums = vec![snare, DrumPatch { tone: 0.2, ndec: 0.07, gain: 0.6, ..snare }];
-    ch[CH_HAT].drums = hats(r, 8000.0, 0.035, 0.25, 0.2, 0.7);
-    ch[CH_CYM].drums = crash(r);
-    // the tuba: a soft saw with a sine under it, a brassy bloom in the filter
-    ch[CH_BASS].patch = Patch {
+    let snares = vec![snare, DrumPatch { tone: 0.2, ndec: 0.07, gain: 0.6, ..snare }];
+    ch[CH_SNARE].drums = rec_kit_db(snares, &[(std(38), 0.0), (std(38), 0.0)]);
+    ch[CH_HAT].drums = rec_kit_db(hats(r, 8000.0, 0.035, 0.25, 0.2, 0.7), &[(std(42), 0.0), (std(46), 0.0)]);
+    ch[CH_CYM].drums = rec_kit_db(crash(r), &[(std(49), 0.0)]);
+    // the tuba: a soft saw with a sine under it, a brassy bloom in the filter (recorded, a tuba)
+    let tuba = Patch {
         wave: Wave::Saw,
         wave2: Wave::Sine,
         mix2: 0.7,
@@ -12312,9 +12776,10 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
         gain: 0.8,
         ..PATCH
     };
+    ch[CH_BASS].patch = rec(tuba, tuba_rec(), 40.0);
     ch[CH_BASS].mono = true;
-    // the pah: the accordion's chord reeds
-    ch[CH_KEYS].patch = Patch {
+    // the pah: the accordion's chord reeds (recorded, an accordion's, one reed)
+    let pah = Patch {
         wave: Wave::Square,
         pw: 0.42,
         unison: 2,
@@ -12334,9 +12799,11 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
         gain: 0.3,
         ..PATCH
     };
+    ch[CH_KEYS].patch = rec(pah, samples::gm("Accordion"), 62.0);
     // the accordion, musette: three reeds (one in tune, one sharp, one flat),
     // reedy (a narrowish pulse and a saw), sometimes an octave reed above
-    ch[CH_LEAD].patch = Patch {
+    // (recorded, an Italian accordion's musette)
+    let lead = Patch {
         wave: Wave::Square,
         pw: r.range(0.35, 0.45),
         unison: 3,
@@ -12355,11 +12822,13 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
         gain: 0.32,
         ..PATCH
     };
+    ch[CH_LEAD].patch = rec(lead, samples::gm("Italian Accordion"), 74.0);
     ch[CH_LEAD].mono = false;
     // a clarinet (a square: odd harmonics, a breath of noise) or a trumpet
-    // (saws with a brassy filter bloom); graces slide into the note
+    // (saws with a brassy filter bloom); graces slide into the note (each
+    // recorded)
     ch[CH_ARP].patch = if trumpet {
-        Patch {
+        let p = Patch {
             wave: Wave::Saw,
             unison: 2,
             detune: 4.0,
@@ -12378,9 +12847,10 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
             glide: 0.015,
             gain: 0.3,
             ..PATCH
-        }
+        };
+        rec(p, trumpet_rec(), 70.0)
     } else {
-        Patch {
+        let p = Patch {
             wave: Wave::Square,
             pw: 0.5,
             cutoff: r.range(1800.0, 2600.0),
@@ -12398,7 +12868,8 @@ fn sounds_polka(r: &mut Rng, s: &mut Synth, trumpet: bool) {
             glide: 0.015,
             gain: 0.3,
             ..PATCH
-        }
+        };
+        rec(p, clarinet_rec(), 70.0)
     };
     ch[CH_ARP].mono = true;
     mix(&mut ch[CH_KICK], 0.7, 0.0, 0.05, 0.0, 0.0);
@@ -13116,7 +13587,7 @@ fn mariachi_guitarron_round(r: &mut Rng) -> Patch {
 
 fn mariachi_upright(r: &mut Rng) -> Patch {
     // an upright bass as dark as the guitarrón
-    Patch { cutoff: 520.0, keytrack: 1.0, ..bass_upright(r) }
+    Patch { cutoff: 520.0, keytrack: 1.0, ..bass_upright_synth(r) }
 }
 
 fn mariachi_arpa(r: &mut Rng) -> Patch {
@@ -13173,11 +13644,11 @@ fn mariachi_rec_viola(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_rec_fiddle(r: &mut Rng) -> Patch {
-    mariachi_sampled(fiddle(r), samples::gm("Fiddle"), 0.15)
+    mariachi_sampled(fiddle_synth(r), samples::gm("Fiddle"), 0.15)
 }
 
 fn mariachi_rec_strings(r: &mut Rng) -> Patch {
-    mariachi_sampled(pad_strings(r), samples::gm("Strings Slow"), 0.015)
+    mariachi_sampled(pad_strings_synth(r), samples::gm("Strings Slow"), 0.015)
 }
 
 /// The trumpets: staccato on short notes, held with vibrato.
@@ -13192,11 +13663,11 @@ fn mariachi_rec_flugel(r: &mut Rng) -> Patch {
 
 /// Other trumpets: the SoundFont's.
 fn mariachi_rec_trumpets(r: &mut Rng) -> Patch {
-    mariachi_sampled(trumpet(r), samples::gm("Trumpet"), 0.2)
+    mariachi_sampled(trumpet_synth(r), samples::gm("Trumpet"), 0.2)
 }
 
 fn mariachi_rec_muted(r: &mut Rng) -> Patch {
-    mariachi_sampled(muted_trumpet(r), samples::gm("Harmon Mute Trumpet"), 0.39)
+    mariachi_sampled(muted_trumpet_synth(r), samples::gm("Harmon Mute Trumpet"), 0.39)
 }
 
 /// The vihuela: a steel-strung guitar's recording (the brighter of the
@@ -13211,7 +13682,7 @@ fn mariachi_rec_jarana(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_rec_cittern(r: &mut Rng) -> Patch {
-    mariachi_sampled(cittern(r), samples::gm("Steel String Guitar"), 0.084)
+    mariachi_sampled(cittern_synth(r), samples::gm("Steel String Guitar"), 0.084)
 }
 
 /// The guitar, the requinto (and the lute's place): nylon strings.
@@ -13220,7 +13691,7 @@ fn mariachi_rec_guitar(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_rec_nylon(r: &mut Rng) -> Patch {
-    mariachi_sampled(nylon(r), samples::gm("Nylon String Guitar"), 0.117)
+    mariachi_sampled(nylon_synth(r), samples::gm("Nylon String Guitar"), 0.117)
 }
 
 fn mariachi_rec_requinto(r: &mut Rng) -> Patch {
@@ -13228,7 +13699,7 @@ fn mariachi_rec_requinto(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_rec_lute(r: &mut Rng) -> Patch {
-    mariachi_sampled(lute(r), samples::gm("Nylon String Guitar"), 0.12)
+    mariachi_sampled(lute_synth(r), samples::gm("Nylon String Guitar"), 0.12)
 }
 
 /// The guitarrón: an acoustic bass's recording (the octave doubling and
@@ -13252,7 +13723,7 @@ fn mariachi_rec_arpa(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_rec_harp(r: &mut Rng) -> Patch {
-    mariachi_sampled(harp(r), samples::multi("harp", "pluck"), 0.07)
+    mariachi_sampled(harp_synth(r), samples::multi("harp", "pluck"), 0.07)
 }
 
 /// The tarima under the dancers' feet: [a heel stomp, a toe tap].
@@ -13286,7 +13757,10 @@ fn mariachi_kit_tarima(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.5,
         ..stomp
     };
-    vec![stomp, tap]
+    // recorded: a wooden box's (a cajón's) deeper thump for the heel, its
+    // slap for the toe (the tarima is a box under the dancers)
+    let recs = [(samples::multi("cajon", "hit2"), 0.8), (samples::multi("cajon", "hit1"), 0.5)];
+    mariachi_kit_sampled(vec![stomp, tap], &recs)
 }
 
 /// A cajón, played with the heel and the hand: [the low slap, the high one].
@@ -13339,7 +13813,7 @@ fn mariachi_kit_palmas(r: &mut Rng) -> Vec<DrumPatch> {
 /// Hand claps, a few hands: [a clap, a softer one].
 fn mariachi_kit_claps(r: &mut Rng) -> Vec<DrumPatch> {
     let recs = [(samples::multi("claps", "solo"), 0.4), (samples::multi("claps", "solo"), 0.25)];
-    mariachi_kit_sampled(kit_hand_clap(r), &recs)
+    mariachi_kit_sampled(kit_hand_clap_synth(r), &recs)
 }
 
 /// Maracas: [a short shake, a long one].
@@ -13361,7 +13835,7 @@ fn mariachi_kit_maracas(r: &mut Rng) -> Vec<DrumPatch> {
 /// A shaker: [a shake down, a roll].
 fn mariachi_kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
     let recs = [(samples::multi("shaker", "small_down"), 0.55), (samples::multi("shaker", "small_roll"), 0.55)];
-    mariachi_kit_sampled(kit_shaker(r), &recs)
+    mariachi_kit_sampled(kit_shaker_synth(r), &recs)
 }
 
 /// Percussion: [a clave, a cajón low, mid and high, the guiro's scrape].
@@ -13410,7 +13884,7 @@ fn mariachi_kit_congas(r: &mut Rng) -> Vec<DrumPatch> {
         (samples::drum("Standard", 62), 0.7),
         (samples::multi("shaker", "small"), 0.5),
     ];
-    mariachi_kit_sampled(kit_perc_hand(r), &recs)
+    mariachi_kit_sampled(kit_perc_hand_synth(r), &recs)
 }
 
 // the palettes: a mariachi piece's own, by part (recorded where the
