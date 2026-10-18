@@ -4571,7 +4571,7 @@ impl Song {
     /// A ska piece: first-wave (Jamaica, the early sixties: a shuffle at 110
     /// to 130 bpm, a jazz band's horns, the piano and the guitar on the
     /// off-beats, a Hammond) or 2-tone (Britain, the late seventies: nearly
-    /// straight, 140 to 170, a Farfisa or a Vox bubbling, a picked bass, the
+    /// straight, 132 to 158, a Farfisa or a Vox bubbling, a picked bass, the
     /// kick now and then on every beat). An intro (a vamp, a horn riff over
     /// it, or the drums leading in), the head (AB or AABA, eight bars a
     /// strain), a solo or two over its changes, now and then a breakdown,
@@ -4583,7 +4583,7 @@ impl Song {
         let shuffled = self.guest.is_none();
         let r = &mut self.rng;
         let two_tone = r.chance(if minor { 0.7 } else { 0.4 });
-        self.bpm = if two_tone { r.range(140.0, 170.0) } else { r.range(110.0, 130.0) } as f64;
+        self.bpm = if two_tone { r.range(132.0, 158.0) } else { r.range(110.0, 130.0) } as f64;
         self.swing = 0.0;
         self.human = if two_tone { 0.004 } else { 0.007 };
         // the drummer's shuffle (the off-beat eighths late); none under a mix's drummer
@@ -4693,7 +4693,7 @@ impl Song {
             meter: if two_tone { "4/4 2-tone" } else { "4/4 first wave" },
             two_tone,
             shuffle,
-            four: two_tone && self.bpm > 150.0 && r.chance(0.6),
+            four: two_tone && self.bpm > 140.0 && r.chance(0.6),
             open: r.chance(0.4),
             bubble: two_tone || r.chance(0.4),
             intro,
@@ -8493,7 +8493,7 @@ fn band_ska(r: &mut Rng, s: &Synth, two_tone: bool) -> Band {
 /// Vox (2-tone), the piano, an upright or fingered bass (a picked one in
 /// 2-tone), trumpet or alto, trombone or tenor, baritone; a room; the
 /// first wave's record a little dull and crackling, light in the bass, the
-/// chop forward.
+/// chop forward; 2-tone spread wide.
 fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     let ch = &mut s.ch;
     ch[CH_KICK].drums = ska_kit_kick(r);
@@ -8557,6 +8557,23 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     mix(&mut ch[CH_BELL], 0.5, -0.22, 0.22, 0.03, 0.0);
     mix(&mut ch[CH_ARP], 0.36, -0.05, 0.18, 0.0, 0.0);
     if two_tone {
+        // spread wide: the guitar and the organ either side, the horns
+        // apart, the piano and the hats out; each as loud as nearer the middle
+        let power = |p: f32| ((1.0 - p.abs()).powi(2) + 1.0) / 2.0;
+        for (c, pan) in [
+            (CH_KEYS, -0.8),
+            (CH_PAD, 0.8),
+            (CH_LEAD, 0.4),
+            (CH_BELL, -0.7),
+            (CH_ARP, 0.5),
+            (CH_DRONE, 0.55),
+            (CH_HAT, 0.55),
+            (CH_PERC, -0.45),
+            (CH_CYM, -0.45),
+        ] {
+            ch[c].gain *= (power(ch[c].pan) / power(pan)).sqrt();
+            ch[c].pan = pan;
+        }
         s.m.set_lp(20000.0);
         s.fx.crackle = 0.0;
         s.fx.hiss = 0.0;
