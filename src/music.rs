@@ -10527,7 +10527,8 @@ fn lead_saw(r: &mut Rng) -> Patch {
 /// A square lead; recorded, Square Lead (two squares 2 cents apart) through
 /// its filter, glide and vibrato.
 fn lead_square(r: &mut Rng) -> Patch {
-    let p = Patch { wave: Wave::Square, pw: r.range(0.4, 0.5), unison: 2, detune: 6.0, width: 0.3, ..lead_saw_synth(r) };
+    let p =
+        Patch { wave: Wave::Square, pw: r.range(0.4, 0.5), unison: 2, detune: 6.0, width: 0.3, ..lead_saw_synth(r) };
     rec_through(p, samples::gm("Square Lead"), 74.0)
 }
 
@@ -11346,7 +11347,10 @@ fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.9,
         ..DRUM
     };
-    kit_trim(rec_kit(vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }], &[samples::drum("TR-808", 39); 2]), -7.7)
+    kit_trim(
+        rec_kit(vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }], &[samples::drum("TR-808", 39); 2]),
+        -7.7,
+    )
 }
 /// A snap; recorded, the Standard kit's sticks (key 31): no kit has a finger
 /// snap, and of the short bright hits the sticks' is the nearest (as bright,
