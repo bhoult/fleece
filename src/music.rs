@@ -14173,6 +14173,25 @@ mod tests {
     #[test]
     #[ignore = "renders 16 minutes of audio: cargo test --bin fleece music -- --ignored"]
     fn genre_switching_stress() {
+        switching_stress();
+    }
+
+    /// The same with the recorded instruments (when tools/get-samples.sh has
+    /// fetched them), which it installs for the whole test process: run it
+    /// alone (`--ignored genre_switching_stress_sampled`).
+    #[test]
+    #[ignore = "installs the recorded instruments process-wide: run it alone"]
+    fn genre_switching_stress_sampled() {
+        if !crate::samples::load_now() {
+            eprintln!("no recorded instruments installed: skipped");
+            return;
+        }
+        switching_stress();
+    }
+
+    /// 16 minutes of a genre switch every 3-7 s, among every id: no sample
+    /// out of range, no silence of half a second.
+    fn switching_stress() {
         for base in 1..=4u64 {
             let mut m = Mix::new(base as usize, base);
             let mut r = Rng::new(base * 77);

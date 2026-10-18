@@ -112,6 +112,9 @@ pub struct App {
     opt_note: Option<(String, Instant)>,
     /// the recorded instruments loading for the music (a note when they are in)
     samples_wait: bool,
+    /// music asked for while they load (its id, and when): begun once they
+    /// are in, so its first piece plays them
+    music_pending: Option<(usize, Instant)>,
     speed: usize,
     paused: bool,
     blur: bool,
@@ -255,6 +258,7 @@ impl App {
             opt: None,
             opt_note: None,
             samples_wait: false,
+            music_pending: None,
             speed: 4,
             paused: false,
             blur: true,
@@ -394,6 +398,15 @@ impl App {
             }
         }
         self.optimize_tick();
+        // music waiting for the recorded instruments: begun once they are in,
+        // or after 3 s with the synthesiser (and they from the next piece)
+        if let Some((g, t0)) = self.music_pending
+            && (crate::samples::settled() || t0.elapsed() > std::time::Duration::from_secs(3))
+        {
+            self.music_pending = None;
+            self.samples_wait = !crate::samples::settled();
+            self.begin_music(g);
+        }
         // the recorded instruments in: a note (pieces from the next one play them)
         if self.samples_wait && crate::samples::settled() {
             self.samples_wait = false;
@@ -646,12 +659,12 @@ impl App {
                 Item::button("A", format!("AUDIO {}", ["OFF", "LOW", "MEDIUM", "HIGH"][f.audio as usize % 4]), 'a', f.audio > 0),
                 Item::button(
                     "N",
-                    match &self.music {
-                        Some(p) => format!("MUSIC {}", crate::music::GENRES[crate::music::parts(p.genre()).0]),
+                    match self.music_id() {
+                        Some(id) => format!("MUSIC {}", crate::music::GENRES[crate::music::parts(id).0]),
                         None => "MUSIC".into(),
                     },
                     'n',
-                    self.music.is_some(),
+                    self.music_id().is_some(),
                 ),
                 Item::button(
                     "J",
@@ -956,20 +969,36 @@ impl App {
     /// The secondary steps aside when the primary becomes it.
     fn cycle_music(&mut self) {
         use crate::music::{GENRES, mix_id, parts};
-        let next = match &self.music {
+        let next = match self.music_id() {
             None => Some(0),
-            Some(p) => Some(parts(p.genre()).0 + 1).filter(|&g| g < GENRES.len()),
+            Some(id) => Some(parts(id).0 + 1).filter(|&g| g < GENRES.len()),
         };
         let Some(g) = next else {
             self.music = None;
+            self.music_pending = None;
             return;
         };
         if self.music_with == Some(g) {
             self.music_with = None;
         }
-        match &self.music {
-            Some(p) => p.set_genre(mix_id(g, self.music_with)),
-            None => self.start_music(mix_id(g, self.music_with)),
+        if self.music_id().is_some() {
+            self.set_music_id(mix_id(g, self.music_with));
+        } else {
+            self.start_music(mix_id(g, self.music_with));
+        }
+    }
+
+    /// The music playing, or waiting for the recorded instruments (an id).
+    fn music_id(&self) -> Option<usize> {
+        self.music.as_ref().map(|p| p.genre()).or(self.music_pending.map(|(id, _)| id))
+    }
+
+    /// Switches the music playing, or the music waiting to begin.
+    fn set_music_id(&mut self, id: usize) {
+        if let Some(p) = &self.music {
+            p.set_genre(id);
+        } else if let Some((g, _)) = &mut self.music_pending {
+            *g = id;
         }
     }
 
@@ -978,14 +1007,14 @@ impl App {
     /// none. A change starts a new piece (crossfading at the next bar).
     fn cycle_secondary(&mut self) {
         use crate::music::{GENRES, mix_id, parts};
-        let primary = self.music.as_ref().map(|p| parts(p.genre()).0);
+        let primary = self.music_id().map(|id| parts(id).0);
         let mut g = self.music_with.map_or(0, |g| g + 1);
         if Some(g) == primary {
             g += 1;
         }
         self.music_with = (g < GENRES.len()).then_some(g);
-        if let (Some(p), Some(primary)) = (&self.music, primary) {
-            p.set_genre(mix_id(primary, self.music_with));
+        if let Some(primary) = primary {
+            self.set_music_id(mix_id(primary, self.music_with));
         }
     }
 
@@ -998,12 +1027,20 @@ impl App {
             eprintln!("fleece: no music without a window (a video takes --music as its soundtrack)");
             return;
         }
-        // the recorded instruments, on a thread of their own: pieces begun
-        // once they are in play them
+        // the recorded instruments, on a thread of their own (a quarter of a
+        // second or so): the music waits for them, so its first piece plays them
         if !crate::samples::ready() {
             crate::samples::load_in_background();
-            self.samples_wait = true;
+            if !crate::samples::settled() {
+                self.music_pending = Some((genre, Instant::now()));
+                return;
+            }
         }
+        self.begin_music(genre);
+    }
+
+    /// Starts the music player on `genre` (an id), and turns audio on.
+    fn begin_music(&mut self, genre: usize) {
         match crate::music::Player::start(genre, self.music_seed) {
             Ok(p) => {
                 self.music = Some(p);
