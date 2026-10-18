@@ -334,9 +334,7 @@ fn parse() -> Opts {
             }
             "--music" => {
                 i += 1;
-                let want = args.get(i).map(|s| s.to_uppercase()).unwrap_or_default();
-                let found = music::GENRES.iter().position(|g| g.replace(' ', "") == want.replace([' ', '-', '_'], "")).or_else(|| want.parse().ok().filter(|&n: &usize| n < music::GENRES.len()));
-                match found {
+                match args.get(i).and_then(|g| music::find(g)) {
                     Some(g) => {
                         o.music = Some(g);
                         if o.fx.audio == 0 {
