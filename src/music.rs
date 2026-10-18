@@ -1663,6 +1663,9 @@ struct Channel {
     swell_s: f32,
     swell_rate: f32,
     swell_ph: f32,
+    /// the stereo width of what it plays (1 as it is, 0 mono): a wide
+    /// recording narrowed before the pan
+    width: f32,
     buf: [[f32; 2]; BLOCK],
     /// the round robin the next sampled note (0) or hit (by its kind)
     /// takes: each cycles in order (a shaker's strokes down and up)
@@ -1695,6 +1698,7 @@ impl Channel {
             swell_s: 0.0,
             swell_rate: 0.5,
             swell_ph: 0.0,
+            width: 1.0,
             buf: [[0.0; 2]; BLOCK],
             rr: [0; 8],
         }
@@ -1772,6 +1776,12 @@ impl Channel {
             for o in self.buf[..n].iter_mut() {
                 o[0] = self.filt[0].lp(o[0]);
                 o[1] = self.filt[1].lp(o[1]);
+            }
+        }
+        if self.width != 1.0 {
+            for o in self.buf[..n].iter_mut() {
+                let (m, d) = (0.5 * (o[0] + o[1]), 0.5 * (o[0] - o[1]) * self.width);
+                *o = [m + d, m - d];
             }
         }
         self.gain_s += (self.gain - self.gain_s) * 0.05;
@@ -13051,6 +13061,138 @@ fn mariachi_arpa(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(2.5, 3.5), ks_tone: 0.7, a: 0.001, d: 4.0, s: 1.0, r: 0.8, gain: 0.5, ..PATCH }
 }
 
+// the recorded instruments: each role's synthesiser patch made first (so a
+// seed's music is the same with the samples or without), then a recording
+// in its place when the samples are in, at a gain that sounds it as loud
+
+/// `p` played by the recording `id` (when there is one) at `gain`: its
+/// attack (a slow one still holds the strums' chords), its release (a pluck
+/// still stops where it did), its glide and bend kept; its vibrato, filter
+/// and drive not (the recordings have their own).
+fn mariachi_sampled(p: Patch, id: Option<u16>, gain: f32) -> Patch {
+    match id {
+        Some(samp) => Patch { samp, gain, a: p.a, r: p.r, glide: p.glide, bend: p.bend, ..SAMPLED },
+        None => p,
+    }
+}
+
+/// A kit's kinds played by recordings (an id and a gain for each; None,
+/// or a kind past the list, keeps its synthesised hit).
+fn mariachi_kit_sampled(kit: Vec<DrumPatch>, recs: &[(Option<u16>, f32)]) -> Vec<DrumPatch> {
+    let rec = |k: usize, d: DrumPatch| match recs.get(k) {
+        Some(&(Some(samp), gain)) => DrumPatch { samp, gain, ..DRUM },
+        _ => d,
+    };
+    kit.into_iter().enumerate().map(|(k, d)| rec(k, d)).collect()
+}
+
+/// The first violins: a section (spiccato on short notes, held with vibrato).
+fn mariachi_rec_violins(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_violins(r), samples::multi("violins", "auto"), 0.29)
+}
+
+/// The section held through every note (sweeter, slower to speak).
+fn mariachi_rec_violins_sweet(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_violins_sweet(r), samples::multi("violins", "sus"), 0.31)
+}
+
+/// The second violins: fewer players (a solo violin's recording).
+fn mariachi_rec_violins2(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_violins(r), samples::multi("violin", "auto"), 0.6)
+}
+
+fn mariachi_rec_violins_long(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_violins_long(r), samples::multi("violin", "sus"), 0.14)
+}
+
+/// The violas: the SoundFont's violin, another player.
+fn mariachi_rec_viola(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_viola(r), samples::gm("Violin"), 0.17)
+}
+
+fn mariachi_rec_fiddle(r: &mut Rng) -> Patch {
+    mariachi_sampled(fiddle(r), samples::gm("Fiddle"), 0.15)
+}
+
+fn mariachi_rec_strings(r: &mut Rng) -> Patch {
+    mariachi_sampled(pad_strings(r), samples::gm("Strings Slow"), 0.015)
+}
+
+/// The trumpets: staccato on short notes, held with vibrato.
+fn mariachi_rec_trumpet(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_trumpet(r), samples::multi("trumpet", "auto"), 0.35)
+}
+
+/// The flugelhorns' place: a trumpet held straight, no vibrato.
+fn mariachi_rec_flugel(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_flugel(r), samples::multi("trumpet", "sus"), 0.42)
+}
+
+/// Other trumpets: the SoundFont's.
+fn mariachi_rec_trumpets(r: &mut Rng) -> Patch {
+    mariachi_sampled(trumpet(r), samples::gm("Trumpet"), 0.2)
+}
+
+fn mariachi_rec_muted(r: &mut Rng) -> Patch {
+    mariachi_sampled(muted_trumpet(r), samples::gm("Harmon Mute Trumpet"), 0.39)
+}
+
+/// The vihuela: a steel-strung guitar's recording (the brighter of the
+/// two) in its high voicing.
+fn mariachi_rec_vihuela(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_vihuela(r), samples::gm("Steel String Guitar"), 0.14)
+}
+
+/// The jarana: nylon strings.
+fn mariachi_rec_jarana(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_jarana(r), samples::gm("Nylon String Guitar"), 0.084)
+}
+
+fn mariachi_rec_cittern(r: &mut Rng) -> Patch {
+    mariachi_sampled(cittern(r), samples::gm("Steel String Guitar"), 0.084)
+}
+
+/// The guitar, the requinto (and the lute's place): nylon strings.
+fn mariachi_rec_guitar(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_guitar(r), samples::gm("Nylon String Guitar"), 0.11)
+}
+
+fn mariachi_rec_nylon(r: &mut Rng) -> Patch {
+    mariachi_sampled(nylon(r), samples::gm("Nylon String Guitar"), 0.117)
+}
+
+fn mariachi_rec_requinto(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_requinto(r), samples::gm("Nylon String Guitar"), 0.1)
+}
+
+fn mariachi_rec_lute(r: &mut Rng) -> Patch {
+    mariachi_sampled(lute(r), samples::gm("Nylon String Guitar"), 0.12)
+}
+
+/// The guitarrón: an acoustic bass's recording (the octave doubling and
+/// the snap of the playing are the composition's).
+fn mariachi_rec_guitarron(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_guitarron(r), samples::gm("Acoustic Bass"), 0.072)
+}
+
+fn mariachi_rec_guitarron_round(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_guitarron_round(r), samples::gm("Acoustic Bass"), 0.074)
+}
+
+fn mariachi_rec_upright(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_upright(r), samples::gm("Acoustic Bass"), 0.05)
+}
+
+/// The harp: the SoundFont's (even from note to note, its plucks clear);
+/// or a concert harp's recording.
+fn mariachi_rec_arpa(r: &mut Rng) -> Patch {
+    mariachi_sampled(mariachi_arpa(r), samples::gm("Harp"), 0.18)
+}
+
+fn mariachi_rec_harp(r: &mut Rng) -> Patch {
+    mariachi_sampled(harp(r), samples::multi("harp", "pluck"), 0.07)
+}
+
 /// The tarima under the dancers' feet: [a heel stomp, a toe tap].
 fn mariachi_kit_tarima(r: &mut Rng) -> Vec<DrumPatch> {
     let stomp = DrumPatch {
@@ -13101,7 +13243,19 @@ fn mariachi_kit_cajon(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.8,
         ..DRUM
     };
-    vec![low, DrumPatch { tone: 0.4, f0: 300.0, f1: 260.0, tdec: 0.05, noise: 0.8, ncut: 3000.0, ndec: 0.05, gain: 0.5, ..low }]
+    let high = DrumPatch {
+        tone: 0.4,
+        f0: 300.0,
+        f1: 260.0,
+        tdec: 0.05,
+        noise: 0.8,
+        ncut: 3000.0,
+        ndec: 0.05,
+        gain: 0.5,
+        ..low
+    };
+    let recs = [(samples::multi("cajon", "hit3"), 0.8), (samples::multi("cajon", "hit1"), 0.5)];
+    mariachi_kit_sampled(vec![low, high], &recs)
 }
 
 /// Palmas, many hands: [a clap, a softer one].
@@ -13116,7 +13270,14 @@ fn mariachi_kit_palmas(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.8,
         ..DRUM
     };
-    vec![c, DrumPatch { claps: 2, ndec: 0.05, gain: 0.5, ..c }]
+    let recs = [(samples::multi("claps", "group"), 0.4), (samples::multi("claps", "group"), 0.25)];
+    mariachi_kit_sampled(vec![c, DrumPatch { claps: 2, ndec: 0.05, gain: 0.5, ..c }], &recs)
+}
+
+/// Hand claps, a few hands: [a clap, a softer one].
+fn mariachi_kit_claps(r: &mut Rng) -> Vec<DrumPatch> {
+    let recs = [(samples::multi("claps", "solo"), 0.4), (samples::multi("claps", "solo"), 0.25)];
+    mariachi_kit_sampled(kit_hand_clap(r), &recs)
 }
 
 /// Maracas: [a short shake, a long one].
@@ -13131,7 +13292,14 @@ fn mariachi_kit_maracas(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.55,
         ..DRUM
     };
-    vec![c, DrumPatch { ndec: 0.16, natt: 0.03, ..c }]
+    let recs = [(samples::multi("shaker", "small"), 0.55), (samples::multi("shaker", "large"), 0.55)];
+    mariachi_kit_sampled(vec![c, DrumPatch { ndec: 0.16, natt: 0.03, ..c }], &recs)
+}
+
+/// A shaker: [a shake down, a roll].
+fn mariachi_kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
+    let recs = [(samples::multi("shaker", "small_down"), 0.55), (samples::multi("shaker", "small_roll"), 0.55)];
+    mariachi_kit_sampled(kit_shaker(r), &recs)
 }
 
 /// Percussion: [a clave, a cajón low, mid and high, the guiro's scrape].
@@ -13161,77 +13329,98 @@ fn mariachi_kit_guiro(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.5,
         ..DRUM
     };
-    vec![clave, cajon(110.0), cajon(160.0), cajon(240.0), guiro]
+    let recs = [
+        (samples::drum("Standard", 75), 0.55),
+        (samples::multi("cajon", "hit3"), 0.7),
+        (samples::multi("cajon", "hit2"), 0.7),
+        (samples::multi("cajon", "hit1"), 0.7),
+        (samples::multi("guiro", "short"), 0.5),
+    ];
+    mariachi_kit_sampled(vec![clave, cajon(110.0), cajon(160.0), cajon(240.0), guiro], &recs)
 }
 
-// the palettes: a mariachi piece's own, by part
+/// Percussion: [a clave, congas low, mid and high, a shaker].
+fn mariachi_kit_congas(r: &mut Rng) -> Vec<DrumPatch> {
+    let recs = [
+        (samples::drum("Standard", 75), 0.55),
+        (samples::drum("Standard", 64), 0.7),
+        (samples::drum("Standard", 63), 0.7),
+        (samples::drum("Standard", 62), 0.7),
+        (samples::multi("shaker", "small"), 0.5),
+    ];
+    mariachi_kit_sampled(kit_perc_hand(r), &recs)
+}
+
+// the palettes: a mariachi piece's own, by part (recorded where the
+// samples have the instrument or a near one; the flute and the salterio
+// synthesised)
 const P_MARIACHI_VIOLIN: &[(&str, Make)] = &[
-    ("violin section", mariachi_violins),
-    ("sweet violins", mariachi_violins_sweet),
-    ("fiddle", fiddle),
+    ("violin section", mariachi_rec_violins),
+    ("sweet violins", mariachi_rec_violins_sweet),
+    ("fiddle", mariachi_rec_fiddle),
     ("flute", flute),
 ];
 const P_MARIACHI_VIOLIN2: &[(&str, Make)] = &[
-    ("violin section", mariachi_violins),
-    ("sweet violins", mariachi_violins_sweet),
-    ("violas", mariachi_viola),
-    ("string ensemble", pad_strings),
+    ("violin section", mariachi_rec_violins2),
+    ("sweet violins", mariachi_rec_violins_sweet),
+    ("violas", mariachi_rec_viola),
+    ("string ensemble", mariachi_rec_strings),
 ];
 const P_MARIACHI_TRUMPET: &[(&str, Make)] = &[
-    ("mariachi trumpets", mariachi_trumpet),
-    ("flugelhorns", mariachi_flugel),
-    ("trumpets", trumpet),
-    ("muted trumpets", muted_trumpet),
+    ("mariachi trumpets", mariachi_rec_trumpet),
+    ("flugelhorns", mariachi_rec_flugel),
+    ("trumpets", mariachi_rec_trumpets),
+    ("muted trumpets", mariachi_rec_muted),
 ];
 const P_MARIACHI_VIHUELA: &[(&str, Make)] =
-    &[("vihuela", mariachi_vihuela), ("jarana", mariachi_jarana), ("cittern", cittern)];
+    &[("vihuela", mariachi_rec_vihuela), ("jarana", mariachi_rec_jarana), ("cittern", mariachi_rec_cittern)];
 const P_MARIACHI_GUITAR: &[(&str, Make)] = &[
-    ("Spanish guitar", mariachi_guitar),
-    ("nylon guitar", nylon),
-    ("requinto", mariachi_requinto),
-    ("lute", lute),
+    ("Spanish guitar", mariachi_rec_guitar),
+    ("nylon guitar", mariachi_rec_nylon),
+    ("requinto", mariachi_rec_requinto),
+    ("lute", mariachi_rec_lute),
 ];
 const P_MARIACHI_BASS: &[(&str, Make)] = &[
-    ("guitarrón", mariachi_guitarron),
-    ("round guitarrón", mariachi_guitarron_round),
-    ("upright bass", mariachi_upright),
+    ("guitarrón", mariachi_rec_guitarron),
+    ("round guitarrón", mariachi_rec_guitarron_round),
+    ("upright bass", mariachi_rec_upright),
 ];
 const P_MARIACHI_HARP: &[(&str, Make)] = &[
-    ("arpa", mariachi_arpa),
-    ("harp", harp),
+    ("arpa", mariachi_rec_arpa),
+    ("harp", mariachi_rec_harp),
     ("salterio", psaltery),
-    ("requinto", mariachi_requinto),
+    ("requinto", mariachi_rec_requinto),
 ];
 // lent to another genre's parts, in a mix
 const P_MARIACHI_LEAD: &[(&str, Make)] = &[
-    ("violin section", mariachi_violins),
-    ("mariachi trumpet", mariachi_trumpet),
-    ("sweet violins", mariachi_violins_sweet),
-    ("flugelhorn", mariachi_flugel),
+    ("violin section", mariachi_rec_violins),
+    ("mariachi trumpet", mariachi_rec_trumpet),
+    ("sweet violins", mariachi_rec_violins_sweet),
+    ("flugelhorn", mariachi_rec_flugel),
 ];
 const P_MARIACHI_SECOND: &[(&str, Make)] = &[
-    ("arpa", mariachi_arpa),
-    ("mariachi trumpet", mariachi_trumpet),
+    ("arpa", mariachi_rec_arpa),
+    ("mariachi trumpet", mariachi_rec_trumpet),
     ("salterio", psaltery),
-    ("requinto", mariachi_requinto),
+    ("requinto", mariachi_rec_requinto),
 ];
 const P_MARIACHI_STRUM: &[(&str, Make)] = &[
-    ("vihuela", mariachi_vihuela),
-    ("jarana", mariachi_jarana),
-    ("Spanish guitar", mariachi_guitar),
-    ("requinto", mariachi_requinto),
+    ("vihuela", mariachi_rec_vihuela),
+    ("jarana", mariachi_rec_jarana),
+    ("Spanish guitar", mariachi_rec_guitar),
+    ("requinto", mariachi_rec_requinto),
 ];
 const P_MARIACHI_SUSTAIN: &[(&str, Make)] = &[
-    ("violins, held", mariachi_violins_long),
-    ("sweet violins", mariachi_violins_sweet),
-    ("violas", mariachi_viola),
-    ("string ensemble", pad_strings),
+    ("violins, held", mariachi_rec_violins_long),
+    ("sweet violins", mariachi_rec_violins_sweet),
+    ("violas", mariachi_rec_viola),
+    ("string ensemble", mariachi_rec_strings),
 ];
 const K_MARIACHI_KICK: &[(&str, MakeKit)] = &[("tarima", mariachi_kit_tarima), ("cajón", mariachi_kit_cajon)];
-const K_MARIACHI_SNARE: &[(&str, MakeKit)] = &[("palmas", mariachi_kit_palmas), ("hand claps", kit_hand_clap)];
-const K_MARIACHI_HAT: &[(&str, MakeKit)] = &[("maracas", mariachi_kit_maracas), ("shaker", kit_shaker)];
+const K_MARIACHI_SNARE: &[(&str, MakeKit)] = &[("palmas", mariachi_kit_palmas), ("hand claps", mariachi_kit_claps)];
+const K_MARIACHI_HAT: &[(&str, MakeKit)] = &[("maracas", mariachi_kit_maracas), ("shaker", mariachi_kit_shaker)];
 const K_MARIACHI_PERC: &[(&str, MakeKit)] =
-    &[("guiro, clave, cajón", mariachi_kit_guiro), ("clave, congas", kit_perc_hand)];
+    &[("guiro, clave, cajón", mariachi_kit_guiro), ("clave, congas", mariachi_kit_congas)];
 
 fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
     let mut b = Band::default();
@@ -13256,20 +13445,21 @@ fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
 /// band stands: the first violins to one side, the trumpets to the other,
 /// the second violins between the trumpets and the middle; the vihuela and
 /// guitar a little either side, the guitarrón in the middle, loud (the
-/// records' low end), the harp by the violins.
+/// records' low end), the harp by the violins. Each a recording when the
+/// samples are in (the tarima's synthesised).
 fn sounds_mariachi(r: &mut Rng, s: &mut Synth) {
     let ch = &mut s.ch;
-    ch[CH_LEAD].patch = mariachi_violins(r);
+    ch[CH_LEAD].patch = mariachi_rec_violins(r);
     ch[CH_LEAD].mono = true;
-    ch[CH_DRONE].patch = mariachi_violins(r);
+    ch[CH_DRONE].patch = mariachi_rec_violins2(r);
     ch[CH_DRONE].mono = false;
-    ch[CH_ARP].patch = mariachi_trumpet(r);
+    ch[CH_ARP].patch = mariachi_rec_trumpet(r);
     ch[CH_ARP].mono = false;
-    ch[CH_KEYS].patch = mariachi_vihuela(r);
-    ch[CH_PAD].patch = mariachi_guitar(r);
-    ch[CH_BASS].patch = mariachi_guitarron(r);
+    ch[CH_KEYS].patch = mariachi_rec_vihuela(r);
+    ch[CH_PAD].patch = mariachi_rec_guitar(r);
+    ch[CH_BASS].patch = mariachi_rec_guitarron(r);
     ch[CH_BASS].mono = false;
-    ch[CH_BELL].patch = mariachi_arpa(r);
+    ch[CH_BELL].patch = mariachi_rec_arpa(r);
     ch[CH_KICK].drums = mariachi_kit_tarima(r);
     ch[CH_SNARE].drums = mariachi_kit_palmas(r);
     ch[CH_HAT].drums = mariachi_kit_maracas(r);
@@ -13285,6 +13475,11 @@ fn sounds_mariachi(r: &mut Rng, s: &mut Synth) {
     mix(&mut ch[CH_SNARE], 0.35, 0.1, 0.2, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.3, 0.3, 0.1, 0.0, 0.0);
     mix(&mut ch[CH_PERC], 0.35, -0.3, 0.12, 0.0, 0.0);
+    // the recorded violins and trumpets (a hall's stereo) narrowed to
+    // where they stand
+    for (c, w) in [(CH_LEAD, 0.2), (CH_DRONE, 0.4), (CH_ARP, 0.5)] {
+        ch[c].width = if ch[c].patch.samp != 0 { w } else { 1.0 };
+    }
     s.rev.fb = r.range(0.78, 0.83);
     s.rev.damp = 0.45;
     s.rev_wet = 0.2;
