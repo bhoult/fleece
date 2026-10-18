@@ -20,6 +20,7 @@ mod png;
 mod render;
 mod rng;
 mod sample;
+mod samples;
 mod sdl;
 mod show;
 mod simd;
@@ -44,6 +45,7 @@ enum Mode {
     TasteFit,
     AudioCheck,
     MusicWav,
+    SamplesList,
 }
 
 pub struct Opts {
@@ -102,6 +104,10 @@ pub struct Opts {
     pub musicwav: Vec<String>,
     /// generated music (a music::mix_id: a genre, or a primary and a secondary): played in the window, the soundtrack of a video
     pub music: Option<usize>,
+    /// --samples DIR: the recorded instruments' directory (else ~/.local/share/fleece/samples)
+    samples: Option<String>,
+    /// --no-samples: the music all synthesiser
+    no_samples: bool,
 }
 
 /// Electric Sheep's frame sizes: the standard flock and the HD (gold) one.
@@ -128,6 +134,9 @@ fn usage() -> ! {
     eprintln!("       fleece --audiocheck [FILE.wav | -] [--seconds S]   audio levels of a WAV (-: stdin), or live from");
     eprintln!("              what the speakers play for S seconds (10)");
     eprintln!("       fleece --musicwav GENRE SECONDS OUT.wav [--seed N]   generated music to a WAV");
+    eprintln!("       --samples DIR: recorded instruments for the music (~/.local/share/fleece/samples by default;");
+    eprintln!("              tools/get-samples.sh fetches them); --no-samples: all synthesiser");
+    eprintln!("       fleece --samples-list   the samples directory's SoundFont presets and what loads");
     std::process::exit(2)
 }
 
@@ -168,6 +177,8 @@ fn parse() -> Opts {
         optimize: true,
         musicwav: Vec::new(),
         music: None,
+        samples: None,
+        no_samples: false,
     };
     let mut seconds: Option<f64> = None;
     // the render size: Electric Sheep's unless a size or scale says otherwise
@@ -243,6 +254,12 @@ fn parse() -> Opts {
                 i += 1;
                 o.out = args.get(i).cloned().unwrap_or_else(|| usage());
             }
+            "--samples" => {
+                i += 1;
+                o.samples = Some(args.get(i).cloned().unwrap_or_else(|| usage()));
+            }
+            "--no-samples" => o.no_samples = true,
+            "--samples-list" => o.mode = Mode::SamplesList,
             "--fullscreen" => o.fullscreen = true,
             "--fresh" => o.fresh = true,
             "--load" => {
@@ -1077,6 +1094,7 @@ fn main() {
         std::process::exit(1);
     }
     let o = parse();
+    samples::configure(o.samples.clone(), o.no_samples);
     match o.mode {
         Mode::Shot => shot(&o),
         Mode::VarCheck => varcheck(&o),
@@ -1088,5 +1106,6 @@ fn main() {
         Mode::TasteFit => tastefit(&o),
         Mode::AudioCheck => audio::check(&o.out, o.frames),
         Mode::MusicWav => music::cli(&o.musicwav, o.seed as u64),
+        Mode::SamplesList => samples::list_cli(),
     }
 }

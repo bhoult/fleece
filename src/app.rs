@@ -110,6 +110,8 @@ pub struct App {
     /// Z: the optimizer at work, and what it last reported (and when)
     opt: Option<Optimize>,
     opt_note: Option<(String, Instant)>,
+    /// the recorded instruments loading for the music (a note when they are in)
+    samples_wait: bool,
     speed: usize,
     paused: bool,
     blur: bool,
@@ -252,6 +254,7 @@ impl App {
             budget: 0.85,
             opt: None,
             opt_note: None,
+            samples_wait: false,
             speed: 4,
             paused: false,
             blur: true,
@@ -391,6 +394,13 @@ impl App {
             }
         }
         self.optimize_tick();
+        // the recorded instruments in: a note (pieces from the next one play them)
+        if self.samples_wait && crate::samples::settled() {
+            self.samples_wait = false;
+            if crate::samples::ready() {
+                self.opt_note = Some(("SAMPLES LOADED (FROM THE NEXT PIECE)".into(), Instant::now()));
+            }
+        }
         if let Some(s) = st {
             let k = 0.1;
             let secs = s.secs.max(1e-4);
@@ -988,6 +998,12 @@ impl App {
             eprintln!("fleece: no music without a window (a video takes --music as its soundtrack)");
             return;
         }
+        // the recorded instruments, on a thread of their own: pieces begun
+        // once they are in play them
+        if !crate::samples::ready() {
+            crate::samples::load_in_background();
+            self.samples_wait = true;
+        }
         match crate::music::Player::start(genre, self.music_seed) {
             Ok(p) => {
                 self.music = Some(p);
@@ -1401,6 +1417,8 @@ pub fn video(o: &Opts) {
         let path = format!("{dir}/music-{}.wav", std::process::id());
         let secs = frames as f64 / o.fps + 1.0;
         eprintln!("fleece: making {:.0} s of {} music", secs, crate::music::name(g).to_lowercase());
+        // the recorded instruments first: a seed's music the same every time
+        crate::samples::load_now();
         if let Err(e) = crate::music::render_wav(g, o.seed as u64, secs, &path) {
             eprintln!("fleece: music: {e}");
             std::process::exit(1)
