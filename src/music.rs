@@ -4597,23 +4597,24 @@ impl Song {
         let (am, aa) = ska_tune(r, &a, mode, SK_LO, SK_HI, true);
         let (bm, ba) = ska_tune(r, &b, mode, SK_LO + 2, SK_HI + 2, false);
         // the form, and as many solo choruses (and a breakdown) as a minute
-        // and a half to two and a half holds; an AABA too long at this tempo
-        // comes back from the bridge, or is AB
-        let bar_s = 240.0 / self.bpm;
+        // and a half to two and a half holds (at the tempo a mix's drummer
+        // will pull it to); an AABA too long comes back from the bridge, or is AB
+        let bpm = self.guest.map_or(self.bpm, |g| self.bpm + 0.6 * (MID_BPM[g] - self.bpm));
+        let bar_s = 240.0 / bpm;
         let tag = if r.bit_chance() { 3 } else { 5 };
         let mut aaba = r.chance(0.5);
-        let (mut solos, mut from_bridge, brk);
+        let mut from_bridge = aaba && r.chance(0.5);
+        let (mut solos, brk);
         loop {
             let n = if aaba { 32 } else { 16 };
-            from_bridge = aaba && r.chance(0.5);
             let base = 4 + n + if from_bridge { 16 } else { n } + tag;
             solos = 1;
             while ((base + solos * n) as f64) * bar_s < 95.0 && solos < 3 {
                 solos += 1;
             }
             let t = (base + solos * n) as f64 * bar_s;
-            if t > 160.0 && aaba {
-                aaba = false;
+            if t > 150.0 && aaba {
+                (aaba, from_bridge) = (!from_bridge, !from_bridge);
                 continue;
             }
             brk = t + 8.0 * bar_s <= 150.0 && r.chance(0.5);
@@ -5420,9 +5421,100 @@ impl Song {
         }
     }
 
-    /// Ska's beat in any meter, for a mix.
-    fn ska_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
-        self.lofi_beat(s, b, sec, m)
+    /// Ska's beat in any meter, for a mix: the kick on the one (and the
+    /// middle beat of four; on every beat in some pieces), the backbeat on
+    /// the snare (two and four; in three, the second and third; in two, the
+    /// second), the hats on the beats and on the off-beats (the skank's
+    /// place: open there in some pieces, in the B groups, when it is
+    /// strong), ghosts before the backbeat in the B groups, a tambourine on
+    /// the off-beats when strong; a roll or the toms into each new eight
+    /// bars, a "ba-dap" closing four, a crash at a full section's top. Each
+    /// layer plays where ska's sense of the section says, or where the
+    /// writer's arrangement has its own drums: in an intro the hats and the
+    /// cross-stick (and the roll into what follows), in a break the kick and
+    /// the cross-stick, quietly.
+    fn ska_beat(&mut self, b: &mut Bar, sec: Sec, m: u32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        let beats = bs / beat;
+        let (e, i, h) = (sec.energy, self.sec_bar, self.human);
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        let full = matches!(sec.kind, MAIN | BUILD | OUTRO);
+        // this piece's drummer: four on the floor, the hat open on every off-beat
+        let (four, open) = (self.dr.snare_kind == 1, self.dr.tambourine);
+        let r = &mut self.rng;
+        let last = (beats - 1) * beat;
+        let off = beat / 2;
+        let roll = fill == 2 && (full || sec.kind == INTRO);
+        let toms = roll && full && r.chance(0.35);
+        let cut = |st: u32| roll && st >= last;
+        let kick = full || m & L_KICK != 0;
+        if kick || sec.kind == BREAK {
+            let soft = if kick { 1.0 } else { 0.6 };
+            for k in 0..beats {
+                let on = k == 0 || four || (beats == 4 && k == 2);
+                if on && !(cut(k * beat) && k > 0) {
+                    let v = if k == 0 { 0.9 } else { 0.75 } * (0.85 + 0.15 * e) * soft;
+                    b.hit((k * beat) as f32, r.range(0.0, h), CH_KICK, 0, v);
+                }
+            }
+        }
+        let backs = (1..beats).filter(|&k| beats == 3 || k % 2 == 1);
+        let snare = full || m & L_SNARE != 0;
+        for k in backs {
+            let st = k * beat;
+            if cut(st) {
+                continue;
+            }
+            if snare {
+                b.hit(st as f32, r.range(0.0, h), CH_SNARE, 0, (0.78 + 0.12 * e) * r.range(0.92, 1.0));
+                if vb && r.chance(0.35) {
+                    b.hit((st - 1) as f32, r.range(0.0, h), CH_SNARE, 1, r.range(0.13, 0.22));
+                }
+            } else if matches!(sec.kind, INTRO | BREAK) {
+                b.hit(st as f32, r.range(0.0, h), CH_PERC, RIM, 0.5);
+            }
+        }
+        if sec.kind != BREAK || m & (L_HAT | L_OHAT) != 0 {
+            for k in 0..beats {
+                let at = k * beat;
+                if cut(at) && toms {
+                    break;
+                }
+                b.hit(at as f32, r.range(0.0, h), CH_HAT, HAT_C, if k == 0 { 0.5 } else { 0.42 });
+                let opened = full && (open || (vb && k % 2 == 1) || e >= 0.9);
+                let (kind, v) = if opened { (HAT_O, 0.42) } else { (HAT_C, 0.4) };
+                b.hit((at + off) as f32, r.range(0.0, h), CH_HAT, kind, v * r.range(0.9, 1.0));
+            }
+        }
+        if (full && e >= 0.8) || m & L_PERC != 0 {
+            for k in 0..beats {
+                if !cut(k * beat) {
+                    b.hit((k * beat + off) as f32, r.range(0.0, h), CH_PERC, SHAKER, 0.3 * r.range(0.8, 1.0));
+                }
+            }
+        }
+        if toms {
+            let subs: [u32; 4] = if beat == 6 { [0, 2, 3, 5] } else { [0, 1, 2, 3] };
+            for (st, kind) in subs.iter().zip([TOM_HI, TOM_HI, TOM_MID, TOM_LO]) {
+                b.hit((last + st) as f32, r.range(0.0, h), CH_PERC, kind, 0.8);
+            }
+        } else if roll {
+            // 16ths, then 32nds over the beat's second half, louder as they go
+            let mut st = last as f32;
+            while st < bs as f32 {
+                let x = (st - last as f32) / beat as f32;
+                b.hit(st, r.range(0.0, h), CH_SNARE, 1, 0.25 + 0.55 * x);
+                st += if x >= 0.5 && e >= 0.7 { 0.5 } else { 1.0 };
+            }
+        } else if fill == 1 && full {
+            // ba-dap
+            b.hit((bs - 2) as f32, r.range(0.0, h), CH_SNARE, 1, 0.4);
+            b.hit((bs - 1) as f32, r.range(0.0, h), CH_SNARE, 0, 0.55);
+        }
+        if full && i == 0 {
+            b.hit(0.0, 0.0, CH_CYM, 0, 0.6 + 0.2 * e);
+        }
     }
 
     /// The electric piano's chord, rolled upward.
@@ -5580,7 +5672,7 @@ impl Song {
             Some(SYNTHWAVE) => self.synthwave_beat(b, sec, m),
             Some(LOFI) => self.lofi_beat(s, b, sec, m),
             Some(POLKA) => self.polka_beat(b, sec, m),
-            Some(SKA) => self.ska_beat(s, b, sec, m),
+            Some(SKA) => self.ska_beat(b, sec, m),
             Some(MARIACHI) => self.mariachi_beat(s, b, sec, m),
             Some(_) => self.tavern_drums(b, sec, m),
             None => {}
