@@ -4861,7 +4861,8 @@ impl Song {
     /// groups, hats in eighths with the open one on the off-beats in places,
     /// a tambourine's jingle on them when everyone plays; a roll or the toms
     /// into each new eight bars, a "ba-dap" closing four, a crash at a
-    /// section's top. A drum intro opens with a bar of them alone.
+    /// section's top. A drum intro opens with a bar of them alone, the
+    /// cross-stick on two and a roll over the second half.
     fn ska_drums(&mut self, b: &mut Bar, sec: Sec, m: u32) {
         let x = self.sk.map[self.sec];
         let (i, e) = (self.sec_bar, sec.energy);
@@ -4884,10 +4885,10 @@ impl Song {
                 self.ska_hit(b, 14.0, CH_KICK, 0, 0.5 * quiet);
             }
         }
-        if m & L_SNARE != 0 && !lead_in {
+        if m & L_SNARE != 0 {
             for st in [4.0, 12.0] {
                 if st < from {
-                    if sec.kind == BREAK {
+                    if sec.kind == BREAK || lead_in {
                         self.ska_hit(b, st, CH_PERC, RIM, 0.6);
                     } else {
                         let v = (0.78 + 0.12 * e) * self.rng.range(0.92, 1.0);
@@ -4931,11 +4932,8 @@ impl Song {
                     break;
                 }
                 self.ska_hit(b, on, CH_HAT, HAT_C, if k == 0 { 0.5 } else { 0.42 });
-                if lead_in {
-                    continue;
-                }
                 let open = m & L_OHAT != 0 && sec.kind != BREAK && (self.sk.open || (vb && k % 2 == 1) || e >= 0.9);
-                let (kind, v) = if open { (HAT_O, 0.42) } else { (HAT_C, 0.34) };
+                let (kind, v) = if open { (HAT_O, 0.42) } else { (HAT_C, 0.42) };
                 let v = v * self.rng.range(0.9, 1.0);
                 self.ska_hit(b, on + 2.0, CH_HAT, kind, v);
             }
@@ -5004,8 +5002,12 @@ impl Song {
             } else {
                 r.bit_chance()
             };
-            let d: isize = if up { 1 } else { -1 };
             let (k, j) = (nearest(&ct0, r0) as isize, nearest(&sc0, r0) as isize);
+            // turning where the range ends
+            let d: isize = match (up, k + 2 < ct0.len() as isize, k >= 2) {
+                (true, true, _) | (false, _, false) => 1,
+                _ => -1,
+            };
             match r.weighted(&[0.45, 0.3, 0.25]) {
                 // up or down the chord, or the scale, or root-fifth-third
                 0 => (n[1], n[2]) = (at(&ct0, k + d), at(&ct0, k + 2 * d)),
@@ -5358,7 +5360,7 @@ impl Song {
         let tune = self.tonic_near(SK_TUNE);
         let bass = self.tonic_near(36);
         let pcs = self.pcs(h);
-        let hit = match self.sk.end {
+        let hit: f32 = match self.sk.end {
             SKE_CHARLESTON => 6.0,
             SKE_HOLD => 12.0,
             _ => 0.0,
@@ -5367,17 +5369,18 @@ impl Song {
         let top = in_range(&h.pcs(), 7, 16);
         let lead = top[self.rng.below(top.len())];
         let (p2, p3) = self.ska_voices(lead, h, SKH_TRIAD, tune);
-        let chord = |b: &mut Bar, st: f32, len: f32, vel: f32, v: &[Vec<i32>; 3]| {
-            for (ch, layer, notes) in [(CH_KEYS, L_KEYS, &v[0]), (CH_PAD, L_PAD, &v[1]), (CH_DRONE, L_DRONE, &v[2])] {
+        // the chord: the rhythm section's `len` long, the horns' and the organ's `ring`
+        let chord = |b: &mut Bar, st: f32, len: f32, ring: f32, vel: f32, v: &[Vec<i32>; 3]| {
+            for (ch, layer, notes, l) in [(CH_KEYS, L_KEYS, &v[0], len), (CH_PAD, L_PAD, &v[1], ring), (CH_DRONE, L_DRONE, &v[2], len)] {
                 if m & layer != 0 {
                     for &n in notes {
-                        b.note(st, 0.0, ch, n, vel, len, false);
+                        b.note(st, 0.0, ch, n, vel, l, false);
                     }
                 }
             }
             for (ch, layer, n) in [(CH_LEAD, L_LEAD, lead), (CH_BELL, L_BELL, p2), (CH_ARP, L_ARP, p3)] {
                 if m & layer != 0 {
-                    b.note(st, 0.0, ch, tune + n, vel, len, false);
+                    b.note(st, 0.0, ch, tune + n, vel, ring, false);
                 }
             }
             if m & L_BASS != 0 {
@@ -5392,7 +5395,7 @@ impl Song {
         match self.sk.end {
             SKE_HOLD => {
                 // held over a roll, then cut off
-                chord(b, 0.0, 11.5, 0.8, &v);
+                chord(b, 0.0, 11.5, 11.5, 0.8, &v);
                 b.hit(0.0, 0.0, CH_KICK, 0, 0.8);
                 b.hit(0.0, 0.0, CH_CYM, 0, 0.45);
                 let mut st = 0.0;
@@ -5401,16 +5404,18 @@ impl Song {
                     st += 0.5;
                 }
             }
-            SKE_CHARLESTON => chord(b, 0.0, 1.5, 0.85, &v),
+            SKE_CHARLESTON => chord(b, 0.0, 1.5, 1.5, 0.85, &v),
             _ => {}
         }
-        chord(b, hit, 3.0, 0.95, &v);
+        let ring: f32 = (16.0 - hit - 4.0).max(3.5);
+        chord(b, hit, 4.0, ring, 0.95, &v);
         b.hit(hit, 0.0, CH_KICK, 0, 1.0);
         b.hit(hit, 0.0, CH_SNARE, 0, 0.85);
         b.hit(hit, 0.0, CH_CYM, 0, 0.85);
         if m & L_LEAD != 0 && self.rng.chance(0.4) {
+            let at = hit + ring - 1.5;
             for (j, d) in [1, 3, 6, 10].iter().enumerate() {
-                b.note(hit + 2.5 + 0.3 * j as f32, 0.0, CH_LEAD, tune + lead - d, 0.6 - 0.12 * j as f32, 0.4, true);
+                b.note(at + 0.3 * j as f32, 0.0, CH_LEAD, tune + lead - d, 0.6 - 0.12 * j as f32, 0.4, true);
             }
         }
     }
@@ -6961,9 +6966,10 @@ fn ska_len(len: u16) -> f32 {
 /// A bar of a horn line in `cell`'s rhythm over the bar's chords `c` (its
 /// halves', and the next bar's for a note pushed onto it), from `prev`
 /// going `dir`: the first note and the strong ones (on the beat, long, or
-/// pushed) on chord tones, the others stepping through the chord-scale,
-/// leaping by chord tones or repeating (a riff does); turning at the edges
-/// of [lo, hi], and now and then on a whim.
+/// pushed) on chord tones (the same, the next one along, or the one after),
+/// the others stepping through the chord-scale, leaping by chord tones or
+/// repeating (a riff does); turning at the edges of [lo, hi], and now and
+/// then on a whim.
 #[allow(clippy::too_many_arguments)]
 fn ska_figure(
     r: &mut Rng,
@@ -6985,8 +6991,8 @@ fn ska_figure(
         let strong = st.is_multiple_of(4) || len >= 4 || ska_half(st, len) == 2;
         let d = *dir as isize;
         p = if k == 0 || strong {
-            let want = p + *dir * r.pick(&[0, 1, 2, 2, 3, 4]);
-            ct[nearest(&ct, want)]
+            let i = nearest(&ct, p) as isize;
+            at(&ct, i + d * r.weighted(&[0.25, 0.55, 0.2]) as isize)
         } else {
             match r.weighted(&[0.5, 0.3, 0.2]) {
                 0 => at(&sc, nearest(&sc, p) as isize + d),
@@ -7129,11 +7135,11 @@ fn ska_riff(r: &mut Rng, home: Harm, mode: usize, lo: i32, hi: i32) -> Vec<PNote
     a.into_iter().chain(b.into_iter().map(|n| PNote { step: n.step + 16, ..n })).collect()
 }
 
-/// A clean electric guitar's upstroke, muted after it speaks: a short,
-/// bright string, the filter closing quickly.
+/// A clean electric guitar's upstroke, muted after it speaks (a short
+/// gate, a quick release): a bright string, the filter closing quickly.
 fn ska_guitar_chop(r: &mut Rng) -> Patch {
     Patch {
-        ks: r.range(0.15, 0.3),
+        ks: r.range(0.35, 0.6),
         ks_tone: r.range(0.72, 0.85),
         cutoff: r.range(2800.0, 4000.0),
         res: 0.15,
@@ -7555,23 +7561,36 @@ fn sounds_ska(r: &mut Rng, s: &mut Synth, two_tone: bool) {
     ch[CH_LEAD].patch = if two_tone && r.bit_chance() { ska_alto(r) } else { trumpet(r) };
     ch[CH_BELL].patch = if r.chance(0.6) { trombone(r) } else { sax(r) };
     ch[CH_ARP].patch = ska_bari(r);
+    // each role as loud whichever instrument it drew (the band's others are levelled to these)
+    for (c, note, db) in [
+        (CH_BASS, 40.0, -18.0),
+        (CH_KEYS, 64.0, -26.0),
+        (CH_PAD, 62.0, -21.0),
+        (CH_DRONE, 60.0, -19.0),
+        (CH_LEAD, 72.0, -19.0),
+        (CH_BELL, 62.0, -19.0),
+        (CH_ARP, 50.0, -18.0),
+    ] {
+        let p = ch[c].patch;
+        ch[c].patch = Patch { gain: p.gain * 10f32.powf(db / 20.0) / loudness(&p, note), ..p };
+    }
     for (c, mono) in
         [(CH_BASS, true), (CH_LEAD, true), (CH_BELL, true), (CH_ARP, true), (CH_KEYS, false), (CH_PAD, false), (CH_DRONE, false)]
     {
         ch[c].mono = mono;
     }
-    mix(&mut ch[CH_KICK], 0.7, 0.0, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_KICK], 0.6, 0.0, 0.05, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.45, 0.08, 0.18, 0.0, 0.0);
-    mix(&mut ch[CH_HAT], 0.35, 0.25, 0.06, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], 0.7, 0.25, 0.06, 0.0, 0.0);
     mix(&mut ch[CH_PERC], 0.35, -0.2, 0.12, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.32, -0.3, 0.15, 0.0, 0.0);
     mix(&mut ch[CH_BASS], 0.5, 0.0, 0.04, 0.0, 0.0);
-    mix(&mut ch[CH_KEYS], 0.42, -0.35, 0.15, 0.04, 0.0);
-    mix(&mut ch[CH_PAD], 0.32, 0.35, 0.18, 0.0, 0.0);
-    mix(&mut ch[CH_DRONE], 0.3, 0.15, 0.15, 0.0, 0.0);
-    mix(&mut ch[CH_LEAD], 0.42, 0.12, 0.22, 0.05, 0.0);
-    mix(&mut ch[CH_BELL], 0.36, -0.22, 0.22, 0.03, 0.0);
-    mix(&mut ch[CH_ARP], 0.32, -0.05, 0.18, 0.0, 0.0);
+    mix(&mut ch[CH_KEYS], 0.4, -0.35, 0.15, 0.04, 0.0);
+    mix(&mut ch[CH_PAD], 0.5, 0.35, 0.18, 0.0, 0.0);
+    mix(&mut ch[CH_DRONE], 0.4, 0.15, 0.15, 0.0, 0.0);
+    mix(&mut ch[CH_LEAD], 0.7, 0.12, 0.22, 0.05, 0.0);
+    mix(&mut ch[CH_BELL], 0.5, -0.22, 0.22, 0.03, 0.0);
+    mix(&mut ch[CH_ARP], 0.36, -0.05, 0.18, 0.0, 0.0);
     if two_tone {
         s.m.set_lp(20000.0);
         s.fx.crackle = 0.0;
@@ -10890,6 +10909,138 @@ mod tests {
             let rms = (w.iter().map(|x| x * x).sum::<f32>() / w.len() as f32).sqrt();
             assert!(rms > 1e-3, "a gap at the switch");
             assert!(w.iter().all(|x| x.is_finite() && x.abs() < 0.95));
+        }
+    }
+
+    #[test]
+    fn ska_pools_parse() {
+        let strains = [SKA_MAJ_A, SKA_MAJ_B, SKA_MIX_A, SKA_MIX_B, SKA_MIN_A, SKA_MIN_B];
+        for (pools, bars) in [(&strains[..], 8), (&[SKA_VAMP_MAJ, SKA_VAMP_MIX, SKA_VAMP_MIN][..], 4)] {
+            for plan in pools.iter().flat_map(|p| p.iter()) {
+                assert_eq!(plan.split_whitespace().count(), bars, "{plan}");
+                for tok in plan.split_whitespace().flat_map(|t| t.split('+')) {
+                    assert!(parse_harm(tok).is_some(), "{tok} in {plan}");
+                }
+            }
+        }
+    }
+
+    /// Ska alone, a few seeds, a few pieces each: every event (the horns'
+    /// shuffled off-beats, scoops and falls, the drums' rolls) starts inside
+    /// its bar (the engine fires a bar's events in order), every note a
+    /// sensible pitch.
+    #[test]
+    fn ska_bars_hold_their_events() {
+        for seed in 0..6u64 {
+            let mut e = Engine::new(SKA, seed);
+            let mut ev: Vec<(u64, Ev)> = Vec::new();
+            while e.pos < 400.0 * SR as f64 {
+                let t0 = e.pos;
+                let len = e.song.bar(&mut e.syn, t0, &mut ev);
+                e.pos += len;
+                for &(t, x) in &ev {
+                    let at = t as f64 - t0;
+                    assert!((-1.0..len).contains(&at), "seed {seed}: an event {at} samples into a bar of {len}");
+                    if let Ev::Note { note, .. } = x {
+                        assert!((24.0..=100.0).contains(&note), "seed {seed}: note {note}");
+                    }
+                }
+                ev.clear();
+            }
+            assert!(e.song.log.len() >= 3, "seed {seed}: {} pieces in 400 s", e.song.log.len());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn ska_debug() {
+        let seed: u64 = std::env::var("SKA_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let genre: usize = std::env::var("SKA_GENRE").ok().and_then(|s| find(&s)).unwrap_or(SKA);
+        let e = Engine::new(genre, seed);
+        for (k, (s, x)) in e.song.plan.iter().zip(&e.song.sk.map).enumerate() {
+            println!(
+                "sec {k}: kind {} bars {} mask {:015b} e {:.2} part {} strain {} rep {} out {} dress {} solo {}",
+                s.kind, s.bars, s.mask, s.energy, x.part, x.strain, x.rep, x.out, x.dress, x.solo
+            );
+        }
+        println!("intro {} end {} bubble {} four {} open {} shuffle {:.2}", e.song.sk.intro, e.song.sk.end, e.song.sk.bubble, e.song.sk.four, e.song.sk.open, e.song.sk.shuffle);
+        if std::env::var("SKA_LOUD").is_ok() {
+            let mut r = Rng::new(3);
+            for (pal, note) in [(P_SKA_CHOP, 64.0), (P_SKA_ORGAN, 62.0), (P_SKA_PIANO, 60.0), (P_SKA_BASS, 40.0), (P_SKA_LEAD, 72.0), (P_SKA_HORN, 62.0), (P_SKA_LOW, 50.0)] {
+                for (name, make) in pal {
+                    let p = make(&mut r);
+                    println!("  {name:24} {:6.1} dB at {note}", 20.0 * loudness(&p, note).log10());
+                }
+            }
+        }
+        if std::env::var("SKA_NOTES").is_ok() {
+            let mut e = Engine::new(genre, seed);
+            let mut ev: Vec<(u64, Ev)> = Vec::new();
+            let pc = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+            let nm = |n: f32| format!("{}{}", pc[(n as i32).rem_euclid(12) as usize], n as i32 / 12 - 1);
+            for _ in 0..60 {
+                let t0 = e.pos;
+                let (sec, bar) = (e.song.sec, e.song.sec_bar);
+                let len = e.song.bar(&mut e.syn, t0, &mut ev);
+                let (sec, bar) = if e.song.sec != sec { (e.song.sec, 0) } else { (sec, bar) };
+                let step = len / 16.0;
+                println!("-- sec {sec} bar {bar} chords {:?}", (0..2).map(|h| { let c = e.song.chord(bar * 2 + h); (c.root, c.q) }).collect::<Vec<_>>());
+                for ch in [CH_LEAD, CH_BELL, CH_ARP, CH_BASS, CH_KEYS] {
+                    let v: Vec<String> = ev
+                        .iter()
+                        .filter_map(|&(t, x)| match x {
+                            Ev::Note { ch: c, note, len: l, .. } if c as usize == ch => {
+                                Some(format!("{:.1}:{}/{:.2}", (t as f64 - t0) / step, nm(note), l))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if !v.is_empty() {
+                        println!("   ch{ch:2} {}", v.join(" "));
+                    }
+                }
+                e.pos += len;
+                ev.clear();
+            }
+        }
+        // each channel alone (the leveller off), first piece
+        let names = ["kick", "snare", "hat", "perc", "cym", "bass", "pad", "arp", "lead", "bell", "keys", "drone", "fx"];
+        let secs = 60.0;
+        let mut all = 0.0;
+        for solo in (0..NCH).map(Some).chain([None]) {
+            let mut e = Engine::new(genre, seed);
+            let mut buf = vec![0.0f32; 2 * 1024];
+            let (mut sum, mut n) = (0.0f64, 0usize);
+            while (n as f64) < secs * SR as f64 * 2.0 {
+                for c in 0..NCH {
+                    if solo.is_some_and(|s| s != c) {
+                        e.syn.ch[c].gain = 0.0;
+                    }
+                }
+                e.syn.m.lk = 0.0;
+                e.render(&mut buf);
+                sum += buf.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>();
+                n += buf.len();
+            }
+            let db = 10.0 * (sum / n as f64).max(1e-12).log10();
+            match solo {
+                Some(c) => println!("  {:6} {:6.1} dB", names[c], db),
+                None => all = db,
+            }
+        }
+        println!("  all    {all:6.1} dB");
+        // the quiet after each piece's last hit
+        let mut m = Mix::new(genre, seed);
+        let mut buf = vec![0.0f32; 2 * 4800];
+        let (mut quiet, mut worst) = (0, 0);
+        for k in 0..3000 {
+            m.render(&mut buf);
+            let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+            quiet = if rms > 1e-3 { 0 } else { quiet + 1 };
+            if quiet > worst {
+                worst = quiet;
+                println!("  quiet {quiet} windows at {:.1} s", k as f32 / 10.0);
+            }
         }
     }
 }
