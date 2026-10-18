@@ -6914,6 +6914,7 @@ const SKA_MIN_A: &[&str] = &[
     "i i IV IV i i V7 i",
     "i iv bVII bIII bVI iv V7 i",
     "i bIII iv V7 i bIII iv+V7 i",
+    "i iv v iv i iv v i",
 ];
 const SKA_MIN_B: &[&str] = &[
     "iv iv i i bVI bVI V7 V7",
@@ -10852,6 +10853,8 @@ mod tests {
         assert_ne!(render(3, 5, 2.0), render(3, 6, 2.0));
         assert_eq!(render(POLKA, 5, 2.0), render(POLKA, 5, 2.0));
         assert_eq!(render(TAVERN, 5, 2.0), render(TAVERN, 5, 2.0));
+        assert_eq!(render(SKA, 5, 2.0), render(SKA, 5, 2.0));
+        assert_ne!(render(SKA, 5, 2.0), render(SKA, 6, 2.0));
     }
 
     #[test]
@@ -11040,99 +11043,6 @@ mod tests {
                 ev.clear();
             }
             assert!(e.song.log.len() >= 3, "seed {seed}: {} pieces in 400 s", e.song.log.len());
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn ska_debug() {
-        let seed: u64 = std::env::var("SKA_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
-        let genre: usize = std::env::var("SKA_GENRE").ok().and_then(|s| find(&s)).unwrap_or(SKA);
-        let e = Engine::new(genre, seed);
-        for (k, (s, x)) in e.song.plan.iter().zip(&e.song.sk.map).enumerate() {
-            println!(
-                "sec {k}: kind {} bars {} mask {:015b} e {:.2} part {} strain {} rep {} out {} dress {} solo {}",
-                s.kind, s.bars, s.mask, s.energy, x.part, x.strain, x.rep, x.out, x.dress, x.solo
-            );
-        }
-        println!("intro {} end {} bubble {} four {} open {} shuffle {:.2}", e.song.sk.intro, e.song.sk.end, e.song.sk.bubble, e.song.sk.four, e.song.sk.open, e.song.sk.shuffle);
-        if std::env::var("SKA_LOUD").is_ok() {
-            let mut r = Rng::new(3);
-            for (pal, note) in [(P_SKA_CHOP, 64.0), (P_SKA_ORGAN, 62.0), (P_SKA_PIANO, 60.0), (P_SKA_BASS, 40.0), (P_SKA_LEAD, 72.0), (P_SKA_HORN, 62.0), (P_SKA_LOW, 50.0)] {
-                for (name, make) in pal {
-                    let p = make(&mut r);
-                    println!("  {name:24} {:6.1} dB at {note}", 20.0 * loudness(&p, note).log10());
-                }
-            }
-        }
-        if std::env::var("SKA_NOTES").is_ok() {
-            let mut e = Engine::new(genre, seed);
-            let mut ev: Vec<(u64, Ev)> = Vec::new();
-            let pc = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
-            let nm = |n: f32| format!("{}{}", pc[(n as i32).rem_euclid(12) as usize], n as i32 / 12 - 1);
-            for _ in 0..60 {
-                let t0 = e.pos;
-                let (sec, bar) = (e.song.sec, e.song.sec_bar);
-                let len = e.song.bar(&mut e.syn, t0, &mut ev);
-                let (sec, bar) = if e.song.sec != sec { (e.song.sec, 0) } else { (sec, bar) };
-                let step = len / 16.0;
-                println!("-- sec {sec} bar {bar} chords {:?}", (0..2).map(|h| { let c = e.song.chord(bar * 2 + h); (c.root, c.q) }).collect::<Vec<_>>());
-                for ch in [CH_LEAD, CH_BELL, CH_ARP, CH_BASS, CH_KEYS] {
-                    let v: Vec<String> = ev
-                        .iter()
-                        .filter_map(|&(t, x)| match x {
-                            Ev::Note { ch: c, note, len: l, .. } if c as usize == ch => {
-                                Some(format!("{:.1}:{}/{:.2}", (t as f64 - t0) / step, nm(note), l))
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    if !v.is_empty() {
-                        println!("   ch{ch:2} {}", v.join(" "));
-                    }
-                }
-                e.pos += len;
-                ev.clear();
-            }
-        }
-        // each channel alone (the leveller off), first piece
-        let names = ["kick", "snare", "hat", "perc", "cym", "bass", "pad", "arp", "lead", "bell", "keys", "drone", "fx"];
-        let secs = 60.0;
-        let mut all = 0.0;
-        for solo in (0..NCH).map(Some).chain([None]) {
-            let mut e = Engine::new(genre, seed);
-            let mut buf = vec![0.0f32; 2 * 1024];
-            let (mut sum, mut n) = (0.0f64, 0usize);
-            while (n as f64) < secs * SR as f64 * 2.0 {
-                for c in 0..NCH {
-                    if solo.is_some_and(|s| s != c) {
-                        e.syn.ch[c].gain = 0.0;
-                    }
-                }
-                e.syn.m.lk = 0.0;
-                e.render(&mut buf);
-                sum += buf.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>();
-                n += buf.len();
-            }
-            let db = 10.0 * (sum / n as f64).max(1e-12).log10();
-            match solo {
-                Some(c) => println!("  {:6} {:6.1} dB", names[c], db),
-                None => all = db,
-            }
-        }
-        println!("  all    {all:6.1} dB");
-        // the quiet after each piece's last hit
-        let mut m = Mix::new(genre, seed);
-        let mut buf = vec![0.0f32; 2 * 4800];
-        let (mut quiet, mut worst) = (0, 0);
-        for k in 0..3000 {
-            m.render(&mut buf);
-            let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
-            quiet = if rms > 1e-3 { 0 } else { quiet + 1 };
-            if quiet > worst {
-                worst = quiet;
-                println!("  quiet {quiet} windows at {:.1} s", k as f32 / 10.0);
-            }
         }
     }
 }
