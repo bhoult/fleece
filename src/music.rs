@@ -3550,6 +3550,8 @@ impl Song {
         self.lead_center = r.pick(&[67, 69, 72]);
         sounds_techno(r, s, self.bass_style);
         self.band = band_techno(r, s, self.bass_style == 0);
+        let acid = self.bass_style == 0;
+        rec_trim(&mut self.band, s, |ch, samp| techno_rec_trim(ch, acid, samp));
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
     }
@@ -3779,6 +3781,7 @@ impl Song {
         self.prange = (-2, 9);
         sounds_synthwave(r, s);
         self.band = band_synthwave(r, s);
+        rec_trim(&mut self.band, s, synthwave_rec_trim);
         s.dly.target = (self.step_len() * 3.0) as f32;
         self.draw_progs();
     }
@@ -10035,6 +10038,15 @@ fn rec_kit(v: Vec<DrumPatch>, ids: &[Option<u16>]) -> Vec<DrumPatch> {
         .collect()
 }
 
+/// A kit's recorded hits `db` louder (the synthesiser's left as they are): a
+/// recorded kit brought to its synthesiser's level over whole pieces (`rec_kit`
+/// sets each hit to its kind's gain, but a recording's own level and decay
+/// differ from the synthesiser's hit's).
+fn kit_trim(v: Vec<DrumPatch>, db: f32) -> Vec<DrumPatch> {
+    let g = 10f32.powf(db / 20.0);
+    v.into_iter().map(|d| if d.samp != 0 { DrumPatch { gain: d.gain * g, ..d } } else { d }).collect()
+}
+
 impl Band {
     /// Channel `ch`'s pair: the role's tuned original (sometimes) or a pick
     /// from `pal`, and another pick, both brought to the original's
@@ -11248,9 +11260,15 @@ fn drone_reed(r: &mut Rng) -> Patch {
 
 // -- drum kits (each channel's kinds in their order)
 
+/// Each recorded kit's trim (`kit_trim`) is measured over whole pieces, its
+/// channel alone, against the synthesiser's kit playing the same hits
+/// (EBU R128 loudness, the leveller frozen; techno's and synthwave's pieces,
+/// 80 seeds each, wherever the kit plays; tools of the measurement: see the
+/// commit).
+/// The 808's kick; recorded, the TR-808 kit's (+2.7 dB: techno +3.2, synthwave +2.2).
 fn kit_kick_808(r: &mut Rng) -> Vec<DrumPatch> {
     let v = vec![DrumPatch { drive: 0.2, ..kick(r, (80.0, 100.0), (43.0, 48.0), (1.0, 1.5), 0.0, 0.0) }];
-    rec_kit(v, &[samples::drum("TR-808", 36)])
+    kit_trim(rec_kit(v, &[samples::drum("TR-808", 36)]), 2.7)
 }
 /// The 909 kick (the synthesiser's).
 fn kit_kick_909_synth(r: &mut Rng) -> Vec<DrumPatch> {
@@ -11261,8 +11279,9 @@ fn kit_kick_909_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// that rings longest and lowest, as the 909's does (-20 and -40 dB at
 /// 0.17 and 0.32 s, its peak at 66 Hz; the synthesiser's 0.24 and 0.44 s,
 /// 54 Hz; Standard's 0.06-0.11 and 0.20 s; Room's 0.07-0.10 and 0.24-0.27 s).
+/// +9.1 dB (techno +9.5, synthwave +8.8).
 fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit(kit_kick_909_synth(r), &[samples::drum("Electronic", 35)])
+    kit_trim(rec_kit(kit_kick_909_synth(r), &[samples::drum("Electronic", 35)]), 9.1)
 }
 /// A recorded kick keeping the synthesiser's drive (`rec_kit` turns it off):
 /// for a kick whose distortion is its sound.
@@ -11271,23 +11290,27 @@ fn rec_kick_driven(v: Vec<DrumPatch>, id: Option<u16>) -> Vec<DrumPatch> {
     rec_kit(v, &[id]).into_iter().map(|d| if d.samp != 0 { DrumPatch { drive, ..d } } else { d }).collect()
 }
 /// A distorted kick; recorded, the Power kit's (a big rock kick: of the kicks
-/// the nearest in decay and its 60 Hz peak), through the synthesiser's drive.
+/// the nearest in decay and its 60 Hz peak), through the synthesiser's drive
+/// (+2.8 dB: techno).
 fn kit_kick_dist(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kick_driven(vec![kick(r, (180.0, 230.0), (50.0, 56.0), (0.4, 0.55), 0.3, 3.0)], samples::drum("Power", 36))
+    let v = vec![kick(r, (180.0, 230.0), (50.0, 56.0), (0.4, 0.55), 0.3, 3.0)];
+    kit_trim(rec_kick_driven(v, samples::drum("Power", 36)), 2.8)
 }
 /// A deep kick (techno's, ambient's; polka's bass drum); recorded, the
 /// Orchestra Kit's concert bass drum: of the kits' bass drums the only one as
 /// deep and long (its peak at 46 Hz, ringing past a second; the
-/// synthesiser's 40 Hz; an 808's 52 Hz, gone in 0.4 s).
+/// synthesiser's 40 Hz; an 808's 52 Hz, gone in 0.4 s). +0.4 dB (techno).
 fn kit_kick_deep(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit(vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)], &[samples::drum("Orchestra Kit", 36)])
+    let v = vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)];
+    kit_trim(rec_kit(v, &[samples::drum("Orchestra Kit", 36)]), 0.4)
 }
 /// The LinnDrum's kick; recorded, the Electronic kit's key 36: short and
 /// punchy in the low mids as the synthesiser's is (-40 dB at 0.25 s against
 /// 0.21 s; 57% of its first half second's energy at 100-1000 Hz against 73%;
-/// Standard's kicks 29-38%, Room's 21-23%).
+/// Standard's kicks 29-38%, Room's 21-23%). +6.5 dB (synthwave).
 fn kit_kick_linn(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit(vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)], &[samples::drum("Electronic", 36)])
+    let v = vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)];
+    kit_trim(rec_kit(v, &[samples::drum("Electronic", 36)]), 6.5)
 }
 fn kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
     vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)]
@@ -11309,7 +11332,8 @@ fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 /// Snares and claps: [the main hit, a softer one for rolls and ghosts].
-/// The 808's clap; recorded, the TR-808 kit's (key 39), both.
+/// The 808's clap; recorded, the TR-808 kit's (key 39), both (-7.7 dB:
+/// techno -8.3, synthwave -7.5).
 fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         noise: 1.0,
@@ -11321,18 +11345,20 @@ fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.9,
         ..DRUM
     };
-    rec_kit(vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }], &[samples::drum("TR-808", 39); 2])
+    kit_trim(rec_kit(vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }], &[samples::drum("TR-808", 39); 2]), -7.7)
 }
 /// A snap; recorded, the Standard kit's sticks (key 31): no kit has a finger
 /// snap, and of the short bright hits the sticks' is the nearest (as bright,
-/// its spectral centroid 0.95 the synthesiser's, as short: -30 dB in 0.04 s).
+/// its spectral centroid 0.95 the synthesiser's, as short: -30 dB in 0.04 s);
+/// -8.8 dB (techno).
 fn kit_snap(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch { noise: 1.0, nmode: 1, ncut: r.range(2200.0, 2800.0), nres: 0.4, ndec: 0.06, gain: 0.9, ..DRUM };
-    rec_kit(vec![c, DrumPatch { gain: 0.6, ..c }], &[samples::drum("Standard", 31); 2])
+    kit_trim(rec_kit(vec![c, DrumPatch { gain: 0.6, ..c }], &[samples::drum("Standard", 31); 2]), -8.8)
 }
 /// The LinnDrum's snare (a recorded snare's, the LM-1's); recorded, the
 /// Standard kit's (key 38): of the Electronic, Standard and Room kits' the
-/// nearest (the Electronic kit's is a low, ringing electronic drum).
+/// nearest (the Electronic kit's is a low, ringing electronic drum). +1.8 dB
+/// (techno +2.1, synthwave +1.6).
 fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         tone: 0.55,
@@ -11348,7 +11374,7 @@ fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.8,
         ..DRUM
     };
-    rec_kit(vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }], &[samples::drum("Standard", 38); 2])
+    kit_trim(rec_kit(vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }], &[samples::drum("Standard", 38); 2]), 1.8)
 }
 fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -11384,14 +11410,18 @@ fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
 /// Hats: [closed, open].
 /// The 808's; recorded, the TR-808 kit's closed hat (42) and its open hat as
 /// key 44 has it (shorter than 46's: -30 dB in 0.38 s, the synthesiser's
-/// 0.24 s; 46's 1.5 s).
+/// 0.24 s; 46's 1.5 s). -11.6 dB (synthwave; the recorded hats ring longer
+/// and brighter in the ear than these darker, shorter ones).
 fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit(hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8), &[samples::drum("TR-808", 42), samples::drum("TR-808", 44)])
+    let keys = [samples::drum("TR-808", 42), samples::drum("TR-808", 44)];
+    kit_trim(rec_kit(hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8), &keys), -11.6)
 }
 /// The 909's (recordings of cymbals); recorded, the Electronic kit's (42,
 /// 46): a recorded pair as the 909's are (MuseScore General has no 909).
+/// +3.5 dB (techno +5.8, synthwave +2.4).
 fn kit_hats_909(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit(hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8), &[samples::drum("Electronic", 42), samples::drum("Electronic", 46)])
+    let keys = [samples::drum("Electronic", 42), samples::drum("Electronic", 46)];
+    kit_trim(rec_kit(hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8), &keys), 3.5)
 }
 fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -11503,9 +11533,10 @@ fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
     };
     let base = r.range(90.0, 120.0);
     // recorded: the TR-808 kit's cowbell, its toms nearest these in pitch
-    // (spectral centroid) and decay (45, 48, 50), and a woodblock
+    // (spectral centroid) and decay (45, 48, 50), and a woodblock; +1.1 dB
+    // (techno +1.7, synthwave +0.5)
     let keys = [56, 45, 48, 50, 76].map(|k| samples::drum("TR-808", k));
-    rec_kit(vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood], &keys)
+    kit_trim(rec_kit(vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood], &keys), 1.1)
 }
 fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
     // spoons (two clicks), a frame drum's rim, finger cymbals
@@ -11731,6 +11762,71 @@ fn band_polka(r: &mut Rng, s: &Synth) -> Band {
     b.kit(r, s, CH_SNARE, K_POLKA_SNARE);
     b.kit(r, s, CH_HAT, K_POLKA_HAT);
     b
+}
+
+/// A piece's recorded instruments (its band's and its channels' own) brought
+/// to the balance the synthesiser's had: `trim` gives each recording's level
+/// (dB) on a channel, after the levelling (which matches a recording to its
+/// synthesiser's patch over one note's early 0.12 s, and so misreads a
+/// short note's, a pluck's or a swell's level as the music plays them).
+fn rec_trim(band: &mut Band, s: &mut Synth, trim: impl Fn(usize, u16) -> f32) {
+    let scale = |ch: usize, p: &mut Patch| {
+        if p.samp != 0 {
+            p.gain *= 10f32.powf(trim(ch, p.samp) / 20.0);
+        }
+    };
+    for (ch, pair, _) in band.tones.iter_mut() {
+        pair.iter_mut().for_each(|p| scale(*ch, p));
+    }
+    for (ch, c) in s.ch.iter_mut().enumerate() {
+        scale(ch, &mut c.patch);
+    }
+}
+
+/// Whether `samp` is the SoundFont preset `name`.
+fn is_gm(samp: u16, name: &str) -> bool {
+    samples::gm(name) == Some(samp)
+}
+
+/// A recording's level on techno's channel `ch` (dB; `acid`: the 303's
+/// pieces), against its synthesiser's patch: measured over whole pieces
+/// (EBU R128 loudness of the channel alone, the leveller frozen, both of
+/// the band's slots the one instrument, against the synthesiser's twin
+/// playing the same notes; 60-80 seeds' first two minutes). Under half a
+/// dB left alone (the pads).
+fn techno_rec_trim(ch: usize, acid: bool, samp: u16) -> f32 {
+    match ch {
+        // the 303s, saw (Synth Bass 3) and square (Square Lead) alike
+        CH_BASS if acid => 0.8,
+        // the rolling bass; the sequenced saw (its filter shuts on a held
+        // recording); the FM bass's slap
+        CH_BASS if is_gm(samp, "Synth Bass 2") => 4.0,
+        CH_BASS if is_gm(samp, "Synth Bass 3") => 7.5,
+        CH_BASS if is_gm(samp, "Synth Bass 4") => -4.9,
+        CH_LEAD if is_gm(samp, "Charang") => -1.9,
+        CH_LEAD if is_gm(samp, "Polysynth") => 3.0,
+        // a sung voice speaks slowly where the chop's saw snaps
+        CH_LEAD if is_gm(samp, "Synth Voice") => 10.2,
+        CH_KEYS if is_gm(samp, "Percussive Organ") => 4.7,
+        _ => 0.0,
+    }
+}
+
+/// `techno_rec_trim`'s for synthwave.
+fn synthwave_rec_trim(ch: usize, samp: u16) -> f32 {
+    match ch {
+        CH_BASS if is_gm(samp, "Slap Bass") => -2.6,
+        CH_BASS if is_gm(samp, "Synth Bass 1") => -0.8,
+        CH_BASS if is_gm(samp, "Synth Bass 2") => 1.0,
+        CH_BASS if is_gm(samp, "Synth Bass 3") => 6.1,
+        CH_BASS if is_gm(samp, "Synth Bass 4") => -0.9,
+        CH_PAD if is_gm(samp, "Polysynth") => 1.8,
+        CH_PAD if is_gm(samp, "Synth Brass 1") => 2.8,
+        CH_PAD if is_gm(samp, "Warm Pad") => -2.5,
+        CH_LEAD if is_gm(samp, "Charang") => -1.9,
+        CH_BELL if is_gm(samp, "FM Electric Piano") => -1.3,
+        _ => 0.0,
+    }
 }
 
 /// Techno's basses, the acid ones among them (a mix's).
@@ -11994,9 +12090,11 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
     // through the synthesiser's drive, the 808's clap and snare, its hats (as
     // `kit_hats_808`), its clave (the rim click), toms and the maracas, and a
     // splash for the crash (-30 dB in 0.84 s, the synthesiser's crash 1.0 s;
-    // the kits' crashes ring 2.3-2.5 s)
+    // the kits' crashes ring 2.3-2.5 s); each kit trimmed to the
+    // synthesiser's level over whole pieces as `kit_trim`'s are (kick +6.1,
+    // snare -3.5, hats -6.8, percussion -2.9, crash +7.2 dB)
     let kick_ = vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), click, drive)];
-    ch[CH_KICK].drums = rec_kick_driven(kick_, samples::drum("Electronic", 35));
+    ch[CH_KICK].drums = kit_trim(rec_kick_driven(kick_, samples::drum("Electronic", 35)), 6.1);
     let clap = DrumPatch {
         noise: 1.0,
         nmode: 1,
@@ -12024,10 +12122,11 @@ fn sounds_techno(r: &mut Rng, s: &mut Synth, bass_style: u8) {
         ..DRUM
     };
     let d808 = |k: u8| samples::drum("TR-808", k);
-    ch[CH_SNARE].drums = rec_kit(vec![clap, snare], &[d808(39), d808(38)]);
-    ch[CH_HAT].drums = rec_kit(hats(r, 8000.0, 0.045, 0.35, 0.45, 0.8), &[d808(42), d808(44)]);
-    ch[CH_PERC].drums = rec_kit(percs(r), &[d808(75), d808(43), d808(45), d808(48), d808(70)]);
-    ch[CH_CYM].drums = rec_kit(crash(r), &[d808(55)]);
+    ch[CH_SNARE].drums = kit_trim(rec_kit(vec![clap, snare], &[d808(39), d808(38)]), -3.5);
+    ch[CH_HAT].drums = kit_trim(rec_kit(hats(r, 8000.0, 0.045, 0.35, 0.45, 0.8), &[d808(42), d808(44)]), -6.8);
+    let percs_ = rec_kit(percs(r), &[d808(75), d808(43), d808(45), d808(48), d808(70)]);
+    ch[CH_PERC].drums = kit_trim(percs_, -2.9);
+    ch[CH_CYM].drums = kit_trim(rec_kit(crash(r), &[d808(55)]), 7.2);
     let bass = if bass_style == 0 {
         Patch {
             wave: if r.chance(0.6) { Wave::Saw } else { Wave::Square },
@@ -12158,9 +12257,11 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
     // channel's order: the Power kit's kick (an 80s kick: of the kicks the
     // nearest in decay, its peak at 60 Hz as the synthesiser's), the Room
     // kit's snares (the gated reverb on top), the Electronic kit's hats, the
-    // 808's percussion as techno has it, a splash for the crash
+    // 808's percussion as techno has it, a splash for the crash; each kit
+    // trimmed as techno's are (kick +5.2, snares +5.2, hats +1.8,
+    // percussion +1.5, crash +7.1 dB)
     let kick_ = vec![kick(r, (170.0, 220.0), (50.0, 58.0), (0.45, 0.6), 0.2, 0.5)];
-    ch[CH_KICK].drums = rec_kit(kick_, &[samples::drum("Power", 36)]);
+    ch[CH_KICK].drums = kit_trim(rec_kit(kick_, &[samples::drum("Power", 36)]), 5.2);
     let snare = DrumPatch {
         tone: 0.6,
         f0: 240.0,
@@ -12179,11 +12280,12 @@ fn sounds_synthwave(r: &mut Rng, s: &mut Synth) {
     };
     let d808 = |k: u8| samples::drum("TR-808", k);
     let snares = [samples::drum("Room", 38), samples::drum("Room", 40)];
-    ch[CH_SNARE].drums = rec_kit(vec![snare, DrumPatch { ndec: 0.15, ..snare }], &snares);
+    ch[CH_SNARE].drums = kit_trim(rec_kit(vec![snare, DrumPatch { ndec: 0.15, ..snare }], &snares), 5.2);
     let hats_ = [samples::drum("Electronic", 42), samples::drum("Electronic", 46)];
-    ch[CH_HAT].drums = rec_kit(hats(r, 8500.0, 0.04, 0.3, 0.25, 0.75), &hats_);
-    ch[CH_PERC].drums = rec_kit(percs(r), &[d808(75), d808(43), d808(45), d808(48), d808(70)]);
-    ch[CH_CYM].drums = rec_kit(crash(r), &[d808(55)]);
+    ch[CH_HAT].drums = kit_trim(rec_kit(hats(r, 8500.0, 0.04, 0.3, 0.25, 0.75), &hats_), 1.8);
+    let percs_ = rec_kit(percs(r), &[d808(75), d808(43), d808(45), d808(48), d808(70)]);
+    ch[CH_PERC].drums = kit_trim(percs_, 1.5);
+    ch[CH_CYM].drums = kit_trim(rec_kit(crash(r), &[d808(55)]), 7.1);
     let bass = Patch {
         wave: Wave::Saw,
         sub: 0.3,
