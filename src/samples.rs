@@ -35,7 +35,9 @@ pub const SF2: &str = "MuseScore_General.sf2";
 const MANIFEST: &str = "manifest.tsv";
 
 /// The SoundFont's melodic presets loaded, by name (as its phdr has them,
-/// bank 0). The three pianos are one set of samples (100 MB of the 149).
+/// bank 0, else the lowest melodic bank: Funk Guitar is bank 8's; never the
+/// "Expr." variants, whose dynamics follow a controller). The three pianos
+/// are one set of samples (100 MB of the 150).
 pub const GM_PRESETS: &[&str] = &[
     // guitars
     "Nylon String Guitar",
@@ -49,6 +51,7 @@ pub const GM_PRESETS: &[&str] = &[
     "Drawbar Organ",
     "Percussive Organ",
     "Rock Organ",
+    "Funk Guitar",
     // pianos
     "Grand Piano",
     "Bright Grand Piano",
@@ -66,11 +69,15 @@ pub const GM_PRESETS: &[&str] = &[
     "Trumpet",
     "Harmon Mute Trumpet",
     "Trombone",
-    // strings (General MIDI's String Ensemble 1 is "Strings Fast" here)
+    // strings (General MIDI's String Ensembles 1 and 2 are "Strings Fast"
+    // and "Strings Slow" here)
     "Violin",
+    "Fiddle",
     "Strings Fast",
+    "Strings Slow",
     "Strings Pizzicato",
     "Harp",
+    "Contrabass",
 ];
 
 /// Its drum kits loaded (bank 128), by name.
@@ -98,6 +105,12 @@ pub const CAL_DRUM: f32 = 0.60;
 /// "auto" instrument.
 pub const AUTO_SHORT: f32 = 0.25;
 
+/// The window (seconds from the onset) an "auto" instrument's short
+/// articulation's level is taken over, to match the long one's (over its
+/// first second, the reference's window, mostly steady): a short note's
+/// momentary loudness (EBU R128's 400 ms).
+const AUTO_MATCH: f32 = 0.4;
+
 /// Zones sounding at once in one voice: a stereo pair (the SoundFont keeps
 /// a stereo sample as two zones panned apart), or layers (the pianos have
 /// two stereo pairs over some velocities).
@@ -105,6 +118,14 @@ const MAXZ: usize = 4;
 
 /// The fade a sample that runs out ends with (10 ms, samples).
 const END_FADE: f64 = 480.0;
+
+/// A sustained recording ("sus", "vib") at least `LOOP_MIN` seconds long
+/// loops `LOOP` (seconds from its onset) while the gate is open, the last
+/// `LOOP_XF` of each time round crossfaded into the start's: the manifest's
+/// stop at 5.5 s, faded, with no loop points of their own.
+const LOOP_MIN: f32 = 5.0;
+const LOOP: (f32, f32) = (1.5, 4.5);
+const LOOP_XF: f32 = 0.25;
 
 /// One sample as played over some keys and velocities.
 #[derive(Clone, Copy, Debug)]
@@ -122,10 +143,13 @@ struct Zone {
     /// its sample rate over the engine's
     rate: f32,
     /// the loop (frames from its start, the end exclusive) and its mode: 0
-    /// none, 1 always, 3 until release
+    /// none, 1 always, 3 until release; frames before its end crossfaded
+    /// into those before its start (0: none, a SoundFont's loop is made to
+    /// join)
     ls: u32,
     le: u32,
     mode: u8,
+    xf: u32,
     /// the left and right gains (level, normalisation, pan, 1/32768)
     gl: f32,
     gr: f32,
@@ -159,8 +183,9 @@ struct Inst {
     cells: Vec<Cell>,
     /// a kit's key (its one note), None for an instrument played by note
     key: Option<u8>,
-    /// "auto": the short articulation's id and the long one's
-    auto: Option<(u16, u16)>,
+    /// "auto": the short articulation's id and the long one's, and the
+    /// short one's gain (matching the long one's level)
+    auto: Option<(u16, u16, f32)>,
     /// its zones (each instrument has its own, contiguous)
     zones: std::ops::Range<u32>,
 }
@@ -227,11 +252,18 @@ impl Bank {
     }
 
     /// The zones for `id` at `note`, velocity `vel` (0-1), `len` samples of
-    /// gate, round robin `rr`; and a kit's key.
-    fn pick(&self, id: u16, note: f32, vel: f32, len: i64, rr: u32) -> Option<(&[u32], Option<u8>)> {
+    /// gate, round robin `rr`; a kit's key; a gain on them (an "auto"
+    /// instrument's short articulation's).
+    fn pick(&self, id: u16, note: f32, vel: f32, len: i64, rr: u32) -> Option<(&[u32], Option<u8>, f32)> {
         let mut inst = self.insts.get((id as usize).checked_sub(1)?)?;
-        if let Some((short, long)) = inst.auto {
-            let sub = if len < (AUTO_SHORT * RATE) as i64 { short } else { long };
+        let mut g = 1.0;
+        if let Some((short, long, gs)) = inst.auto {
+            let sub = if len < (AUTO_SHORT * RATE) as i64 {
+                g = gs;
+                short
+            } else {
+                long
+            };
             inst = self.insts.get((sub as usize).checked_sub(1)?)?;
         }
         let n = if inst.key.is_some() { 0 } else { note.round().clamp(0.0, 127.0) as usize };
@@ -241,7 +273,7 @@ impl Bank {
             return None;
         }
         let s = c.first as usize + (rr % c.rr as u32) as usize * c.per as usize;
-        Some((self.picks.get(s..s + c.per as usize)?, inst.key))
+        Some((self.picks.get(s..s + c.per as usize)?, inst.key, g))
     }
 
     /// A zone's frames.
@@ -253,6 +285,11 @@ impl Bank {
     /// RMS over the first second of `id` at `note`, its loudest layer (both
     /// channels, as the synthesiser's `loudness` measures).
     fn rms_1s(&self, id: u16, note: f32) -> f32 {
+        self.rms_over(id, note, 1.0)
+    }
+
+    /// RMS over the first `secs` of `id` at `note`, its loudest layer.
+    fn rms_over(&self, id: u16, note: f32, secs: f32) -> f32 {
         let mut s = SAMPLER;
         if !s.start(self, id, note, 1.0, i64::MAX, 0) {
             return 0.0;
@@ -260,14 +297,15 @@ impl Bank {
         let pitch = s.key;
         let mut buf = [[0.0f32; 2]; 64];
         let mut sum = 0.0f64;
-        for _ in 0..RATE as usize / 64 {
+        let blocks = (secs * RATE) as usize / 64;
+        for _ in 0..blocks {
             let live = s.fill(self, pitch, true, &mut buf);
             sum += buf.iter().map(|x| (x[0] * x[0] + x[1] * x[1]) as f64).sum::<f64>();
             if !live {
                 break;
             }
         }
-        (sum / (2.0 * RATE as f64)).sqrt() as f32
+        (sum / (128 * blocks.max(1)) as f64).sqrt() as f32
     }
 
     /// Brings `id` to the reference (its loudest layer at `note`).
@@ -407,6 +445,8 @@ pub struct Sampler {
     pub excl: u8,
     /// whether looped zones loop (a drum's hit plays once through)
     pub loops: bool,
+    /// a gain on the zones (an "auto" instrument's short articulation's)
+    g: f32,
 }
 
 pub const SAMPLER: Sampler = Sampler {
@@ -422,7 +462,22 @@ pub const SAMPLER: Sampler = Sampler {
     rel: 0.1,
     excl: 0,
     loops: true,
+    g: 1.0,
 };
+
+/// Frames `i` and `j` (mono or interleaved stereo) `fr` of the way between.
+#[inline(always)]
+fn lerp(d: &[i16], chans: u8, i: usize, j: usize, fr: f32) -> (f32, f32) {
+    if chans == 2 {
+        let (a, b) = (d[2 * i] as f32, d[2 * j] as f32);
+        let (c, e) = (d[2 * i + 1] as f32, d[2 * j + 1] as f32);
+        (a + (b - a) * fr, c + (e - c) * fr)
+    } else {
+        let (a, b) = (d[i] as f32, d[j] as f32);
+        let m = a + (b - a) * fr;
+        (m, m)
+    }
+}
 
 /// Timecents to seconds.
 fn tc(t: f32) -> f32 {
@@ -436,7 +491,7 @@ impl Sampler {
     /// bank has nothing for it.
     pub fn start(&mut self, b: &Bank, id: u16, note: f32, vel: f32, len: i64, rr: u32) -> bool {
         self.n = 0;
-        let Some((zs, key)) = b.pick(id, note, vel, len, rr) else {
+        let Some((zs, key, g)) = b.pick(id, note, vel, len, rr) else {
             return false;
         };
         let n = zs.len().min(MAXZ);
@@ -461,6 +516,7 @@ impl Sampler {
         self.rel = z0.rel;
         self.excl = z0.excl;
         self.loops = true;
+        self.g = g;
         true
     }
 
@@ -489,6 +545,9 @@ impl Sampler {
             let (ls, le) = (z.ls as f64, z.le as f64);
             let end = (z.len - 1) as f64;
             let fade = 1.0 / (END_FADE * step);
+            let (gl, gr) = (z.gl * self.g, z.gr * self.g);
+            let xf = if looping { z.xf as f64 } else { 0.0 };
+            let xs = le - xf;
             let mut pos = self.pos[k];
             for o in out.iter_mut() {
                 if looping {
@@ -502,15 +561,17 @@ impl Sampler {
                 let i = pos as usize;
                 let fr = (pos - i as f64) as f32;
                 let j = if looping && i + 1 >= z.le as usize { z.ls as usize } else { i + 1 };
-                let (mut l, mut r) = if z.chans == 2 {
-                    let (a, b) = (d[2 * i] as f32, d[2 * j] as f32);
-                    let (c, e) = (d[2 * i + 1] as f32, d[2 * j + 1] as f32);
-                    (a + (b - a) * fr, c + (e - c) * fr)
-                } else {
-                    let (a, b) = (d[i] as f32, d[j] as f32);
-                    let m = a + (b - a) * fr;
-                    (m, m)
-                };
+                let (mut l, mut r) = lerp(d, z.chans, i, j, fr);
+                if xf > 0.0 && pos >= xs {
+                    // equal power, into the same stretch before the loop's start
+                    let q = pos - (le - ls);
+                    let qi = q as usize;
+                    let (l2, r2) = lerp(d, z.chans, qi, qi + 1, (q - qi as f64) as f32);
+                    let t = ((pos - xs) / xf) as f32;
+                    let (a, b) = ((1.0 - t).sqrt(), t.sqrt());
+                    l = l * a + l2 * b;
+                    r = r * a + r2 * b;
+                }
                 if !looping {
                     let left = ((end - pos) * fade) as f32;
                     if left < 1.0 {
@@ -518,8 +579,8 @@ impl Sampler {
                         r *= left;
                     }
                 }
-                o[0] += l * z.gl;
-                o[1] += r * z.gr;
+                o[0] += l * gl;
+                o[1] += r * gr;
                 pos += step;
             }
             self.pos[k] = pos;
@@ -653,9 +714,13 @@ fn parse_row(f: &[&str]) -> Result<Row, String> {
     })
 }
 
-/// The manifest's instruments, and an "auto" for each: short notes the
-/// staccato (or pizzicato, when that is all there is), long ones the
-/// vibrato (else the sustain); either, failing that, whatever there is.
+/// The manifest's instruments, and an "auto" for each: short notes (gates
+/// under `AUTO_SHORT`) the staccato (or pizzicato, when that is all there
+/// is), long ones the vibrato (else the sustain); either, failing that,
+/// whatever there is. The short articulation is brought to the long one's
+/// level (its RMS over the first `AUTO_MATCH` to the long one's over the
+/// first second, at the long one's middle root, loudest layer): the
+/// manifest levels each by its first second, which makes a short note hot.
 fn load_multi(b: &mut Bank, dir: &Path) -> Result<(), String> {
     let path = dir.join(MANIFEST);
     let text = read_file(&path, 16 << 20)?;
@@ -706,6 +771,11 @@ fn load_multi(b: &mut Bank, dir: &Path) -> Result<(), String> {
             };
             let Some((off, len, chans, rate)) = w else { continue };
             let g = 10f32.powf(r.gain_db / 20.0) / 32768.0;
+            // a held note outlasting a sustained recording (5.5 s, its last
+            // 0.5 s faded): its steady middle looped, crossfaded
+            let sec = |t: f32| (t * rate as f32) as u32;
+            let held = matches!(r.articulation.as_str(), "sus" | "vib") && len >= sec(LOOP_MIN);
+            let (ls, le) = if held { (sec(LOOP.0), sec(LOOP.1)) } else { (0, 0) };
             zones.push(Zone {
                 off,
                 len,
@@ -714,9 +784,10 @@ fn load_multi(b: &mut Bank, dir: &Path) -> Result<(), String> {
                 tune: 0.0,
                 scale: 1.0,
                 rate: rate as f32 / RATE,
-                ls: 0,
-                le: 0,
-                mode: 0,
+                ls,
+                le,
+                mode: if held { 3 } else { 0 },
+                xf: if held { sec(LOOP_XF) } else { 0 },
                 gl: g,
                 gr: g,
                 excl: 0,
@@ -748,12 +819,23 @@ fn load_multi(b: &mut Bank, dir: &Path) -> Result<(), String> {
         let long = find(&["vib", "sus"]).or(find(&["stac", "pizz"])).or(any);
         let short = find(&["stac", "pizz"]).or(long);
         if let (Some(s), Some(l)) = (short, long) {
+            let mut g = 1.0;
+            if s != l {
+                let r = b.insts[l as usize - 1].zones.clone();
+                let mut roots: Vec<f32> = b.zones[r.start as usize..r.end as usize].iter().map(|z| z.root).collect();
+                roots.sort_by(f32::total_cmp);
+                let mid = roots[roots.len() / 2];
+                let (rs, rl) = (b.rms_over(s, mid, AUTO_MATCH), b.rms_1s(l, mid));
+                if rs > 1e-6 && rl > 1e-6 {
+                    g = (rl / rs).clamp(0.25, 4.0);
+                }
+            }
             b.insts.push(Inst {
                 layer: [0; 128],
                 layers: 0,
                 cells: Vec::new(),
                 key: None,
-                auto: Some((s, l)),
+                auto: Some((s, l, g)),
                 zones: 0..0,
             });
             b.multis.push((name, "auto".into(), b.insts.len() as u16));
@@ -1196,6 +1278,7 @@ fn load_sf2(b: &mut Bank, path: &Path, melodic: &[&str], kits: &[&str]) -> Resul
             ls: if looped { ls as u32 } else { 0 },
             le: if looped { le as u32 } else { 0 },
             mode: if looped { r.mode } else { 0 },
+            xf: 0,
             gl: g * (1.0 - pan).min(1.0),
             gr: g * (1.0 + pan).min(1.0),
             excl: r.excl,
@@ -1428,8 +1511,14 @@ pub fn list_cli() {
             for (i, a, id) in &b.multis {
                 let inst = &b.insts[*id as usize - 1];
                 let (z, l) = (inst.zones.end - inst.zones.start, inst.layers);
-                if inst.auto.is_some() {
-                    println!("  multi {i:12} {a:18} (by the gate: under {AUTO_SHORT} s short, else long)");
+                if let Some((s, l, g)) = inst.auto {
+                    let art = |id: u16| b.multis.iter().find(|m| m.2 == id).map_or("?", |m| m.1.as_str());
+                    println!(
+                        "  multi {i:12} {a:18} gates under {AUTO_SHORT} s {} ({:+.1} dB), else {}",
+                        art(s),
+                        20.0 * g.log10(),
+                        art(l)
+                    );
                 } else {
                     println!("  multi {i:12} {a:18} {z} samples, {l} velocity layers");
                 }
@@ -1619,6 +1708,28 @@ pub mod testdata {
         chunk(b"RIFF", &body)
     }
 
+    /// A samples directory: "held" sus (one 5.5 s sine at 69, 22.05 kHz,
+    /// its last 0.5 s faded, as the manifest's are) and "shake" hit (three
+    /// round robins, 50 ms each, 1, 2 and 3 cycles of a square).
+    pub fn held(name: &str) -> PathBuf {
+        let d = dir(name);
+        let a = 0.1 * std::f64::consts::SQRT_2;
+        let long = wav(22050, 1, 22050 * 11 / 2, |i, _| {
+            let t = i as f64 / 22050.0;
+            (a * (std::f64::consts::TAU * 440.0 * t).sin() * ((5.5 - t) / 0.5).min(1.0)) as f32
+        });
+        std::fs::write(d.join("multi/held.wav"), long).expect("write");
+        let mut m = String::from("instrument\tarticulation\troot\tvel_lo\tvel_hi\trr\tgain_db\tfile\n");
+        m += "held\tsus\t69\t0\t127\t1\t0\tmulti/held.wav\n";
+        for k in 1..=3 {
+            let sq = wav(48000, 1, 2400, |i, _| if (i * k / 1200) % 2 == 0 { 0.5 } else { -0.5 });
+            std::fs::write(d.join(format!("multi/shake{k}.wav")), sq).expect("write");
+            m += &format!("shake\thit\t60\t0\t127\t{k}\t0\tmulti/shake{k}.wav\n");
+        }
+        std::fs::write(d.join("manifest.tsv"), m).expect("manifest");
+        d
+    }
+
     /// A samples directory: "sine" sus (roots 57 at 44.1 kHz, 69 stereo,
     /// two round robins of 81 loud and one soft) and stac (69 only, 0.2 s),
     /// "hit" one (a second of middle C, for a drum), and a manifest naming
@@ -1684,7 +1795,7 @@ mod tests {
         }
         // nearest roots: 62 from 57 (5 away, not 69's 7), 63 a tie (57)
         for (note, root) in [(62.0, 57.0), (63.0, 57.0), (64.0, 69.0), (76.0, 81.0), (20.0, 57.0)] {
-            let (z, _) = b.pick(id, note, 0.9, 48000, 0).expect("pick");
+            let (z, _, _) = b.pick(id, note, 0.9, 48000, 0).expect("pick");
             assert_eq!(b.zones[z[0] as usize].root, root, "note {note}");
         }
         // round robins rotate at 81 (loud), the soft layer has one
@@ -1697,6 +1808,11 @@ mod tests {
         let stac = b.multi("sine", "stac").expect("stac");
         assert_eq!(b.pick(auto, 69.0, 0.9, 4800, 0).unwrap().0, b.pick(stac, 69.0, 0.9, 4800, 0).unwrap().0);
         assert_eq!(b.pick(auto, 69.0, 0.9, 48000, 0).unwrap().0, b.pick(id, 69.0, 0.9, 48000, 0).unwrap().0);
+        // the short one's first 0.4 s matched to the long one's first second
+        // at its middle root (81): the staccato's 0.2 s, an octave up, lasts
+        // 0.1 s, the sustain all of it; so twice as loud
+        let g = b.pick(auto, 69.0, 0.9, 4800, 0).unwrap().2;
+        assert!((g / 2.0 - 1.0).abs() < 0.05 && b.pick(auto, 69.0, 0.9, 48000, 0).unwrap().2 == 1.0, "{g}");
         assert!(b.multi("sine", "pizz").is_none() && b.gm("Trumpet").is_none() && b.drum("Standard", 36).is_none());
     }
 
@@ -1719,6 +1835,36 @@ mod tests {
         assert!((live * 32) as f32 / RATE < 0.205 && (live * 32) as f32 / RATE > 0.19, "ended at block {live}");
         let peak = |a: usize, b: usize| v[a..b].iter().map(|x| x[0].abs()).fold(0.0, f32::max);
         assert!(peak(9000, 9200) > 0.1 && peak(9580, 9600) < 0.02 && peak(9700, 48000) == 0.0);
+    }
+
+    /// A held note outlasting a sustained recording: its middle loops,
+    /// crossfaded, steady to within a few dB, until the gate closes.
+    #[test]
+    fn held_notes_loop_past_the_recording() {
+        let d = held("held");
+        let b = load(&d).expect("load");
+        let _ = std::fs::remove_dir_all(&d);
+        let id = b.multi("held", "sus").unwrap();
+        let mut s = SAMPLER;
+        assert!(s.start(&b, id, 69.0, 0.9, 12 * 48000, 0));
+        let mut v = vec![[0.0f32; 2]; 12 * 48000];
+        for c in v.chunks_mut(32) {
+            assert!(s.fill(&b, 69.0, true, c));
+        }
+        // 50 ms windows from 0.1 s to 12 s
+        for w in v[4800..].chunks(2400) {
+            let rms = (w.iter().map(|x| x[0] * x[0]).sum::<f32>() / w.len() as f32).sqrt();
+            assert!(rms > 0.1 / 1.5 && rms < 0.1 * 1.5, "a window's RMS {rms}");
+        }
+        let l: Vec<f32> = v[5 * 48000..].iter().map(|x| x[0]).collect();
+        assert!((freq(&l) / 440.0 - 1.0).abs() < 0.002);
+        // released, it plays out to its end (a drum's hit never loops)
+        let mut out = [[0.0f32; 2]; 32];
+        let mut blocks = 0;
+        while s.fill(&b, 69.0, false, &mut out) {
+            blocks += 1;
+        }
+        assert!(blocks * 32 < 6 * 48000);
     }
 
     #[test]
@@ -1863,7 +2009,7 @@ mod tests {
         load_sf2(&mut b, path, &melodic, &["Standard"]).expect("load");
         assert_eq!(b.gms.len(), melodic.len(), "{:?}", b.warnings);
         for (p, id) in &b.gms {
-            let (z, _) = b.pick(*id, 60.0, 0.8, 48000, 0).expect(p);
+            let (z, _, _) = b.pick(*id, 60.0, 0.8, 48000, 0).expect(p);
             assert!(!z.is_empty() && z.iter().all(|&z| b.frames(&b.zones[z as usize]).iter().any(|&x| x != 0)), "{p}");
             let rms = b.rms_1s(*id, 60.0);
             assert!((rms / REF_RMS - 1.0).abs() < 0.01, "{p}: {rms}");

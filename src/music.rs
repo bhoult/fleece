@@ -1664,8 +1664,9 @@ struct Channel {
     swell_rate: f32,
     swell_ph: f32,
     buf: [[f32; 2]; BLOCK],
-    /// notes and hits begun: the round robin a sampled one takes
-    rr: u32,
+    /// the round robin the next sampled note (0) or hit (by its kind)
+    /// takes: each cycles in order (a shaker's strokes down and up)
+    rr: [u32; 8],
 }
 
 impl Channel {
@@ -1695,7 +1696,7 @@ impl Channel {
             swell_rate: 0.5,
             swell_ph: 0.0,
             buf: [[0.0; 2]; BLOCK],
-            rr: 0,
+            rr: [0; 8],
         }
     }
 
@@ -1737,8 +1738,9 @@ impl Channel {
             .iter()
             .position(|d| !d.on)
             .unwrap_or_else(|| (0..self.dv.len()).max_by_key(|&i| self.dv[i].t).unwrap_or(0));
-        self.rr = self.rr.wrapping_add(1);
-        self.dv[i].start(&p, kind, vel, seed, bank, self.rr);
+        let k = (kind as usize).min(7);
+        self.dv[i].start(&p, kind, vel, seed, bank, self.rr[k]);
+        self.rr[k] = self.rr[k].wrapping_add(1);
         // the SoundFont's exclusive classes (an open hat, its pedal and closed hats)
         let ex = self.dv[i].sm.excl;
         if ex != 0 && self.dv[i].sm.n > 0 {
@@ -1913,8 +1915,8 @@ impl Synth {
                     })
                 };
                 let p = c.patch;
-                c.rr = c.rr.wrapping_add(1);
-                c.voices[i].start(&p, note, vel, (len * SR) as i64, slide, seed, bank, c.rr);
+                c.voices[i].start(&p, note, vel, (len * SR) as i64, slide, seed, bank, c.rr[0]);
+                c.rr[0] = c.rr[0].wrapping_add(1);
             }
             Ev::Riser { secs, vel } => self.fx.riser(secs, vel),
         }
@@ -13994,6 +13996,29 @@ mod sample_tests {
             let open_on = c.dv.iter().filter(|d| d.on && d.sm.key == 46.0).count();
             assert_eq!(open_on, 0, "hat channel {hats_ch}: the open hat still rings");
         }
+        // round robins cycle in order, each kind its own (a shaker's
+        // strokes down, up), whatever else the channel plays between
+        let d = testdata::held("rr");
+        let b2 = samples::load(&d).expect("load");
+        let _ = std::fs::remove_dir_all(&d);
+        let mut c = Channel::new(0, 4);
+        let shake = DrumPatch { samp: b2.multi("shake", "hit").unwrap(), ..DRUM };
+        c.drums = vec![DrumPatch { samp: b2.multi("held", "sus").unwrap(), ..DRUM }, shake];
+        let mut seen = Vec::new();
+        for k in 0..7 {
+            c.hit(false, (k % 2 == 0) as u8, 0.8, 1, Some(&b2));
+            c.dv.iter_mut().for_each(|d| d.on = false);
+            if k % 2 == 0 {
+                // the zone the shaker played: its first frames' sign changes tell
+                let mut v = vec![[0.0f32; 2]; 2400];
+                let mut dr = DRUMV;
+                dr.start(&shake, 1, 0.8, 1, Some(&b2), seen.len() as u32);
+                dr.render(&mut v[..], Some(&b2));
+                seen.push(v.windows(2).filter(|w| (w[0][0] > 0.0) != (w[1][0] > 0.0)).count());
+            }
+        }
+        assert_eq!((c.rr[0], c.rr[1]), (3, 4));
+        assert!(seen[0] < seen[1] && seen[1] < seen[2] && seen[3] == seen[0], "{seen:?}");
         // without the bank, the synthesiser's (silent here: no tone, no noise)
         let mut c = Channel::new(0, 4);
         c.drums = hats;
