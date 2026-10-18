@@ -4521,7 +4521,8 @@ impl Song {
         let (bs, beats) = (self.bar_steps() as usize, (self.bar_steps() / self.beat_steps()) as usize);
         let compound = self.beat_steps() == 6;
         let r = &mut self.rng;
-        for c in [CH_KICK, CH_SNARE, CH_HAT, CH_PERC, CH_CYM] {
+        // the drums, and the channel the riser, the crackle and the hiss play on
+        for c in [CH_KICK, CH_SNARE, CH_HAT, CH_PERC, CH_CYM, CH_FX] {
             let (to, from) = (&mut s.ch[c], &x.ch[c]);
             to.drums.clone_from(&from.drums);
             (to.gain, to.pan, to.rev, to.dly, to.rev2) = (from.gain, from.pan, from.rev, from.dly, from.rev2);
@@ -8637,6 +8638,7 @@ mod tests {
     fn mixes_drum_in_the_writers_meter() {
         for (genre, seed) in [(6, 1u64), (6, 2), (7, 1), (7, 2), (7, 3)] {
             let mut e = Engine::new(genre, seed);
+            assert!(e.syn.ch[CH_FX].gain > 0.0, "genre {genre}: the riser's and the crackle's channel is shut");
             let mut ev: Vec<(u64, Ev)> = Vec::new();
             let (mut mains, mut claps) = (0, 0);
             while e.pos < 400.0 * SR as f64 {
