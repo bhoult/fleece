@@ -8,8 +8,8 @@
 //! layers entering and leaving. Within a piece patterns mutate at phrase ends,
 //! the melody comes back varied (call and response, sequences, new endings),
 //! one optional layer drops out now and then, and filters drift. Then the next
-//! piece, usually in a neighbouring key. A mix (polka+techno, tavern+lo-fi) is
-//! one genre's music drummed by another, with instruments from both.
+//! piece, usually in a neighbouring key. A mix (polka+techno, say) is one
+//! genre's music drummed by another, with instruments from both.
 //!
 //! The synthesiser: polyBLEP oscillators, trapezoidal state-variable filters,
 //! two-operator FM (bells, electric piano), drums made of sines and noise, a
@@ -27,40 +27,58 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Genre names, shown on screen in capitals (the app's font has only A-Z, 0-9 and " -.:/!+()[],%").
-pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN", "POLKA+TECHNO", "TAVERN+LO-FI"];
+pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN"];
 const AMBIENT: usize = 0;
 const TECHNO: usize = 1;
 const SYNTHWAVE: usize = 2;
 const LOFI: usize = 3;
 const POLKA: usize = 4;
 const TAVERN: usize = 5;
-/// The mixes, after the six genres: the first genre writes the music (its
-/// form, meter, harmony and tunes), the second drums it (its beat, its
-/// effects, its tempo, near enough), and each part has an instrument of each.
-const FUSIONS: [(usize, usize); 2] = [(POLKA, TECHNO), (TAVERN, LOFI)];
+/// The music's ids: a genre alone (0-5), or a mix of a primary genre and a
+/// secondary one (`mix_id`): the primary writes the music (its form, meter,
+/// harmony and tunes), the secondary drums it (its beat, its effects, its
+/// tempo, near enough), and each part has an instrument of each.
+pub const IDS: usize = 6 * 7;
 /// Each genre's tempo, about (a mix's lies 60 % of the way to its drummer's).
 const MID_BPM: [f64; 6] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0];
 
-/// A genre's writer and, for a mix, its drummer.
-fn parts(genre: usize) -> (usize, Option<usize>) {
-    match genre.checked_sub(6).and_then(|k| FUSIONS.get(k)) {
-        Some(&(w, d)) => (w, Some(d)),
-        None => (genre % 6, None),
+/// The id of `primary` alone, or mixed with `secondary` (another genre).
+pub fn mix_id(primary: usize, secondary: Option<usize>) -> usize {
+    match secondary.filter(|&g| g != primary && g < 6) {
+        Some(g) => primary % 6 + 6 * (g + 1),
+        None => primary % 6,
     }
 }
 
-/// The genre called `name` (any case, spaces and dashes ignored, a mix's
-/// two in either order), or its index.
-pub fn find(name: &str) -> Option<usize> {
+/// An id's primary genre and secondary one, if a mix.
+pub fn parts(id: usize) -> (usize, Option<usize>) {
+    let (p, s) = (id % 6, (id % IDS) / 6);
+    (p, s.checked_sub(1).filter(|&g| g != p))
+}
+
+/// An id's name: the genre's, or the mix's two ("POLKA+TECHNO").
+pub fn name(id: usize) -> String {
+    match parts(id) {
+        (p, Some(g)) => format!("{}+{}", GENRES[p], GENRES[g]),
+        (p, None) => GENRES[p].to_string(),
+    }
+}
+
+/// `id` in its one spelling (a mix of a genre with itself is the genre alone).
+fn canon(id: usize) -> usize {
+    let (p, s) = parts(id);
+    mix_id(p, s)
+}
+
+/// The music called `name` (any case, spaces and dashes ignored; a mix's
+/// primary genre first), or its id.
+pub fn find(name_: &str) -> Option<usize> {
     let squash = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
-    let want = squash(name);
-    GENRES
-        .iter()
-        .position(|g| {
-            let two: Vec<String> = g.split('+').map(squash).collect();
-            two.concat() == want || two.iter().rev().cloned().collect::<String>() == want
-        })
-        .or_else(|| name.trim().parse().ok().filter(|&n| n < GENRES.len()))
+    let want = squash(name_);
+    (0..IDS)
+        .filter(|&id| canon(id) == id)
+        .find(|&id| squash(&name(id)) == want)
+        .or_else(|| name_.trim().parse().ok().filter(|&n| n < IDS))
 }
 
 const RATE: u32 = 48000;
@@ -1210,6 +1228,10 @@ struct Master {
     dc: [f32; 4],
     ms: f32,
     agc: f32,
+    /// how much of the level's error the leveller takes out (as a power),
+    /// and the most it adds
+    lk: f32,
+    lmax: f32,
     lim: Limiter,
 }
 
@@ -1230,6 +1252,8 @@ impl Master {
             dc: [0.0; 4],
             ms: 0.04,
             agc: 1.0,
+            lk: 0.5,
+            lmax: 2.0,
             lim: Limiter::new(0.89),
         }
     }
@@ -1281,7 +1305,7 @@ impl Master {
 
     /// The leveller, once a block.
     fn block(&mut self, n: usize) {
-        let want = (self.target / (self.ms.sqrt() + 1e-6)).sqrt().clamp(0.5, 2.0);
+        let want = (self.target / (self.ms.sqrt() + 1e-6)).powf(self.lk).clamp(0.5, self.lmax);
         self.agc += (want - self.agc) * (n as f32 / (2.5 * SR));
     }
 }
@@ -2684,8 +2708,10 @@ impl Song {
             TAVERN => self.tavern(s, &mut b, sec, m),
             _ => self.polka(&mut b, sec),
         }
-        // a mix: the drummer's beat for the writer's (but the piece's last bar, its ending)
-        if matches!(self.guest, Some(TECHNO | LOFI)) && !(sec.kind == OUTRO && self.sec_bar + 1 == sec.bars) {
+        // a mix: the drummer's beat for the writer's (but for polka's and
+        // tavern's last bar, their ending)
+        let ending = matches!(self.genre, POLKA | TAVERN) && sec.kind == OUTRO && self.sec_bar + 1 == sec.bars;
+        if self.guest.is_some() && !ending {
             let mut k = n0;
             for j in n0..b.ev.len() {
                 if !matches!(b.ev[j].1, Ev::Hit { .. }) {
@@ -2694,7 +2720,7 @@ impl Song {
                 }
             }
             b.ev.truncate(k);
-            self.drum(s, &mut b, sec);
+            self.drum(s, &mut b, sec, m);
         }
         // the arc: an intro opens the melodic parts' filters, an outro closes them
         let x = (self.sec_bar as f32 + 1.0) / sec.bars as f32;
@@ -4521,24 +4547,43 @@ impl Song {
         let (bs, beats) = (self.bar_steps() as usize, (self.bar_steps() / self.beat_steps()) as usize);
         let compound = self.beat_steps() == 6;
         let r = &mut self.rng;
-        // the drums, and the channel the riser, the crackle and the hiss play on
-        for c in [CH_KICK, CH_SNARE, CH_HAT, CH_PERC, CH_CYM, CH_FX] {
+        // the drums, the second reverb as the drummer has it (techno's
+        // rumble, synthwave's gate) and its sidechain's release
+        for c in [CH_KICK, CH_SNARE, CH_HAT, CH_PERC, CH_CYM] {
             let (to, from) = (&mut s.ch[c], &x.ch[c]);
             to.drums.clone_from(&from.drums);
             (to.gain, to.pan, to.rev, to.dly, to.rev2) = (from.gain, from.pan, from.rev, from.dly, from.rev2);
             (to.lp_base, to.lp) = (from.lp_base, from.lp);
         }
+        (s.r2mode, s.r2gain, s.rev2.fb, s.rev2.damp, s.gate_hold) = (x.r2mode, x.r2gain, x.rev2.fb, x.rev2.damp, x.gate_hold);
         s.sc_rel = x.sc_rel;
+        // the leveller more thorough: one genre's levels were set for its own
+        // drums (techno's music under ambient's would be 6 dB down)
+        (s.m.lk, s.m.lmax) = (0.75, 2.8);
+        // the channel the riser, wind, rain, crackle and hiss play on: the
+        // drummer's if it has one, else the writer's, else opened
+        let fx = &x.ch[CH_FX];
+        if fx.gain > 0.0 {
+            mix(&mut s.ch[CH_FX], fx.gain, fx.pan, fx.rev, fx.dly, 0.0);
+        } else if s.ch[CH_FX].gain == 0.0 {
+            mix(&mut s.ch[CH_FX], 0.5, 0.0, 0.4, 0.0, 0.0);
+        }
         match g {
+            AMBIENT => s.rev_wet = (s.rev_wet + 0.15).min(0.5),
             TECHNO => {
-                // the kick's rumble, and everything else ducking under it
-                (s.r2mode, s.r2gain, s.rev2.fb, s.rev2.damp) = (R2_RUMBLE, x.r2gain, x.rev2.fb, x.rev2.damp);
+                // everything ducking under the kick
                 for (c, d) in
                     [(CH_BASS, 0.35), (CH_KEYS, 0.35), (CH_PAD, 0.5), (CH_ARP, 0.25), (CH_LEAD, 0.2), (CH_BELL, 0.2), (CH_DRONE, 0.3)]
                 {
                     s.ch[c].duck = d;
                 }
             }
+            SYNTHWAVE => {
+                for (c, d) in [(CH_BASS, 0.25), (CH_PAD, 0.45), (CH_ARP, 0.2), (CH_BELL, 0.2)] {
+                    s.ch[c].duck = d;
+                }
+            }
+            TAVERN => self.human = self.human.max(0.01),
             LOFI => {
                 // the record's crackle and hiss, the tape's wow, a dull top, a swing
                 (s.fx.crackle, s.fx.crackle_rate, s.fx.hiss) = (x.fx.crackle, x.fx.crackle_rate, x.fx.hiss);
@@ -4569,6 +4614,7 @@ impl Song {
         let kb = (ka + 1 + r.below(kicks.len() - 1)) % kicks.len();
         self.dr.kicks = [kicks[ka].to_vec(), kicks[kb].to_vec()];
         self.dr.snare_kind = if r.chance(0.3) { 1 } else { 0 };
+        self.dr.tambourine = r.bit_chance();
         self.period = r.pick(&[8.0, 16.0, 32.0]);
         // the instruments
         for k in 0..self.band.tones.len() {
@@ -4605,12 +4651,269 @@ impl Song {
         }
     }
 
-    /// A mix's bar of drums, in the writer's meter.
-    fn drum(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec) {
+    /// A mix's bar of drums, in the writer's meter. Each beat plays a layer
+    /// where its own sense of the section says, and wherever the writer's
+    /// arrangement (`m`) has its own drums play one (a techno intro is
+    /// drums alone).
+    fn drum(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+        // the drums' sends as the drummer has them (a techno writer opens
+        // its kick's rumble each section)
+        if let Some(x) = self.scratch.as_deref() {
+            for c in [CH_KICK, CH_SNARE, CH_HAT, CH_PERC, CH_CYM] {
+                s.ch[c].rev2 = x.ch[c].rev2;
+            }
+        }
         match self.guest {
-            Some(TECHNO) => self.techno_beat(s, b, sec),
-            Some(LOFI) => self.lofi_beat(s, b, sec),
-            _ => {}
+            Some(AMBIENT) => self.ambient_beat(b, sec, m),
+            Some(TECHNO) => self.techno_beat(s, b, sec, m),
+            Some(SYNTHWAVE) => self.synthwave_beat(b, sec, m),
+            Some(LOFI) => self.lofi_beat(s, b, sec, m),
+            Some(POLKA) => self.polka_beat(b, sec, m),
+            Some(_) => self.tavern_drums(b, sec, m),
+            None => {}
+        }
+    }
+
+    /// Ambient's beat in any meter, soft and sparse: a frame drum on the one
+    /// (every other bar but in a full section; halfway too when it is
+    /// strong), a shaker in eighths (16ths in the B groups) and the
+    /// percussion line, quietly, once it is under way; a roll on the hand
+    /// drums closing a group. Nothing in an intro or a break.
+    fn ambient_beat(&mut self, b: &mut Bar, sec: Sec, m: u32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        let beats = bs / beat;
+        let (e, i, h) = (sec.energy, self.sec_bar, self.human.max(0.006));
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        let quiet = matches!(sec.kind, INTRO | BREAK);
+        let full = sec.kind == MAIN;
+        let r = &mut self.rng;
+        let last = (beats - 1) * beat;
+        if (!quiet || m & L_KICK != 0) && (full || i % 2 == 0) {
+            b.hit(0.0, r.range(0.0, h), CH_KICK, 0, 0.6);
+        }
+        if full && e >= 0.6 && beats >= 4 {
+            b.hit((2 * beat) as f32, r.range(0.0, h), CH_KICK, 0, 0.42);
+        }
+        if (full && e >= 0.5) || m & (L_HAT | L_OHAT) != 0 {
+            for st in (0..bs).step_by(if vb { 1 } else { 2 }) {
+                let v = if st % beat == 0 { 0.4 } else { 0.22 };
+                b.hit(st as f32, r.range(0.0, h), CH_HAT, HAT_C, v * r.range(0.7, 1.0));
+            }
+        }
+        if (full && (e >= 0.7 || vb)) || m & L_PERC != 0 {
+            let span = (self.dr.perc.len() as u32 / bs).max(1);
+            let off = (i % span) * bs;
+            for st in 0..bs {
+                let v = self.dr.perc.get((off + st) as usize).copied().unwrap_or(0.0);
+                if v > 0.0 && !(fill == 2 && st >= last) {
+                    b.hit(st as f32, r.range(0.0, h), CH_PERC, self.dr.perc_kind, 0.5 * v * r.range(0.8, 1.0));
+                }
+            }
+        }
+        if fill == 2 && full {
+            for (k, st) in (last..bs).enumerate() {
+                let kind = if k % 2 == 0 { TOM_MID } else { TOM_LO };
+                b.hit(st as f32, r.range(0.0, h), CH_PERC, kind, 0.22 + 0.25 * k as f32 / beat as f32);
+            }
+        }
+    }
+
+    /// Synthwave's beat in any meter: the kick on the odd beats (one and
+    /// three; in three, the one), the gated snare on the even ones (in
+    /// three, the last), hats in eighths (16ths when strong or in the B
+    /// groups) with an open one at the bar's end, an extra kick and a ghost
+    /// snare in the B groups, a rim on the last off-beat; toms or a snare run
+    /// closing a group, a crash at a full section's top. The kick and hats
+    /// alone in an intro, the hats in a break.
+    fn synthwave_beat(&mut self, b: &mut Bar, sec: Sec, m: u32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        let beats = bs / beat;
+        let (e, i) = (sec.energy, self.sec_bar);
+        let vb = self.var_b();
+        let fill = self.fill(sec);
+        let full = sec.kind == MAIN;
+        let (big, small) = (fill == 2 && full, fill == 1 && full);
+        let r = &mut self.rng;
+        let last = (beats - 1) * beat;
+        let kick = sec.kind != BREAK || m & L_KICK != 0;
+        let snare = matches!(sec.kind, MAIN | BUILD | OUTRO) || m & L_SNARE != 0;
+        let sixteens = full && (vb || e >= 0.85);
+        let hats: &[(u32, f32)] = match (beat, sixteens) {
+            (6, false) => &[(0, 0.45), (2, 0.3), (4, 0.35)],
+            (6, true) => &[(0, 0.45), (1, 0.2), (2, 0.3), (3, 0.22), (4, 0.35), (5, 0.2)],
+            (_, false) => &[(0, 0.5), (2, 0.38)],
+            _ => &[(0, 0.45), (1, 0.25), (2, 0.4), (3, 0.25)],
+        };
+        for k in 0..beats {
+            let at = k * beat;
+            let back = if beats == 3 { k == 2 } else { (i * beats + k) % 2 == 1 };
+            let on = if beats == 3 { k == 0 } else { !back };
+            if kick && on && !(big && at >= last) {
+                b.hit(at as f32, 0.0, CH_KICK, 0, if k == 0 { 1.0 } else { 0.9 });
+            }
+            if snare && back && !(big && at >= last) {
+                b.hit(at as f32, 0.0, CH_SNARE, 0, 0.95);
+            }
+            for &(sd, v) in hats {
+                b.hit((at + sd) as f32, 0.0, CH_HAT, HAT_C, v * r.range(0.85, 1.0));
+            }
+        }
+        if full && vb {
+            b.hit((last - beat / 2) as f32, 0.0, CH_KICK, 0, 0.75);
+            if !big {
+                b.hit((bs - 1) as f32, 0.0, CH_SNARE, 1, 0.22);
+            }
+        }
+        if full && e >= 0.8 {
+            b.hit((last + beat / 2) as f32, 0.0, CH_PERC, RIM, 0.5);
+            if !small {
+                b.hit((bs - 2) as f32, 0.0, CH_HAT, HAT_O, 0.45);
+            }
+        }
+        if big {
+            if r.chance(0.6) {
+                let subs: [u32; 4] = if beat == 6 { [0, 2, 3, 5] } else { [0, 1, 2, 3] };
+                for (st, kind) in subs.iter().zip([TOM_HI, TOM_HI, TOM_MID, TOM_LO]) {
+                    b.hit((last + st) as f32, 0.0, CH_PERC, kind, 0.85);
+                }
+            } else {
+                for st in last..bs {
+                    b.hit(st as f32, 0.0, CH_SNARE, 1, 0.5 + 0.4 * (st - last) as f32 / beat as f32);
+                }
+            }
+        } else if small {
+            b.hit((bs - 1) as f32, 0.0, CH_SNARE, 1, 0.35);
+            b.hit((bs - 2) as f32, 0.0, CH_HAT, HAT_O, 0.4);
+        }
+        if full && i % 8 == 0 {
+            b.hit(0.0, 0.0, CH_CYM, 0, if i == 0 { 0.75 } else { 0.5 });
+        }
+    }
+
+    /// Polka's beat in any meter: oom on the beat (the bass drum), pah off it
+    /// (the snare on the off-eighth; in a compound meter the second and third
+    /// eighths; in three, oom-pah-pah), the tambourine with the pahs when it
+    /// is strong (or the writer has hats); a roll into each new section, a
+    /// crash at a full one's top. The ooms alone in an intro, the pahs alone
+    /// in a break.
+    fn polka_beat(&mut self, b: &mut Bar, sec: Sec, m: u32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        let beats = bs / beat;
+        let (e, i, h) = (sec.energy, self.sec_bar, self.human);
+        let fill = self.fill(sec);
+        let full = sec.kind == MAIN;
+        let waltz = beats == 3 && beat == 4;
+        let r = &mut self.rng;
+        let last = (beats - 1) * beat;
+        let roll = fill == 2 && (full || sec.kind == BUILD) && r.chance(0.75);
+        if sec.kind != BREAK || m & L_KICK != 0 {
+            for k in 0..beats {
+                if !(waltz && k > 0) {
+                    let v = if k == 0 { 0.8 } else { 0.7 } + 0.15 * e;
+                    b.hit((k * beat) as f32, r.range(0.0, h), CH_KICK, 0, v);
+                }
+            }
+        }
+        let pah = sec.kind != INTRO || m & L_SNARE != 0;
+        let tambourine = (self.dr.tambourine && e > 0.75 && full) || m & (L_HAT | L_OHAT) != 0;
+        let quiet = if sec.kind == BREAK { 0.6 } else { 1.0 };
+        for k in 0..beats {
+            let at = k * beat;
+            let pahs: &[u32] = match (beat, waltz) {
+                (6, _) => &[2, 4],
+                (_, true) if k == 0 => &[],
+                (_, true) => &[0],
+                _ => &[2],
+            };
+            for &p in pahs {
+                let st = at + p;
+                if roll && st >= last {
+                    continue;
+                }
+                if pah {
+                    b.hit(st as f32, r.range(0.0, h), CH_SNARE, 0, (0.35 + 0.35 * e) * quiet);
+                }
+                if tambourine {
+                    b.hit(st as f32, r.range(0.0, h), CH_HAT, HAT_C, 0.4);
+                }
+            }
+        }
+        if roll {
+            for k in 0..2 * beat {
+                b.hit(last as f32 + 0.5 * k as f32, 0.0, CH_SNARE, 1, 0.3 + 0.55 * k as f32 / (2 * beat) as f32);
+            }
+        }
+        if full && i == 0 {
+            b.hit(0.0, 0.0, CH_CYM, 0, 0.6 + 0.2 * e);
+        }
+    }
+
+    /// Tavern's beat in any meter, a bodhran's: the frame drum's low stroke on
+    /// the beat and lighter ones between (three to a beat in a compound
+    /// meter; one a beat in three), a ghost in the B groups, a shaker off the
+    /// beat once it is under way, bones in eighths when it is strong, claps
+    /// at its height; loosely timed. The drum alone on the one in an intro,
+    /// softly in a break.
+    fn tavern_drums(&mut self, b: &mut Bar, sec: Sec, m: u32) {
+        let (bs, beat) = (self.bar_steps(), self.beat_steps());
+        let beats = bs / beat;
+        let (e, h) = (sec.energy, self.human.max(0.01));
+        let vb = self.var_b();
+        let waltz = beats == 3 && beat == 4;
+        let r = &mut self.rng;
+        if sec.kind == INTRO && m & L_KICK == 0 {
+            b.hit(0.0, r.range(0.0, h), CH_KICK, 0, 0.7);
+            return;
+        }
+        let quiet = if sec.kind == BREAK && m & L_KICK == 0 { 0.6 } else { 1.0 };
+        for k in 0..beats {
+            let at = (k * beat) as f32;
+            let v = quiet * if k == 0 { 0.9 } else { 0.72 };
+            if beat == 6 {
+                b.hit(at, r.range(0.0, h), CH_KICK, 0, v);
+                b.hit(at + 2.0, r.range(0.0, h), CH_KICK, 1, 0.42 * quiet);
+                b.hit(at + 4.0, r.range(0.0, h), CH_KICK, 1, 0.5 * quiet);
+                if vb && r.chance(0.35) {
+                    b.hit(at + 3.0, r.range(0.0, h), CH_KICK, 1, 0.3 * quiet);
+                }
+            } else if waltz {
+                b.hit(at, r.range(0.0, h), CH_KICK, if k == 0 { 0 } else { 1 }, v);
+            } else {
+                let strong = k % 2 == 0;
+                b.hit(at, r.range(0.0, h), CH_KICK, if strong { 0 } else { 1 }, if strong { v } else { 0.6 * quiet });
+                b.hit(at + 2.0, r.range(0.0, h), CH_KICK, 1, 0.4 * quiet);
+                if vb && r.chance(0.3) {
+                    b.hit(at + 3.0, r.range(0.0, h), CH_KICK, 1, 0.28 * quiet);
+                }
+            }
+        }
+        if (sec.kind != BREAK && e >= 0.6) || m & (L_HAT | L_OHAT) != 0 {
+            for k in 0..beats {
+                let at = (k * beat) as f32;
+                b.hit(at + 2.0, r.range(0.0, h), CH_HAT, HAT_C, 0.35);
+                if beat == 6 {
+                    b.hit(at + 4.0, r.range(0.0, h), CH_HAT, HAT_C, 0.3);
+                }
+                if k % 2 == 1 {
+                    b.hit(at, r.range(0.0, h), CH_HAT, HAT_O, 0.45);
+                }
+            }
+        }
+        if (sec.kind == MAIN && e >= 0.75) || m & L_PERC != 0 {
+            for st in (0..bs).step_by(2) {
+                let on_beat = st % beat == 0;
+                if on_beat || r.chance(0.7) {
+                    b.hit(st as f32, r.range(0.0, h), CH_PERC, 0, if on_beat { 0.55 } else { 0.32 });
+                }
+            }
+        }
+        if sec.kind == MAIN && e >= 0.9 {
+            for k in 1..beats {
+                if beat == 6 || k % 2 == 1 {
+                    b.hit((k * beat) as f32, r.range(0.0, h), CH_SNARE, 0, 0.6);
+                }
+            }
         }
     }
 
@@ -4620,7 +4923,7 @@ impl Song {
     /// group, a roll into a full section, a crash at its top, a riser over
     /// the bars before it, the kick's rumble when everything plays, and the
     /// bass's and chords' filters sweeping as acid's do.
-    fn techno_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec) {
+    fn techno_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let (bs, beat) = (self.bar_steps(), self.beat_steps());
         let beats = bs / beat;
         let (e, i) = (sec.energy, self.sec_bar);
@@ -4647,13 +4950,14 @@ impl Song {
         };
         for k in 0..beats {
             let at = k * beat;
-            if sec.kind != BREAK && !(drop && at >= last) {
+            if (sec.kind != BREAK || m & L_KICK != 0) && !(drop && at >= last) {
                 b.hit(at as f32, 0.0, CH_KICK, 0, if k == 0 { 1.0 } else { 0.9 });
             }
-            if (full || sec.kind == BUILD) && (i * beats + k) % 2 == 1 && !rolling && !(big && at >= last) {
+            let claps = full || sec.kind == BUILD || m & L_SNARE != 0;
+            if claps && (i * beats + k) % 2 == 1 && !rolling && !(big && at >= last) {
                 b.hit(at as f32, 0.0, CH_SNARE, 0, 0.9);
             }
-            if sec.kind != BREAK || vb {
+            if sec.kind != BREAK || vb || m & (L_HAT | L_OHAT) != 0 {
                 for (sub, &v) in hats.iter().enumerate() {
                     let main = sub == 2 || (beat == 6 && sub == 4);
                     if main || vb || r.chance(0.15 + 0.75 * e) {
@@ -4665,7 +4969,7 @@ impl Song {
                 b.hit((at + if beat == 6 { 3 } else { 2 }) as f32, 0.0, CH_HAT, HAT_O, 0.5);
             }
         }
-        if full && (e >= 0.85 || vb) {
+        if (full && (e >= 0.85 || vb)) || m & L_PERC != 0 {
             let span = (self.dr.perc.len() as u32 / bs).max(1);
             let off = (i % span) * bs;
             for st in 0..bs {
@@ -4710,20 +5014,20 @@ impl Song {
     /// hats with 16ths among them in the B groups, a shaker when everything
     /// plays; the drums out for the last beat or a pickup closing a group.
     /// No drums in an intro, only the hats in a break.
-    fn lofi_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec) {
+    fn lofi_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let (bs, beat) = (self.bar_steps(), self.beat_steps());
         let beats = bs / beat;
         let (e, i, h) = (sec.energy, self.sec_bar, self.human);
         let vb = self.var_b();
         let fill = self.fill(sec);
         s.ch[CH_KEYS].cut = (0.5 * self.walk[0]).exp2();
-        if sec.kind == INTRO {
+        if sec.kind == INTRO && m & (L_KICK | L_SNARE | L_HAT | L_OHAT | L_PERC) == 0 {
             return;
         }
         let r = &mut self.rng;
         let gap = fill == 2 && r.chance(0.5);
         let last = (beats - 1) * beat;
-        let drums = matches!(sec.kind, MAIN | OUTRO | BUILD);
+        let drums = matches!(sec.kind, MAIN | OUTRO | BUILD) || m & L_KICK != 0;
         // a 16th of a quarter to a step of this beat
         let sub = |q: u32| if beat == 6 { [0, 2, 4, 5][q as usize] } else { q };
         if drums {
@@ -4737,7 +5041,7 @@ impl Song {
                 }
             }
         }
-        if drums && (e >= 0.6 || sec.kind != MAIN) {
+        if (drums && (e >= 0.6 || sec.kind != MAIN)) || m & L_SNARE != 0 {
             let backs: &[u32] = match beats {
                 3 => &[2],
                 4 => &[1, 3],
@@ -4776,7 +5080,7 @@ impl Song {
         if vb || gap {
             b.hit((last + beat / 2) as f32, r.range(0.0, h), CH_HAT, HAT_O, 0.4);
         }
-        if sec.kind == MAIN && e >= 0.75 {
+        if (sec.kind == MAIN && e >= 0.75) || m & L_PERC != 0 {
             for st in (1..bs).step_by(2) {
                 if r.chance(0.8) {
                     b.hit(st as f32, r.range(0.0, h), CH_PERC, SHAKER, 0.3 * r.range(0.6, 1.0));
@@ -4788,13 +5092,15 @@ impl Song {
 
 /// A mix's drummer, this piece: a percussion line (a bar, or two of a
 /// two-beat meter), lo-fi's kicks (A and B: 16ths of four beats, or three)
-/// and which of its snares.
+/// and which of its snares, whether polka's tambourine plays.
 #[derive(Default)]
 struct Drummer {
     perc: Vec<f32>,
     perc_kind: u8,
     kicks: [Vec<u16>; 2],
     snare_kind: u8,
+    /// polka's tambourine
+    tambourine: bool,
 }
 
 // -- polka
@@ -8065,7 +8371,7 @@ struct Engine {
 
 impl Engine {
     fn new(genre: usize, seed: u64) -> Engine {
-        let genre = genre % GENRES.len();
+        let genre = canon(genre);
         let mut syn = Synth::new(genre);
         let song = Song::new(genre, seed, &mut syn);
         Engine { genre, syn, song, ev: Vec::with_capacity(1024), evi: 0, t: 0, pos: 0.0, cur: (0.0, 1.0) }
@@ -8144,7 +8450,7 @@ impl Mix {
         while done < frames {
             let mut n = (frames - done).min(BLOCK);
             if self.next.is_none() {
-                if self.want % GENRES.len() == self.cur.genre {
+                if canon(self.want) == self.cur.genre {
                     self.at = None;
                 } else {
                     let at = match self.at {
@@ -8264,7 +8570,7 @@ unsafe extern "C" fn fill(user: *mut std::ffi::c_void, stream: *mut u8, len: std
 }
 
 impl Player {
-    /// Starts playing `GENRES[genre]` (index wraps), seeded: through the
+    /// Starts playing the music `genre` (an id: `mix_id`), seeded: through the
     /// sound device, else pacat. Error if neither plays.
     pub fn start(genre: usize, seed: u64) -> Result<Player, String> {
         Player::device(genre, seed).or_else(|e| {
@@ -8281,7 +8587,7 @@ impl Player {
     /// 85 ms, at a time). With PulseAudio's (PipeWire's) server SDL runs the
     /// callback on a real-time thread (round robin, priority 20 here).
     fn device(genre: usize, seed: u64) -> Result<Player, String> {
-        let genre = genre % GENRES.len();
+        let genre = canon(genre);
         let want = Arc::new(AtomicUsize::new(genre));
         let frames = Arc::new(AtomicU64::new(0));
         let live = Box::new(Live { mix: std::sync::Mutex::new((Mix::new(genre, seed), Vec::new())), want: want.clone(), frames: frames.clone() });
@@ -8301,7 +8607,7 @@ impl Player {
             .spawn()
             .map_err(|e| format!("{}: {e}", cmd[0]))?;
         let mut pipe = child.stdin.take().expect("piped stdin");
-        let genre = genre % GENRES.len();
+        let genre = canon(genre);
         let want = Arc::new(AtomicUsize::new(genre));
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(AtomicU64::new(0));
@@ -8345,9 +8651,10 @@ impl Player {
         Ok(p)
     }
 
-    /// Switches genre (at the next bar line, or beat when bars are long, with a crossfade).
+    /// Switches the music (to an id: `mix_id`), at the next bar line, or beat
+    /// when bars are long, with a crossfade.
     pub fn set_genre(&self, genre: usize) {
-        self.want.store(genre % GENRES.len(), Ordering::Relaxed);
+        self.want.store(canon(genre), Ordering::Relaxed);
     }
 
     pub fn genre(&self) -> usize {
@@ -8375,7 +8682,7 @@ impl Drop for Player {
     }
 }
 
-/// Renders `secs` seconds of `GENRES[genre]` with `seed` to a 16-bit stereo 48 kHz WAV (deterministic for a given genre+seed).
+/// Renders `secs` seconds of the music `genre` (an id) with `seed` to a 16-bit stereo 48 kHz WAV (deterministic for a given genre+seed).
 pub fn render_wav(genre: usize, seed: u64, secs: f64, path: &str) -> Result<(), String> {
     let frames = (secs.max(0.0) * RATE as f64).round() as usize;
     let bytes = frames * 4;
@@ -8514,7 +8821,7 @@ pub fn cli(args: &[String], seed: u64) {
     let genre = args.first().and_then(|g| find(g));
     let secs = args.get(1).and_then(|s| s.parse::<f64>().ok());
     let (Some(genre), Some(secs), Some(path)) = (genre, secs, args.get(2)) else {
-        eprintln!("fleece: --musicwav GENRE SECONDS OUT.wav, GENRE one of {}", GENRES.join(", "));
+        eprintln!("fleece: --musicwav GENRE SECONDS OUT.wav, GENRE one of {} or two (POLKA+TECHNO: the first's music, the second's drums)", GENRES.join(", "));
         std::process::exit(2);
     };
     let t0 = Instant::now();
@@ -8532,7 +8839,7 @@ pub fn cli(args: &[String], seed: u64) {
         .collect();
     println!(
         "{path}: {secs:.1} s of {} (seed {seed}) in {took:.2} s, {:.0}x real time; pieces: {}",
-        GENRES[genre % GENRES.len()],
+        name(genre),
         secs / took.max(1e-9),
         p.join(", ")
     );
@@ -8622,64 +8929,79 @@ mod tests {
     fn genres_found_by_name() {
         assert_eq!(find("lofi"), Some(LOFI));
         assert_eq!(find("Lo-Fi"), Some(LOFI));
-        assert_eq!(find("polka+techno"), Some(6));
-        assert_eq!(find("techno polka"), Some(6));
-        assert_eq!(find("lofi-tavern"), Some(7));
-        assert_eq!(find("7"), Some(7));
+        assert_eq!(find("polka+techno"), Some(mix_id(POLKA, Some(TECHNO))));
+        assert_eq!(find("techno polka"), Some(mix_id(TECHNO, Some(POLKA))));
+        assert_eq!(find("lofi-tavern"), Some(mix_id(LOFI, Some(TAVERN))));
+        assert_eq!(find("3"), Some(LOFI));
         assert_eq!(find("disco"), None);
-        assert_eq!(find("polka+lofi"), None);
-    }
-
-    /// A mix's bars: the drummer's beat in the writer's meter (polka's 2/4
-    /// gets a kick on every beat and a clap on the second; the writer's own
-    /// drums, such as the tavern frame drum's second stroke, are gone but
-    /// for the piece's last bar), every hit inside its bar.
-    #[test]
-    fn mixes_drum_in_the_writers_meter() {
-        for (genre, seed) in [(6, 1u64), (6, 2), (7, 1), (7, 2), (7, 3)] {
-            let mut e = Engine::new(genre, seed);
-            assert!(e.syn.ch[CH_FX].gain > 0.0, "genre {genre}: the riser's and the crackle's channel is shut");
-            let mut ev: Vec<(u64, Ev)> = Vec::new();
-            let (mut mains, mut claps) = (0, 0);
-            while e.pos < 400.0 * SR as f64 {
-                let t0 = e.pos;
-                let len = e.song.bar(&mut e.syn, t0, &mut ev);
-                e.pos += len;
-                let sec = e.song.plan[e.song.sec];
-                let ending = sec.kind == OUTRO && e.song.sec_bar == sec.bars;
-                let bs = e.song.bar_steps();
-                let step = len / bs as f64;
-                let mut kicks = Vec::new();
-                for &(t, x) in &ev {
-                    if let Ev::Hit { ch, kind, .. } = x {
-                        let at = (t as f64 - t0) / step;
-                        assert!((-0.01..bs as f64).contains(&at), "genre {genre} seed {seed}: a hit at {at} of {bs}");
-                        assert!(ending || !(genre == 7 && ch as usize == CH_KICK && kind == 1), "the writer's frame drum");
-                        if ch as usize == CH_KICK {
-                            kicks.push(at);
-                        }
-                        if ch as usize == CH_SNARE && kind == 0 && genre == 6 && (at - 4.0).abs() < 0.01 {
-                            claps += 1;
-                        }
-                    }
-                }
-                if sec.kind == MAIN {
-                    mains += 1;
-                    assert!(!kicks.is_empty(), "genre {genre} seed {seed}: no kick");
-                    if genre == 6 {
-                        assert!(kicks.iter().any(|&k| k.abs() < 0.01), "genre {genre} seed {seed}: no kick on the one");
-                    }
-                }
-                ev.clear();
-            }
-            assert!(mains > 50, "genre {genre} seed {seed}: {mains} main bars");
-            assert!(genre != 6 || claps > mains / 2, "genre {genre} seed {seed}: {claps} claps in {mains} bars");
+        assert_eq!(find("polka+polka"), None);
+        assert_eq!(name(mix_id(TAVERN, Some(LOFI))), "TAVERN+LO-FI");
+        assert_eq!(mix_id(POLKA, Some(POLKA)), POLKA);
+        for id in 0..IDS {
+            assert_eq!(canon(id), mix_id(parts(id).0, parts(id).1));
+            assert_ne!(parts(id).1, Some(parts(id).0));
         }
     }
 
-    /// Genres flipped every 3-7 s for four minutes, from a few seeds: the
-    /// engines built for switches (with derived seeds) never panic, never
-    /// produce a non-finite sample or one over the ceiling, never go silent.
+    /// Every mix's bars: the drummer's beat in the writer's meter, every hit
+    /// inside its bar, drums in every full section, the effects channel open;
+    /// techno's kick on the one, polka+techno's clap on the second beat; the
+    /// tavern writer's frame drum (its second stroke) gone under another
+    /// drummer but for the piece's last bar.
+    #[test]
+    fn mixes_drum_in_the_writers_meter() {
+        for p in 0..6 {
+            for g in (0..6).filter(|&g| g != p) {
+                let id = mix_id(p, Some(g));
+                for seed in [1u64, 2] {
+                    let mut e = Engine::new(id, seed);
+                    assert!(e.syn.ch[CH_FX].gain > 0.0, "{}: the riser's and the crackle's channel is shut", name(id));
+                    let mut ev: Vec<(u64, Ev)> = Vec::new();
+                    let (mut mains, mut claps) = (0, 0);
+                    while e.pos < 300.0 * SR as f64 {
+                        let t0 = e.pos;
+                        let len = e.song.bar(&mut e.syn, t0, &mut ev);
+                        e.pos += len;
+                        let sec = e.song.plan[e.song.sec];
+                        let ending = sec.kind == OUTRO && e.song.sec_bar == sec.bars;
+                        let bs = e.song.bar_steps();
+                        let step = len / bs as f64;
+                        let (mut hits, mut one) = (0, false);
+                        for &(t, x) in &ev {
+                            if let Ev::Hit { ch, kind, .. } = x {
+                                let at = (t as f64 - t0) / step;
+                                assert!((-0.01..bs as f64).contains(&at), "{} seed {seed}: a hit at {at} of {bs}", name(id));
+                                assert!(
+                                    ending || !(p == TAVERN && g != TAVERN && ch as usize == CH_KICK && kind == 1),
+                                    "{}: the writer's frame drum",
+                                    name(id)
+                                );
+                                hits += 1;
+                                one |= ch as usize == CH_KICK && at.abs() < 0.01;
+                                if ch as usize == CH_SNARE && kind == 0 && p == POLKA && g == TECHNO && (at - 4.0).abs() < 0.01 {
+                                    claps += 1;
+                                }
+                            }
+                        }
+                        if sec.kind == MAIN {
+                            mains += 1;
+                            assert!(hits > 0, "{} seed {seed}: no drums", name(id));
+                            assert!(g != TECHNO || one, "{} seed {seed}: no kick on the one", name(id));
+                        }
+                        ev.clear();
+                    }
+                    assert!(mains > 20, "{} seed {seed}: {mains} main bars", name(id));
+                    assert!(p != POLKA || g != TECHNO || claps > mains / 2, "{} seed {seed}: {claps} claps in {mains} bars", name(id));
+                }
+            }
+        }
+    }
+
+    /// Genres and mixes flipped every 3-7 s for four minutes, from a few
+    /// seeds: the engines built for switches (with derived seeds) never
+    /// panic, never produce a non-finite sample or one over the ceiling,
+    /// never go silent for half a second (a mix's sparse beat can rest for
+    /// a tenth between hits).
     #[test]
     #[ignore = "renders 16 minutes of audio: cargo test --bin fleece music -- --ignored"]
     fn genre_switching_stress() {
@@ -8688,14 +9010,26 @@ mod tests {
             let mut r = Rng::new(base * 77);
             let mut buf = vec![0.0f32; 2 * 4800];
             let mut next = r.range(3.0, 7.0);
+            let mut quiet = 0;
             for k in 1..=2400 {
                 m.render(&mut buf);
                 assert!(buf.iter().all(|x| x.is_finite() && x.abs() <= 0.945), "seed {base}, {} s", k / 10);
                 let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
-                assert!(k < 10 || rms > 1e-3, "seed {base}: silent at {} s", k / 10);
+                quiet = if rms > 1e-3 { 0 } else { quiet + 1 };
+                let (song, sec) = (&m.cur.song, m.cur.song.plan[m.cur.song.sec]);
+                assert!(
+                    k < 10 || quiet < 5,
+                    "seed {base}: silent at {} s ({}, section {} kind {} bar {} mask {:b})",
+                    k / 10,
+                    name(m.cur.genre),
+                    song.sec,
+                    sec.kind,
+                    song.sec_bar,
+                    sec.mask
+                );
                 let t = k as f32 / 10.0;
                 if t > next {
-                    m.want = r.below(GENRES.len());
+                    m.want = r.below(IDS);
                     next = t + r.range(3.0, 7.0);
                 }
             }
@@ -8708,8 +9042,8 @@ mod tests {
     #[test]
     #[ignore = "a sweep: cargo test --bin fleece music -- --ignored"]
     fn composer_sweep() {
-        for genre in 0..GENRES.len() {
-            for seed in 0..50u64 {
+        for genre in (0..IDS).filter(|&id| canon(id) == id) {
+            for seed in 0..if genre < 6 { 50 } else { 8u64 } {
                 let mut e = Engine::new(genre, seed);
                 let mut ev = Vec::new();
                 while e.pos < 1800.0 * SR as f64 {

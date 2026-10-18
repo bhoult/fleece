@@ -100,7 +100,7 @@ pub struct Opts {
     pub optimize: bool,
     /// --musicwav: genre, seconds, file
     pub musicwav: Vec<String>,
-    /// generated music (music::GENRES): played in the window, the soundtrack of a video
+    /// generated music (a music::mix_id: a genre, or a primary and a secondary): played in the window, the soundtrack of a video
     pub music: Option<usize>,
 }
 
@@ -117,7 +117,7 @@ fn usage() -> ! {
     eprintln!("              [--optimize on|off] [--supersample 1-4] [--taste on|off]");
     eprintln!("       (default: Electric Sheep's 800x592 frame, scaled to the window, at 30 fps, with v2's");
     eprintln!("       effects: glow, short trails, auto levels, camera drift, motion for every sheep; --classic: none)");
-    eprintln!("       --music GENRE: generated music the show follows ({}); a video's soundtrack", music::GENRES.join(", ").to_lowercase());
+    eprintln!("       --music GENRE: generated music the show follows ({}; or two, as polka+techno: the first's music, the second's drums); a video's soundtrack", music::GENRES.join(", ").to_lowercase());
     eprintln!("       fleece --shot OUT.png [--quality Q] [--angle DEG] [--breed N] [size]   one still");
     eprintln!("       fleece --frames N [--fps F] [--out DIR --every K] [--keys F:K,...]   headless run");
     eprintln!("       fleece --video OUT.mp4 [--seconds S | --frames N] [--fps F] [--quality Q] [--crf N] [size]");
@@ -342,7 +342,7 @@ fn parse() -> Opts {
                         }
                     }
                     None => {
-                        eprintln!("fleece: --music: one of {}", music::GENRES.join(", ").to_lowercase());
+                        eprintln!("fleece: --music: one of {}, or two (polka+techno: the first's music, the second's drums)", music::GENRES.join(", ").to_lowercase());
                         std::process::exit(2)
                     }
                 }

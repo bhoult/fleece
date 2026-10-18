@@ -176,9 +176,11 @@ pub struct App {
     audio: Option<crate::audio::Audio>,
     track: Option<(Vec<crate::audio::Levels>, f64)>,
     track_t: f64,
-    /// music fleece makes and plays (N), and its seed
+    /// music fleece makes and plays (N), its seed, and the secondary genre
+    /// (J) drumming for the primary one
     music: Option<crate::music::Player>,
     music_seed: u64,
+    music_with: Option<usize>,
 }
 
 impl App {
@@ -294,6 +296,7 @@ impl App {
             track_t: 0.0,
             music: None,
             music_seed: o.seed as u64,
+            music_with: None,
         }
     }
 
@@ -634,11 +637,20 @@ impl App {
                 Item::button(
                     "N",
                     match &self.music {
-                        Some(p) => format!("MUSIC {}", crate::music::GENRES[p.genre()]),
+                        Some(p) => format!("MUSIC {}", crate::music::GENRES[crate::music::parts(p.genre()).0]),
                         None => "MUSIC".into(),
                     },
                     'n',
                     self.music.is_some(),
+                ),
+                Item::button(
+                    "J",
+                    match self.music_with {
+                        Some(g) => format!("SECONDARY {}", crate::music::GENRES[g]),
+                        None => "SECONDARY".into(),
+                    },
+                    'j',
+                    self.music_with.is_some(),
                 ),
             ],
             vec![
@@ -930,17 +942,47 @@ impl App {
         self.opt_note = Some((note, Instant::now()));
     }
 
-    /// N: music off, then each genre in turn, then off.
+    /// N: the primary genre: music off, then each genre in turn, then off.
+    /// The secondary steps aside when the primary becomes it.
     fn cycle_music(&mut self) {
+        use crate::music::{GENRES, mix_id, parts};
+        let next = match &self.music {
+            None => Some(0),
+            Some(p) => Some(parts(p.genre()).0 + 1).filter(|&g| g < GENRES.len()),
+        };
+        let Some(g) = next else {
+            self.music = None;
+            return;
+        };
+        if self.music_with == Some(g) {
+            self.music_with = None;
+        }
         match &self.music {
-            None => self.start_music(0),
-            Some(p) if p.genre() + 1 < crate::music::GENRES.len() => p.set_genre(p.genre() + 1),
-            Some(_) => self.music = None,
+            Some(p) => p.set_genre(mix_id(g, self.music_with)),
+            None => self.start_music(mix_id(g, self.music_with)),
         }
     }
 
-    /// Plays generated music of `genre`, and turns audio on so the show follows it.
+    /// J: the secondary genre, which drums for the primary and lends it half
+    /// its instruments: none, then each genre but the primary in turn, then
+    /// none. A change starts a new piece (crossfading at the next bar).
+    fn cycle_secondary(&mut self) {
+        use crate::music::{GENRES, mix_id, parts};
+        let primary = self.music.as_ref().map(|p| parts(p.genre()).0);
+        let mut g = self.music_with.map_or(0, |g| g + 1);
+        if Some(g) == primary {
+            g += 1;
+        }
+        self.music_with = (g < GENRES.len()).then_some(g);
+        if let (Some(p), Some(primary)) = (&self.music, primary) {
+            p.set_genre(mix_id(primary, self.music_with));
+        }
+    }
+
+    /// Plays generated music `genre` (an id: a genre, or a primary and a
+    /// secondary), and turns audio on so the show follows it.
     pub fn start_music(&mut self, genre: usize) {
+        self.music_with = crate::music::parts(genre).1;
         if self.headless {
             // never sound from a run without a window
             eprintln!("fleece: no music without a window (a video takes --music as its soundtrack)");
@@ -1023,6 +1065,7 @@ impl App {
             'a' => self.fx.audio = next(self.fx.audio, 4),
             'z' => self.optimize(),
             'n' => self.cycle_music(),
+            'j' => self.cycle_secondary(),
             _ => {}
         }
         true
@@ -1357,7 +1400,7 @@ pub fn video(o: &Opts) {
         let _ = std::fs::create_dir_all(&dir);
         let path = format!("{dir}/music-{}.wav", std::process::id());
         let secs = frames as f64 / o.fps + 1.0;
-        eprintln!("fleece: making {:.0} s of {} music", secs, crate::music::GENRES[g].to_lowercase());
+        eprintln!("fleece: making {:.0} s of {} music", secs, crate::music::name(g).to_lowercase());
         if let Err(e) = crate::music::render_wav(g, o.seed as u64, secs, &path) {
             eprintln!("fleece: music: {e}");
             std::process::exit(1)
