@@ -9667,7 +9667,8 @@ type Make = fn(&mut Rng) -> Patch;
 type MakeKit = fn(&mut Rng) -> Vec<DrumPatch>;
 
 /// How loud a patch plays: the RMS of one note at `note`, velocity 0.8, over
-/// 0.12 s after a short attack (the patch's own attack would only delay it).
+/// 0.12 s after a short attack (the patch's own attack would only delay it);
+/// a sampled one's loudest 0.12 s of its first 0.45 s.
 fn loudness(p: &Patch, note: f32) -> f32 {
     loudness_in(p, note, samples::bank())
 }
@@ -9677,6 +9678,20 @@ fn loudness_in(p: &Patch, note: f32, bank: Option<&Bank>) -> f32 {
     let q = Patch { a: p.a.min(0.03), ..*p };
     let mut v = VOICE;
     v.start(&q, note, 0.8, (0.5 * SR) as i64, false, 0x1234_5679, bank, 0);
+    if v.sm.n > 0 {
+        // a recording speaks in its own time (a bowed string's swell): its
+        // loudest 0.12 s of the gate's first 0.45 s
+        let mut e = Vec::with_capacity(700);
+        let mut buf = [[0.0f32; 2]; BLOCK];
+        for _ in 0..(0.45 * SR) as usize / BLOCK {
+            buf.fill([0.0; 2]);
+            v.render(1.0, &mut buf, bank);
+            e.push(buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>());
+        }
+        let (skip, w) = ((0.03 * SR) as usize / BLOCK, (0.12 * SR) as usize / BLOCK);
+        let most = e[skip..].windows(w).map(|x| x.iter().sum::<f32>()).fold(0.0, f32::max);
+        return (most / (2 * w * BLOCK) as f32).sqrt().max(1e-5);
+    }
     let mut buf = [[0.0f32; 2]; BLOCK];
     let (mut sum, mut n) = (0.0f32, 0usize);
     for k in 0..(0.15 * SR) as usize / BLOCK {
