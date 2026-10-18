@@ -11279,9 +11279,10 @@ fn kit_kick_909_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// that rings longest and lowest, as the 909's does (-20 and -40 dB at
 /// 0.17 and 0.32 s, its peak at 66 Hz; the synthesiser's 0.24 and 0.44 s,
 /// 54 Hz; Standard's 0.06-0.11 and 0.20 s; Room's 0.07-0.10 and 0.24-0.27 s).
-/// +9.1 dB (techno +9.5, synthwave +8.8).
+/// +10.3 dB (techno +9.5 and +10.2, synthwave +8.8 and +10.5: two
+/// measurements, the second at a trim of +9.1).
 fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
-    kit_trim(rec_kit(kit_kick_909_synth(r), &[samples::drum("Electronic", 35)]), 9.1)
+    kit_trim(rec_kit(kit_kick_909_synth(r), &[samples::drum("Electronic", 35)]), 10.3)
 }
 /// A recorded kick keeping the synthesiser's drive (`rec_kit` turns it off):
 /// for a kick whose distortion is its sound.
@@ -11410,18 +11411,20 @@ fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
 /// Hats: [closed, open].
 /// The 808's; recorded, the TR-808 kit's closed hat (42) and its open hat as
 /// key 44 has it (shorter than 46's: -30 dB in 0.38 s, the synthesiser's
-/// 0.24 s; 46's 1.5 s). -11.6 dB (synthwave; the recorded hats ring longer
-/// and brighter in the ear than these darker, shorter ones).
+/// 0.24 s; 46's 1.5 s). -10.1 dB (synthwave -11.6, techno -8.4: the
+/// difference split; the recorded hats ring longer and brighter in the ear
+/// than these darker, shorter ones).
 fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
     let keys = [samples::drum("TR-808", 42), samples::drum("TR-808", 44)];
-    kit_trim(rec_kit(hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8), &keys), -11.6)
+    kit_trim(rec_kit(hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8), &keys), -10.1)
 }
 /// The 909's (recordings of cymbals); recorded, the Electronic kit's (42,
 /// 46): a recorded pair as the 909's are (MuseScore General has no 909).
-/// +3.5 dB (techno +5.8, synthwave +2.4).
+/// +4.2 dB (techno +5.8 and +6.0, synthwave +2.4 and +2.5, in two
+/// measurements, the second at a trim of +3.5: the difference split).
 fn kit_hats_909(r: &mut Rng) -> Vec<DrumPatch> {
     let keys = [samples::drum("Electronic", 42), samples::drum("Electronic", 46)];
-    kit_trim(rec_kit(hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8), &keys), 3.5)
+    kit_trim(rec_kit(hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8), &keys), 4.2)
 }
 fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
