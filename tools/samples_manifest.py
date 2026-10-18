@@ -711,7 +711,7 @@ def sources_md(jobs, gains, dest):
         w("")
     w("## Processing\n")
     w("- Decoded and resampled to 48 kHz with ffmpeg (soxr where available), 16-bit with triangular dither;"
-      " channels as recorded (all of these are stereo).")
+      " channels as recorded (stereo, but for the harmonica, recorded in mono).")
     w("- Leading silence trimmed: the onset is the first sample within %g dB of the file's peak, and the file"
       " starts 1 ms before it (that 1 ms faded in)." % -ONSET_DB)
     w("- Tail cut at the end of the last 10 ms that reaches %g dB relative to the peak, with a 50 ms raised-cosine"

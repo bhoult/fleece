@@ -9477,7 +9477,7 @@ fn ska_organ_rec(r: &mut Rng) -> Patch {
 }
 
 fn ska_organ_stab_rec(r: &mut Rng) -> Patch {
-    let p = stab_organ(r);
+    let p = stab_organ_synth(r);
     Patch { a: p.a, ..ska_rec(p, samples::gm("Percussive Organ")) }
 }
 
@@ -10082,8 +10082,11 @@ fn pad_strings(r: &mut Rng) -> Patch {
     }
 }
 
+/// A brass pad: two saws through a swept low-pass; recorded, MuseScore
+/// General's Synth Brass 1 (three saws, -7, 0 and +7 cents) through the same
+/// filter and its sweep.
 fn pad_brass(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         unison: 2,
         detune: 6.0,
         width: 0.5,
@@ -10098,7 +10101,8 @@ fn pad_brass(r: &mut Rng) -> Patch {
         r: 0.6,
         gain: 0.15,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Synth Brass 1"), 62.0)
 }
 
 fn pad_choir(r: &mut Rng) -> Patch {
@@ -10120,8 +10124,10 @@ fn pad_choir(r: &mut Rng) -> Patch {
     }
 }
 
+/// A glassy FM pad; recorded, Bowed Glass (a synthesiser's bell over a saw
+/// stack), its swell under the pad's attack.
 fn pad_glass(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         filter: false,
         fm: r.range(0.8, 1.4),
         ratio: r.pick(&[2.0, 3.0]),
@@ -10132,11 +10138,15 @@ fn pad_glass(r: &mut Rng) -> Patch {
         r: 2.5,
         gain: 0.2,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Bowed Glass"), 60.0)
 }
 
+/// A shimmering pad (triangles and a sine an octave and more above, a
+/// tremolo); recorded, Halo Pad (a synthesised voice over a saw stack)
+/// through its filter and tremolo.
 fn pad_shimmer(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Tri,
         unison: 3,
         detune: 6.0,
@@ -10154,11 +10164,14 @@ fn pad_shimmer(r: &mut Rng) -> Patch {
         vib_rate: r.range(5.0, 7.0),
         gain: 0.14,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Halo Pad"), 60.0)
 }
 
+/// A warm triangle pad; recorded, Warm Pad (strings) through its 1.2 kHz
+/// low-pass.
 fn pad_warm(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Tri,
         unison: 3,
         detune: r.range(5.0, 9.0),
@@ -10173,7 +10186,8 @@ fn pad_warm(r: &mut Rng) -> Patch {
         r: 2.5,
         gain: 0.16,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Warm Pad"), 62.0)
 }
 
 fn pad_organ(r: &mut Rng) -> Patch {
@@ -10197,8 +10211,10 @@ fn pad_organ(r: &mut Rng) -> Patch {
     }
 }
 
+/// A dark pad: three saws under a resonant low-pass; recorded, Sweep Pad (two
+/// detuned saw stacks) under the same filter.
 fn pad_dark(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         unison: 3,
         detune: r.range(10.0, 18.0),
         width: 0.9,
@@ -10211,7 +10227,8 @@ fn pad_dark(r: &mut Rng) -> Patch {
         r: 2.5,
         gain: 0.16,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Sweep Pad"), 60.0)
 }
 
 // -- keys and mallets
@@ -10376,8 +10393,11 @@ fn glockenspiel(r: &mut Rng) -> Patch {
     }
 }
 
+/// An FM bell; recorded, Crystal (a synthesiser's bell), which dies away
+/// in its own time, as the bell's envelope does (-30 dB in 1.2 s against
+/// the synthesiser's 1.5 s).
 fn bell_fm(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         filter: false,
         fm: r.range(1.5, 3.0),
         ratio: r.pick(&[3.5, 1.41, 2.0, 4.0, 2.76]),
@@ -10388,15 +10408,18 @@ fn bell_fm(r: &mut Rng) -> Patch {
         r: 2.0,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    rec(p, samples::gm("Crystal"), 76.0)
 }
 
 fn dulcimer(r: &mut Rng) -> Patch {
     Patch { filter: false, ks: r.range(1.2, 1.8), ks_tone: 0.9, a: 0.001, d: 3.0, s: 1.0, r: 0.4, gain: 0.45, ..PATCH }
 }
 
+/// A glassy pluck; recorded, the FM electric piano (a DX7's), dying away as
+/// the pluck does (-30 dB in 0.49 s against 0.50 s), under its filter.
 fn glass_arp(_: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Tri,
         wave2: Wave::Sine,
         mix2: 0.6,
@@ -10410,7 +10433,8 @@ fn glass_arp(_: &mut Rng) -> Patch {
         r: 0.8,
         gain: 0.25,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("FM Electric Piano"), 72.0)
 }
 
 // -- plucked strings
@@ -10459,7 +10483,8 @@ fn pizzicato(r: &mut Rng) -> Patch {
 
 // -- leads
 
-fn lead_saw(r: &mut Rng) -> Patch {
+/// A saw lead: three saws, a little apart (the synthesiser's).
+fn lead_saw_synth(r: &mut Rng) -> Patch {
     Patch {
         unison: 3,
         detune: r.range(6.0, 10.0),
@@ -10481,13 +10506,24 @@ fn lead_saw(r: &mut Rng) -> Patch {
     }
 }
 
-fn lead_square(r: &mut Rng) -> Patch {
-    Patch { wave: Wave::Square, pw: r.range(0.4, 0.5), unison: 2, detune: 6.0, width: 0.3, ..lead_saw(r) }
+/// The saw lead; recorded, Saw Lead (two saws 4 cents apart) through its
+/// filter, glide and vibrato.
+fn lead_saw(r: &mut Rng) -> Patch {
+    rec_through(lead_saw_synth(r), samples::gm("Saw Lead"), 74.0)
 }
 
+/// A square lead; recorded, Square Lead (two squares 2 cents apart) through
+/// its filter, glide and vibrato.
+fn lead_square(r: &mut Rng) -> Patch {
+    let p = Patch { wave: Wave::Square, pw: r.range(0.4, 0.5), unison: 2, detune: 6.0, width: 0.3, ..lead_saw_synth(r) };
+    rec_through(p, samples::gm("Square Lead"), 74.0)
+}
+
+/// A tearing, sweeping lead (FM standing in for oscillator sync); recorded,
+/// Charang (a clavinet's bite over saws) through its filter, glide and
+/// vibrato: the FM's sweep goes, the bite stands in for it.
 fn lead_sync(r: &mut Rng) -> Patch {
-    // a tearing, sweeping lead (FM standing in for oscillator sync)
-    Patch {
+    let p = Patch {
         fm: r.range(2.5, 3.5),
         ratio: r.pick(&[2.5, 3.5, 1.5]),
         fm_dec: r.range(0.25, 0.45),
@@ -10502,7 +10538,8 @@ fn lead_sync(r: &mut Rng) -> Patch {
         glide: 0.05,
         gain: 0.28,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Charang"), 74.0)
 }
 
 fn sax(r: &mut Rng) -> Patch {
@@ -10759,8 +10796,11 @@ fn horn(r: &mut Rng) -> Patch {
     Patch { cutoff: r.range(900.0, 1300.0), unison: 2, detune: 5.0, width: 0.2, ..trombone(r) }
 }
 
+/// The hoover: detuned saws and one an octave down, diving into each note;
+/// recorded, Polysynth (a stack of detuned saws) through its filter, the dive
+/// (bend and glide) kept.
 fn hoover(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         unison: 3,
         detune: r.range(25.0, 40.0),
         width: 1.0,
@@ -10778,11 +10818,15 @@ fn hoover(r: &mut Rng) -> Patch {
         r: 0.3,
         gain: 0.22,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Polysynth"), 70.0)
 }
 
+/// A vocal chop: a saw through a vowel's formants, short; recorded, a sung
+/// voice (Synth Voice), the gate cutting it short (not through the vowel:
+/// the recording has its own formants).
 fn vox_chop(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         vowel: r.pick(&[1, 2, 3, 4, 5]),
         cutoff: 4000.0,
         keytrack: 0.2,
@@ -10793,9 +10837,19 @@ fn vox_chop(r: &mut Rng) -> Patch {
         vib: 0.0,
         gain: 0.6,
         ..PATCH
-    }
+    };
+    rec(p, samples::gm("Synth Voice"), 70.0)
 }
 
+/// A short bright pluck (techno's hook).
+///
+/// Kept the synthesiser's when the samples are in: a recorded voice holds
+/// level while its gate is open (`Patch::samp`), and the SoundFont's
+/// synthesisers are looped waves that never die away, so the pluck would
+/// become a held note (one note's 10 ms envelope, measured: the
+/// synthesiser's -30 dB in 0.11-0.17 s, a recorded saw's level the whole
+/// gate, 9-20 dB apart on average); and the palettes lend it to other
+/// genres' parts with long notes.
 fn pluck_hook(r: &mut Rng) -> Patch {
     Patch {
         wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
@@ -10814,6 +10868,15 @@ fn pluck_hook(r: &mut Rng) -> Patch {
     }
 }
 
+/// A saw or square pluck (synthwave's arpeggio).
+///
+/// Kept the synthesiser's when the samples are in: a recorded voice holds
+/// level while its gate is open (`Patch::samp`), and the SoundFont's
+/// synthesisers are looped waves that never die away, so the pluck would
+/// become a held note (one note's 10 ms envelope, measured: the
+/// synthesiser's -30 dB in 0.11-0.17 s, a recorded saw's level the whole
+/// gate, 9-20 dB apart on average); and the palettes lend it to other
+/// genres' parts with long notes.
 fn arp_pluck(r: &mut Rng) -> Patch {
     Patch {
         wave: if r.chance(0.5) { Wave::Square } else { Wave::Saw },
@@ -10832,8 +10895,10 @@ fn arp_pluck(r: &mut Rng) -> Patch {
     }
 }
 
+/// A glassy FM tone; recorded, the FM electric piano (a DX7's), which dies
+/// away by itself.
 fn glass_fm(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         filter: false,
         fm: r.range(0.8, 1.6),
         ratio: r.pick(&[2.0, 3.0, 1.0]),
@@ -10844,9 +10909,19 @@ fn glass_fm(r: &mut Rng) -> Patch {
         r: 0.3,
         gain: 0.3,
         ..PATCH
-    }
+    };
+    rec(p, samples::gm("FM Electric Piano"), 64.0)
 }
 
+/// A chord stab: two saws, the filter snapping shut, dying away.
+///
+/// Kept the synthesiser's when the samples are in: a recorded voice holds
+/// level while its gate is open (`Patch::samp`), and the SoundFont's
+/// synthesisers are looped waves that never die away, so the stab would
+/// become a held note (one note's 10 ms envelope, measured: the
+/// synthesiser's -30 dB in 0.11-0.17 s, a recorded saw's level the whole
+/// gate, 9-20 dB apart on average); and the palettes lend it to other
+/// genres' parts with long notes.
 fn stab_saw(r: &mut Rng) -> Patch {
     Patch {
         unison: 2,
@@ -10866,18 +10941,46 @@ fn stab_saw(r: &mut Rng) -> Patch {
     }
 }
 
+/// A dub chord: the stab, darker (the synthesiser's, as `stab_saw` is).
 fn stab_dub(r: &mut Rng) -> Patch {
     Patch { cutoff: r.range(400.0, 700.0), res: 0.4, env_amt: 1.5, fdec: 0.1, d: 0.25, ..stab_saw(r) }
 }
 
+/// An organ stab: the organ pad's patch, short (the synthesiser's; its own
+/// copy of `pad_organ`'s, with the same draws, so it stays the
+/// synthesiser's whatever plays that).
+fn stab_organ_synth(r: &mut Rng) -> Patch {
+    Patch {
+        wave: Wave::Square,
+        pw: 0.5,
+        wave2: Wave::Sine,
+        mix2: 0.5,
+        semi2: 12.0,
+        sub: 0.3,
+        cutoff: r.range(2000.0, 3000.0),
+        keytrack: 0.3,
+        a: 0.02,
+        d: 0.2,
+        s: 0.0,
+        r: 0.1,
+        trem: r.range(0.0, 0.15),
+        vib_rate: 6.0,
+        gain: 0.12,
+        ..PATCH
+    }
+}
+
+/// The organ stab; recorded, the percussive organ (a B3's).
 fn stab_organ(r: &mut Rng) -> Patch {
-    Patch { d: 0.2, s: 0.0, r: 0.1, ..pad_organ(r) }
+    rec(stab_organ_synth(r), samples::gm("Percussive Organ"), 62.0)
 }
 
 // -- basses
 
+/// The Reese: two saws beating against each other, driven; recorded, Detuned
+/// Saw (two saws 12 cents apart: the beating kept) under its filter and drive.
 fn bass_reese(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         unison: 2,
         detune: r.range(14.0, 24.0),
         cutoff: r.range(450.0, 700.0),
@@ -10890,9 +10993,13 @@ fn bass_reese(r: &mut Rng) -> Patch {
         drive: 0.5,
         gain: 0.6,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Detuned Saw"), 40.0)
 }
 
+/// A sub bass: a sine. Kept the synthesiser's when the samples are in: the
+/// SoundFont's Sine Wave is a looped sine, the same sound (one note's
+/// envelope within 0.5 dB, its spectral centroid within 2%).
 fn bass_sub(_: &mut Rng) -> Patch {
     Patch {
         wave: Wave::Sine,
@@ -10908,8 +11015,10 @@ fn bass_sub(_: &mut Rng) -> Patch {
     }
 }
 
+/// An FM bass; recorded, Synth Bass 4 (a slap over a synthesiser's bass: the
+/// FM's attack) under its filter.
 fn bass_fm(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         fm: r.range(2.0, 3.0),
         ratio: r.pick(&[1.0, 2.0]),
         fm_dec: 0.15,
@@ -10921,11 +11030,13 @@ fn bass_fm(r: &mut Rng) -> Patch {
         r: 0.06,
         gain: 0.6,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Synth Bass 4"), 40.0)
 }
 
+/// A slap bass (FM); recorded, a slapped bass guitar.
 fn bass_slap(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         fm: r.range(3.5, 4.5),
         ratio: 1.0,
         fm_dec: 0.05,
@@ -10938,11 +11049,14 @@ fn bass_slap(r: &mut Rng) -> Patch {
         drive: 0.5,
         gain: 0.55,
         ..PATCH
-    }
+    };
+    rec(p, samples::gm("Slap Bass"), 40.0)
 }
 
+/// A sequenced saw bass, its filter snapping shut; recorded, Synth Bass 3 (a
+/// saw) under the same filter and its envelope.
 fn bass_seq(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         cutoff: r.range(350.0, 600.0),
         res: 0.25,
         env_amt: 2.0,
@@ -10954,11 +11068,15 @@ fn bass_seq(r: &mut Rng) -> Patch {
         r: 0.04,
         gain: 0.6,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Synth Bass 3"), 40.0)
 }
 
+/// A Moog-ish bass: a saw and a square an octave down through a resonant
+/// four-pole low-pass; recorded, Synth Bass 1 (a pulse and a saw) through the
+/// same filter and drive.
 fn bass_moog(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave2: Wave::Square,
         mix2: 0.6,
         semi2: -12.0,
@@ -10975,7 +11093,8 @@ fn bass_moog(r: &mut Rng) -> Patch {
         drive: 0.4,
         gain: 0.6,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Synth Bass 1"), 40.0)
 }
 
 fn bass_upright(r: &mut Rng) -> Patch {
@@ -10993,8 +11112,10 @@ fn bass_upright(r: &mut Rng) -> Patch {
     }
 }
 
+/// A soft synthesiser bass; recorded, Synth Bass 2 (a synthesiser's bass,
+/// recorded) under its filter and drive.
 fn bass_synth(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Tri,
         wave2: Wave::Saw,
         mix2: 0.25,
@@ -11011,12 +11132,14 @@ fn bass_synth(r: &mut Rng) -> Patch {
         drive: 0.6,
         gain: 0.8,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Synth Bass 2"), 40.0)
 }
 
 /// The 303: a saw or a square through a resonant four-pole low-pass that
-/// its envelope sweeps, sliding; recorded, a synthesiser's lead through the
-/// same filter.
+/// its envelope sweeps, sliding (the synthesiser's; `bass_acid_saw` and
+/// `bass_acid_sq` record it: a recorded saw or square through the same
+/// filter, its sweep, slides and drive).
 fn bass_acid(r: &mut Rng, wave: Wave) -> Patch {
     Patch {
         wave,
@@ -11041,8 +11164,10 @@ fn bass_acid_sq(r: &mut Rng) -> Patch {
     rec_through(bass_acid(r, Wave::Square), samples::gm("Square Lead"), 40.0)
 }
 
+/// The saw 303 on Synth Bass 3, one saw (Saw Lead pairs two, 4 cents apart:
+/// a chorus no 303 has).
 fn bass_acid_saw(r: &mut Rng) -> Patch {
-    rec_through(bass_acid(r, Wave::Saw), samples::gm("Saw Lead"), 40.0)
+    rec_through(bass_acid(r, Wave::Saw), samples::gm("Synth Bass 3"), 40.0)
 }
 
 fn tuba(r: &mut Rng) -> Patch {
@@ -11078,8 +11203,10 @@ fn bass_accordion(r: &mut Rng) -> Patch {
     }
 }
 
+/// A hum: a sine with a faint saw beating against it; recorded, Halo Pad (a
+/// synthesised voice over saws) through its low-pass: a hummed drone.
 fn drone_hum(r: &mut Rng) -> Patch {
-    Patch {
+    let p = Patch {
         wave: Wave::Sine,
         wave2: Wave::Saw,
         mix2: r.range(0.08, 0.18),
@@ -11093,7 +11220,8 @@ fn drone_hum(r: &mut Rng) -> Patch {
         r: 6.0,
         gain: 0.5,
         ..PATCH
-    }
+    };
+    rec_through(p, samples::gm("Halo Pad"), 38.0)
 }
 
 fn drone_choir(r: &mut Rng) -> Patch {
@@ -11124,17 +11252,42 @@ fn kit_kick_808(r: &mut Rng) -> Vec<DrumPatch> {
     let v = vec![DrumPatch { drive: 0.2, ..kick(r, (80.0, 100.0), (43.0, 48.0), (1.0, 1.5), 0.0, 0.0) }];
     rec_kit(v, &[samples::drum("TR-808", 36)])
 }
-fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
+/// The 909 kick (the synthesiser's).
+fn kit_kick_909_synth(r: &mut Rng) -> Vec<DrumPatch> {
     vec![kick(r, (150.0, 210.0), (46.0, 54.0), (0.5, 0.75), 0.25, 0.8)]
 }
+/// The 909 kick; recorded (MuseScore General has no 909), the Electronic
+/// kit's key 35: of the Electronic, Standard and Room kits' kicks the one
+/// that rings longest and lowest, as the 909's does (-20 and -40 dB at
+/// 0.17 and 0.32 s, its peak at 66 Hz; the synthesiser's 0.24 and 0.44 s,
+/// 54 Hz; Standard's 0.06-0.11 and 0.20 s; Room's 0.07-0.10 and 0.24-0.27 s).
+fn kit_kick_909(r: &mut Rng) -> Vec<DrumPatch> {
+    rec_kit(kit_kick_909_synth(r), &[samples::drum("Electronic", 35)])
+}
+/// A recorded kick keeping the synthesiser's drive (`rec_kit` turns it off):
+/// for a kick whose distortion is its sound.
+fn rec_kick_driven(v: Vec<DrumPatch>, id: Option<u16>) -> Vec<DrumPatch> {
+    let drive = v[0].drive;
+    rec_kit(v, &[id]).into_iter().map(|d| if d.samp != 0 { DrumPatch { drive, ..d } } else { d }).collect()
+}
+/// A distorted kick; recorded, the Power kit's (a big rock kick: of the kicks
+/// the nearest in decay and its 60 Hz peak), through the synthesiser's drive.
 fn kit_kick_dist(r: &mut Rng) -> Vec<DrumPatch> {
-    vec![kick(r, (180.0, 230.0), (50.0, 56.0), (0.4, 0.55), 0.3, 3.0)]
+    rec_kick_driven(vec![kick(r, (180.0, 230.0), (50.0, 56.0), (0.4, 0.55), 0.3, 3.0)], samples::drum("Power", 36))
 }
+/// A deep kick (techno's, ambient's; polka's bass drum); recorded, the
+/// Orchestra Kit's concert bass drum: of the kits' bass drums the only one as
+/// deep and long (its peak at 46 Hz, ringing past a second; the
+/// synthesiser's 40 Hz; an 808's 52 Hz, gone in 0.4 s).
 fn kit_kick_deep(r: &mut Rng) -> Vec<DrumPatch> {
-    vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)]
+    rec_kit(vec![kick(r, (65.0, 80.0), (36.0, 42.0), (0.8, 1.0), 0.0, 0.3)], &[samples::drum("Orchestra Kit", 36)])
 }
+/// The LinnDrum's kick; recorded, the Electronic kit's key 36: short and
+/// punchy in the low mids as the synthesiser's is (-40 dB at 0.25 s against
+/// 0.21 s; 57% of its first half second's energy at 100-1000 Hz against 73%;
+/// Standard's kicks 29-38%, Room's 21-23%).
 fn kit_kick_linn(r: &mut Rng) -> Vec<DrumPatch> {
-    vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)]
+    rec_kit(vec![kick(r, (150.0, 170.0), (58.0, 64.0), (0.25, 0.32), 0.3, 0.6)], &[samples::drum("Electronic", 36)])
 }
 fn kit_kick_soft(r: &mut Rng) -> Vec<DrumPatch> {
     vec![kick(r, (80.0, 100.0), (45.0, 50.0), (0.4, 0.6), 0.0, 0.0)]
@@ -11156,6 +11309,7 @@ fn kit_kick_frame(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 /// Snares and claps: [the main hit, a softer one for rolls and ghosts].
+/// The 808's clap; recorded, the TR-808 kit's (key 39), both.
 fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         noise: 1.0,
@@ -11167,12 +11321,18 @@ fn kit_clap_808(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.9,
         ..DRUM
     };
-    vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }]
+    rec_kit(vec![c, DrumPatch { claps: 2, ndec: 0.15, gain: 0.6, ..c }], &[samples::drum("TR-808", 39); 2])
 }
+/// A snap; recorded, the Standard kit's sticks (key 31): no kit has a finger
+/// snap, and of the short bright hits the sticks' is the nearest (as bright,
+/// its spectral centroid 0.95 the synthesiser's, as short: -30 dB in 0.04 s).
 fn kit_snap(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch { noise: 1.0, nmode: 1, ncut: r.range(2200.0, 2800.0), nres: 0.4, ndec: 0.06, gain: 0.9, ..DRUM };
-    vec![c, DrumPatch { gain: 0.6, ..c }]
+    rec_kit(vec![c, DrumPatch { gain: 0.6, ..c }], &[samples::drum("Standard", 31); 2])
 }
+/// The LinnDrum's snare (a recorded snare's, the LM-1's); recorded, the
+/// Standard kit's (key 38): of the Electronic, Standard and Room kits' the
+/// nearest (the Electronic kit's is a low, ringing electronic drum).
 fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
         tone: 0.55,
@@ -11188,7 +11348,7 @@ fn kit_snare_linn(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.8,
         ..DRUM
     };
-    vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }]
+    rec_kit(vec![c, DrumPatch { ndec: 0.08, gain: 0.6, ..c }], &[samples::drum("Standard", 38); 2])
 }
 fn kit_brush(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -11222,11 +11382,16 @@ fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 /// Hats: [closed, open].
+/// The 808's; recorded, the TR-808 kit's closed hat (42) and its open hat as
+/// key 44 has it (shorter than 46's: -30 dB in 0.38 s, the synthesiser's
+/// 0.24 s; 46's 1.5 s).
 fn kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
-    hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8)
+    rec_kit(hats(r, 7000.0, 0.05, 0.4, 0.7, 0.8), &[samples::drum("TR-808", 42), samples::drum("TR-808", 44)])
 }
+/// The 909's (recordings of cymbals); recorded, the Electronic kit's (42,
+/// 46): a recorded pair as the 909's are (MuseScore General has no 909).
 fn kit_hats_909(r: &mut Rng) -> Vec<DrumPatch> {
-    hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8)
+    rec_kit(hats(r, 9500.0, 0.04, 0.3, 0.15, 0.8), &[samples::drum("Electronic", 42), samples::drum("Electronic", 46)])
 }
 fn kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -11337,7 +11502,10 @@ fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
         ..DRUM
     };
     let base = r.range(90.0, 120.0);
-    vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood]
+    // recorded: the TR-808 kit's cowbell, its toms nearest these in pitch
+    // (spectral centroid) and decay (45, 48, 50), and a woodblock
+    let keys = [56, 45, 48, 50, 76].map(|k| samples::drum("TR-808", k));
+    rec_kit(vec![cow, tom(base), tom(base * 1.4), tom(base * 1.9), wood], &keys)
 }
 fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
     // spoons (two clicks), a frame drum's rim, finger cymbals
@@ -14616,7 +14784,7 @@ mod sample_tests {
         let mut r = Rng::new(5);
         let pairs: Vec<(&str, DrumPatch, u8)> = vec![
             ("ska kick", ska_kit_kick(&mut r)[0], 36),
-            ("909 kick", kit_kick_909(&mut r)[0], 36),
+            ("909 kick", kit_kick_909_synth(&mut r)[0], 36),
             ("ska snare", ska_kit_snare(&mut r)[0], 38),
             ("punk snare", ska_kit_punk_snare(&mut r)[0], 38),
             ("hand clap", kit_hand_clap(&mut r)[0], 39),
