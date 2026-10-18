@@ -26,6 +26,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::samples::{self, Bank, SAMPLER, Sampler};
+
 /// Genre names, shown on screen in capitals (the app's font has only A-Z, 0-9 and " -.:/!+()[],%").
 pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN", "SKA", "MARIACHI"];
 const AMBIENT: usize = 0;
@@ -413,6 +415,15 @@ struct Patch {
     vowel: u8,
     /// semitones the note starts away from itself, gliding in (`glide`)
     bend: f32,
+    /// a recorded instrument (an id from `samples::multi`, `gm` or `drum`;
+    /// 0: the synthesiser). It plays in place of the oscillators (the
+    /// waves, unison, FM, the string, the noise unused); the vowel, the
+    /// filter and the drive after it only as the patch turns them on
+    /// (`SAMPLED` has them off). Its envelope: `a` the attack, then level 1
+    /// while the gate is open (`d` and `s` unused: the recording decays as it
+    /// does), `r` the release (0: the instrument's own). Pitch, glide, bend,
+    /// vibrato, tremolo, velocity and gain as any voice's.
+    samp: u16,
 }
 
 /// The vowels' first three formants, Hz.
@@ -465,7 +476,13 @@ const PATCH: Patch = Patch {
     ks_tone: 0.5,
     vowel: 0,
     bend: 0.0,
+    samp: 0,
 };
+
+/// Where a sampled patch starts (`samp` set): no filter, the instrument's
+/// own release.
+#[allow(dead_code)]
+const SAMPLED: Patch = Patch { filter: false, a: 0.002, r: 0.0, ..PATCH };
 
 #[derive(Clone, Copy)]
 struct Voice {
@@ -510,6 +527,8 @@ struct Voice {
     fix: bool,
     /// the formants: three band-passes a side
     ff: [Svf; 6],
+    /// a sampled patch's zones playing (none: the oscillators)
+    sm: Sampler,
 }
 
 /// The per-sample step of a voice's gain glide.
@@ -547,12 +566,26 @@ const VOICE: Voice = Voice {
     off: [0.0; 2],
     fix: false,
     ff: [Svf { ic1: 0.0, ic2: 0.0, a1: 0.0, a2: 0.0, a3: 0.0, k: 2.0 }; 6],
+    sm: SAMPLER,
 };
 
 impl Voice {
     /// A note: `len` samples of gate. A slide into a voice whose gate is still
-    /// open glides there without a new attack (the 303's slide).
-    fn start(&mut self, p: &Patch, note: f32, vel: f32, len: i64, slide: bool, seed: u32) {
+    /// open glides there without a new attack (the 303's slide). A sampled
+    /// patch's zones come from `bank` (round robin `rr`); none there, the
+    /// synthesiser plays it.
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &mut self,
+        p: &Patch,
+        note: f32,
+        vel: f32,
+        len: i64,
+        slide: bool,
+        seed: u32,
+        bank: Option<&Bank>,
+        rr: u32,
+    ) {
         let held = self.on && self.amp.stage != RELEASE;
         let accent = ((vel - 0.85) / 0.15).clamp(0.0, 1.0);
         if slide && held {
@@ -563,6 +596,10 @@ impl Voice {
             return;
         }
         let fresh = !self.on;
+        let sampled = p.samp != 0 && bank.is_some_and(|b| self.sm.start(b, p.samp, note, vel, len, rr));
+        if !sampled {
+            self.sm.n = 0;
+        }
         if fresh {
             // a fresh voice: oscillators at scattered phases (the attack
             // hides the start), filters empty
@@ -585,7 +622,9 @@ impl Voice {
             self.off = [0.0; 2];
         } else {
             let kind = |q: &Patch| {
-                if q.ks > 0.0 {
+                if q.samp != 0 {
+                    3
+                } else if q.ks > 0.0 {
                     2
                 } else if q.fm > 0.0 {
                     1
@@ -598,8 +637,9 @@ impl Voice {
                 self.kb.fill(0.0);
                 self.klp = 0.0;
             }
-            // the output carried over the jump to the new source (no click)
-            self.fix = p.ks > 0.0 || kind(p) != kind(&self.p);
+            // the output carried over the jump to the new source (no click;
+            // a sample restarts from its beginning)
+            self.fix = p.ks > 0.0 || sampled || kind(p) != kind(&self.p);
         }
         self.p = *p;
         self.on = true;
@@ -632,7 +672,12 @@ impl Voice {
         self.accent = accent;
         self.hold = len;
         self.age = 0;
-        self.amp.set(p.a, p.d, p.s, p.r);
+        if sampled {
+            // the attack, level 1 while held, the release (or the instrument's own)
+            self.amp.set(p.a, p.d, 1.0, if p.r > 0.0 { p.r } else { self.sm.rel });
+        } else {
+            self.amp.set(p.a, p.d, p.s, p.r);
+        }
         self.amp.on();
         self.fenv = 1.0;
         // harder notes, brighter FM
@@ -657,8 +702,9 @@ impl Voice {
         o[1] += r;
     }
 
-    /// Adds the voice into `buf`; `cut` scales the cutoff (the channel's drift).
-    fn render(&mut self, cut: f32, buf: &mut [[f32; 2]]) {
+    /// Adds the voice into `buf`; `cut` scales the cutoff (the channel's
+    /// drift); a sampled voice's zones are in `bank`.
+    fn render(&mut self, cut: f32, buf: &mut [[f32; 2]], bank: Option<&Bank>) {
         let n = buf.len();
         let nf = n as f32;
         let p = self.p;
@@ -680,11 +726,15 @@ impl Voice {
         let pitch = self.note + p.vib * lfo * (self.age as f32 / (0.4 * SR)).min(1.0);
         let f = mtof(pitch);
         let dt0 = (f / SR).min(0.45);
-        let gain = self.vel * p.gain * (1.0 - p.trem * (0.5 + 0.5 * lfo)) * (1.0 + 0.3 * self.accent);
+        let mut gain = self.vel * p.gain * (1.0 - p.trem * (0.5 + 0.5 * lfo)) * (1.0 + 0.3 * self.accent);
+        let sampled = self.sm.n > 0;
+        if sampled {
+            gain *= samples::CAL;
+        }
         if self.amp.level == 0.0 {
             self.g = gain;
         }
-        let stereo = p.unison > 1 && p.width > 0.0;
+        let stereo = sampled || (p.unison > 1 && p.width > 0.0);
         if p.filter {
             let oct =
                 (p.env_amt * (0.55 + 0.45 * self.vel) + self.accent) * self.fenv + (pitch - 60.0) * p.keytrack / 12.0;
@@ -702,7 +752,47 @@ impl Voice {
             }
             self.fenv *= (-6.9 * nf / (p.fdec * SR)).exp();
         }
-        if p.ks > 0.0 {
+        if sampled {
+            let gate = self.amp.stage != RELEASE;
+            let mut live = true;
+            let mut tmp = [[0.0f32; 2]; BLOCK];
+            for chunk in buf.chunks_mut(BLOCK) {
+                let t = &mut tmp[..chunk.len()];
+                live &= bank.is_some_and(|b| self.sm.fill(b, pitch, gate, t));
+                for (o, s) in chunk.iter_mut().zip(t.iter()) {
+                    let (mut l, mut r) = (s[0], s[1]);
+                    if p.vowel > 0 {
+                        let ff = &mut self.ff;
+                        let form = |f: &mut [Svf], x: f32| 1.6 * (f[0].bp(x) + 0.6 * f[1].bp(x) + 0.35 * f[2].bp(x));
+                        l = form(&mut ff[..3], l);
+                        r = form(&mut ff[3..], r);
+                    }
+                    if p.filter {
+                        if p.poles4 {
+                            let m = self.f[0].lp((l + r) * 0.5);
+                            let m = self.f[1].lp(m);
+                            l = m;
+                            r = m;
+                        } else {
+                            l = self.f[0].lp(l);
+                            r = self.f[1].lp(r);
+                        }
+                    }
+                    if p.drive > 0.0 {
+                        l = soft(l * (1.0 + p.drive));
+                        r = soft(r * (1.0 + p.drive));
+                    }
+                    self.g += (gain - self.g) * GLIDE_G;
+                    let a = self.amp.next() * self.g;
+                    self.out(o, l * a, r * a);
+                }
+            }
+            // the recording over (or died away): the voice with it
+            if !live {
+                self.amp.stage = IDLE;
+                self.amp.level = 0.0;
+            }
+        } else if p.ks > 0.0 {
             for o in buf.iter_mut() {
                 let rp = self.ki as f32 + KS_LEN as f32 - self.klen;
                 let i0 = rp as usize;
@@ -851,6 +941,10 @@ struct DrumPatch {
     click: f32,
     drive: f32,
     gain: f32,
+    /// a recorded hit (an id from `samples::drum` or `multi`; 0: the
+    /// synthesiser's): played once through in place of the tone and the
+    /// noise (the gate and the loops ignored), then `drive` and `gain`
+    samp: u16,
 }
 
 const DRUM: DrumPatch = DrumPatch {
@@ -873,6 +967,7 @@ const DRUM: DrumPatch = DrumPatch {
     click: 0.0,
     drive: 0.0,
     gain: 1.0,
+    samp: 0,
 };
 
 /// The 808's cymbal oscillators, Hz.
@@ -902,6 +997,11 @@ struct Drum {
     f: Svf,
     f2: Svf,
     noise: Noise,
+    /// a recorded hit's zones, and its level (a choke fades it) and the
+    /// level's step a sample
+    sm: Sampler,
+    sg: f32,
+    sgc: f32,
 }
 
 const DRUMV: Drum = Drum {
@@ -925,10 +1025,18 @@ const DRUMV: Drum = Drum {
     f: Svf { ic1: 0.0, ic2: 0.0, a1: 0.0, a2: 0.0, a3: 0.0, k: 2.0 },
     f2: Svf { ic1: 0.0, ic2: 0.0, a1: 0.0, a2: 0.0, a3: 0.0, k: 2.0 },
     noise: Noise(0x2545_F491),
+    sm: SAMPLER,
+    sg: 1.0,
+    sgc: 1.0,
 };
 
 impl Drum {
-    fn start(&mut self, p: &DrumPatch, kind: u8, vel: f32, seed: u32) {
+    /// A hit; a recorded one's zones from `bank` (round robin `rr`), and
+    /// none there, the synthesiser's.
+    fn start(&mut self, p: &DrumPatch, kind: u8, vel: f32, seed: u32, bank: Option<&Bank>, rr: u32) {
+        let mut sm = SAMPLER;
+        let sampled = p.samp != 0 && bank.is_some_and(|b| sm.start(b, p.samp, 60.0, vel, 0, rr));
+        sm.loops = false;
         let mut n = Noise(seed);
         let mut mph = [0.0; 6];
         for m in mph.iter_mut() {
@@ -941,15 +1049,16 @@ impl Drum {
             vel,
             pe: 1.0,
             pc: (-1.0 / (p.pdec.max(1e-4) * SR)).exp(),
-            ta: if p.tone > 0.0 { 1.0 } else { 0.0 },
+            ta: if p.tone > 0.0 && !sampled { 1.0 } else { 0.0 },
             tc: t60(p.tdec),
-            na: if p.noise > 0.0 { 1.0 } else { 0.0 },
+            na: if p.noise > 0.0 && !sampled { 1.0 } else { 0.0 },
             nc: t60(p.ndec),
             burst: 1.0,
             bc: t60(0.02),
             natt: ((p.natt * SR) as u32).max(1),
             mph,
             noise: n,
+            sm,
             ..DRUMV
         };
         self.f.set(p.ncut, p.nres);
@@ -960,10 +1069,35 @@ impl Drum {
     fn choke(&mut self) {
         self.tc = t60(0.012);
         self.nc = t60(0.012);
+        self.sgc = t60(0.012);
     }
 
-    fn render(&mut self, buf: &mut [[f32; 2]]) {
+    fn render(&mut self, buf: &mut [[f32; 2]], bank: Option<&Bank>) {
         let p = self.p;
+        if self.sm.n > 0 {
+            let g = self.vel * p.gain * samples::CAL_DRUM;
+            let mut live = true;
+            let mut tmp = [[0.0f32; 2]; BLOCK];
+            for chunk in buf.chunks_mut(BLOCK) {
+                let t = &mut tmp[..chunk.len()];
+                live &= bank.is_some_and(|b| self.sm.fill(b, self.sm.key, false, t));
+                for (o, s) in chunk.iter_mut().zip(t.iter()) {
+                    let (mut l, mut r) = (s[0], s[1]);
+                    if p.drive > 0.0 {
+                        l = soft(l * (1.0 + p.drive));
+                        r = soft(r * (1.0 + p.drive));
+                    }
+                    self.sg *= self.sgc;
+                    o[0] += l * g * self.sg;
+                    o[1] += r * g * self.sg;
+                }
+                self.t += chunk.len() as u32;
+            }
+            if !live || self.sg < 1e-4 {
+                self.on = false;
+            }
+            return;
+        }
         let g = self.vel * p.gain;
         let clap_end = p.claps as u32 * CLAP_GAP;
         let minc: [f32; 6] = std::array::from_fn(|k| METAL[k] * p.mf / SR);
@@ -1530,6 +1664,9 @@ struct Channel {
     swell_rate: f32,
     swell_ph: f32,
     buf: [[f32; 2]; BLOCK],
+    /// the round robin the next sampled note (0) or hit (by its kind)
+    /// takes: each cycles in order (a shaker's strokes down and up)
+    rr: [u32; 8],
 }
 
 impl Channel {
@@ -1559,12 +1696,13 @@ impl Channel {
             swell_rate: 0.5,
             swell_ph: 0.0,
             buf: [[0.0; 2]; BLOCK],
+            rr: [0; 8],
         }
     }
 
     /// Renders the block into `buf`; whether anything sounded. (The swell
     /// keeps time whether or not the channel sounds.)
-    fn render(&mut self, n: usize) -> bool {
+    fn render(&mut self, n: usize, bank: Option<&Bank>) -> bool {
         self.swell_s += (self.swell - self.swell_s) * 0.02;
         self.swell_ph = wrap(self.swell_ph + self.swell_rate * n as f32 / SR);
         let Channel { voices, dv, buf, .. } = self;
@@ -1573,14 +1711,45 @@ impl Channel {
         self.cut_s += (self.cut - self.cut_s) * 0.02;
         let mut any = false;
         for v in voices.iter_mut().filter(|v| v.on) {
-            v.render(self.cut_s, buf);
+            v.render(self.cut_s, buf, bank);
             any = true;
         }
         for d in dv.iter_mut().filter(|d| d.on) {
-            d.render(buf);
+            d.render(buf, bank);
             any = true;
         }
         any
+    }
+
+    /// A hit of drum `kind`; on the hat channel (`hats`) a closed hat
+    /// chokes the open one.
+    fn hit(&mut self, hats: bool, kind: u8, vel: f32, seed: u32, bank: Option<&Bank>) {
+        if self.drums.is_empty() || self.dv.is_empty() {
+            return;
+        }
+        if hats && kind == HAT_C {
+            for d in self.dv.iter_mut().filter(|d| d.on && d.kind == HAT_O) {
+                d.choke();
+            }
+        }
+        let p = self.drums[(kind as usize).min(self.drums.len() - 1)];
+        let i = self
+            .dv
+            .iter()
+            .position(|d| !d.on)
+            .unwrap_or_else(|| (0..self.dv.len()).max_by_key(|&i| self.dv[i].t).unwrap_or(0));
+        let k = (kind as usize).min(7);
+        self.dv[i].start(&p, kind, vel, seed, bank, self.rr[k]);
+        self.rr[k] = self.rr[k].wrapping_add(1);
+        // the SoundFont's exclusive classes (an open hat, its pedal and closed hats)
+        let ex = self.dv[i].sm.excl;
+        if ex != 0 && self.dv[i].sm.n > 0 {
+            for (j, d) in self.dv.iter_mut().enumerate() {
+                if j != i && d.on && d.sm.n > 0 && d.sm.excl == ex {
+                    d.choke();
+                }
+            }
+        }
     }
 
     /// The channel filter, then into the buses.
@@ -1715,6 +1884,7 @@ impl Synth {
 
     fn fire(&mut self, e: Ev) {
         let seed = self.noise.seed();
+        let bank = samples::bank();
         match e {
             Ev::Hit { ch, kind, vel } => {
                 let ch = ch as usize;
@@ -1726,21 +1896,7 @@ impl Synth {
                 if ch == CH_SNARE && kind == 0 {
                     self.gate_left = self.gate_hold;
                 }
-                let c = &mut self.ch[ch];
-                if c.drums.is_empty() || c.dv.is_empty() {
-                    return;
-                }
-                if ch == CH_HAT && kind == HAT_C {
-                    for d in c.dv.iter_mut().filter(|d| d.on && d.kind == HAT_O) {
-                        d.choke();
-                    }
-                }
-                let p = c.drums[(kind as usize).min(c.drums.len() - 1)];
-                let i =
-                    c.dv.iter()
-                        .position(|d| !d.on)
-                        .unwrap_or_else(|| (0..c.dv.len()).max_by_key(|&i| c.dv[i].t).unwrap_or(0));
-                c.dv[i].start(&p, kind, vel, seed);
+                self.ch[ch].hit(ch == CH_HAT, kind, vel, seed, bank);
             }
             Ev::Note { ch, note, vel, len, slide } => {
                 let c = &mut self.ch[ch as usize];
@@ -1759,7 +1915,8 @@ impl Synth {
                     })
                 };
                 let p = c.patch;
-                c.voices[i].start(&p, note, vel, (len * SR) as i64, slide, seed);
+                c.voices[i].start(&p, note, vel, (len * SR) as i64, slide, seed, bank, c.rr[0]);
+                c.rr[0] = c.rr[0].wrapping_add(1);
             }
             Ev::Riser { secs, vel } => self.fx.riser(secs, vel),
         }
@@ -1783,8 +1940,9 @@ impl Synth {
         self.ds[..n].fill(0.0);
         self.r2s[..n].fill(0.0);
         let Synth { ch, fx, dry, rs, ds, r2s, scb, .. } = self;
+        let bank = samples::bank();
         for (ci, c) in ch.iter_mut().enumerate() {
-            let mut any = c.render(n);
+            let mut any = c.render(n, bank);
             if ci == CH_FX {
                 any |= fx.render(&mut c.buf[..n]);
             }
@@ -9509,16 +9667,37 @@ type Make = fn(&mut Rng) -> Patch;
 type MakeKit = fn(&mut Rng) -> Vec<DrumPatch>;
 
 /// How loud a patch plays: the RMS of one note at `note`, velocity 0.8, over
-/// 0.12 s after a short attack (the patch's own attack would only delay it).
+/// 0.12 s after a short attack (the patch's own attack would only delay it);
+/// a sampled one's loudest 0.12 s of its first 0.45 s.
 fn loudness(p: &Patch, note: f32) -> f32 {
+    loudness_in(p, note, samples::bank())
+}
+
+/// `loudness`, a sampled patch's zones from `bank`.
+fn loudness_in(p: &Patch, note: f32, bank: Option<&Bank>) -> f32 {
     let q = Patch { a: p.a.min(0.03), ..*p };
     let mut v = VOICE;
-    v.start(&q, note, 0.8, (0.5 * SR) as i64, false, 0x1234_5679);
+    v.start(&q, note, 0.8, (0.5 * SR) as i64, false, 0x1234_5679, bank, 0);
+    if v.sm.n > 0 {
+        // a recording speaks in its own time (a bowed string's swell): its
+        // loudest 0.12 s of the gate's first 0.45 s
+        const N: usize = (0.45 * SR) as usize / BLOCK;
+        let mut e = [0.0f32; N];
+        let mut buf = [[0.0f32; 2]; BLOCK];
+        for x in e.iter_mut() {
+            buf.fill([0.0; 2]);
+            v.render(1.0, &mut buf, bank);
+            *x = buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>();
+        }
+        let (skip, w) = ((0.03 * SR) as usize / BLOCK, (0.12 * SR) as usize / BLOCK);
+        let most = e[skip..].windows(w).map(|x| x.iter().sum::<f32>()).fold(0.0, f32::max);
+        return (most / (2 * w * BLOCK) as f32).sqrt().max(1e-5);
+    }
     let mut buf = [[0.0f32; 2]; BLOCK];
     let (mut sum, mut n) = (0.0f32, 0usize);
     for k in 0..(0.15 * SR) as usize / BLOCK {
         buf.fill([0.0; 2]);
-        v.render(1.0, &mut buf);
+        v.render(1.0, &mut buf, bank);
         if k * BLOCK >= (0.03 * SR) as usize {
             sum += buf.iter().map(|x| x[0] * x[0] + x[1] * x[1]).sum::<f32>();
             n += 2 * BLOCK;
@@ -13348,6 +13527,8 @@ pub fn cli(args: &[String], seed: u64) {
         eprintln!("fleece: --musicwav GENRE SECONDS OUT.wav, GENRE one of {} or two (POLKA+TECHNO: the first's music, the second's drums)", GENRES.join(", "));
         std::process::exit(2);
     };
+    // the recorded instruments before the first note: a seed's music the same every time
+    samples::load_now();
     let t0 = Instant::now();
     if let Err(e) = render_wav(genre, seed, secs, path) {
         eprintln!("fleece: {e}");
@@ -13717,3 +13898,218 @@ mod device_tests {
     }
 }
 
+/// Recorded instruments as the synthesiser plays them, from a bank of the
+/// tests' own (never the installed one: tests run side by side).
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+    use crate::samples::testdata;
+
+    /// `secs` of voice `v` (started), into a fresh buffer.
+    fn run(v: &mut Voice, b: &Bank, secs: f32) -> Vec<[f32; 2]> {
+        let mut out = vec![[0.0f32; 2]; (secs * SR) as usize];
+        for c in out.chunks_mut(BLOCK) {
+            v.render(1.0, c, Some(b));
+        }
+        out
+    }
+
+    fn rms(x: &[[f32; 2]]) -> f32 {
+        (x.iter().map(|s| s[0] * s[0] + s[1] * s[1]).sum::<f32>() / (2 * x.len()) as f32).sqrt()
+    }
+
+    fn hz(note: f32) -> f64 {
+        440.0 * ((note as f64 - 69.0) / 12.0).exp2()
+    }
+
+    #[test]
+    fn sampled_notes_play_in_tune_and_release() {
+        let d = testdata::synthetic("voice");
+        let b = samples::load(&d).expect("load");
+        let _ = std::fs::remove_dir_all(&d);
+        let p = Patch { samp: b.multi("sine", "sus").unwrap(), gain: 1.0, ..SAMPLED };
+        // at a root, transposed up and down from one, between roots
+        for note in [69.0f32, 74.0, 66.0, 60.0, 78.5] {
+            let mut v = VOICE;
+            v.start(&p, note, 0.8, (2.0 * SR) as i64, false, 1, Some(&b), 0);
+            assert!(v.sm.n > 0, "note {note}: not sampled");
+            let out = run(&mut v, &b, 0.5);
+            let l: Vec<f32> = out[4800..].iter().map(|x| x[0]).collect();
+            let got = testdata::freq(&l);
+            assert!((got / hz(note) - 1.0).abs() < 0.002, "note {note}: {got:.2} Hz, want {:.2}", hz(note));
+            // the reference at velocity 0.8, scaled by CAL
+            let want = 0.1 * 0.8 * samples::CAL;
+            assert!((rms(&out[4800..]) / want - 1.0).abs() < 0.05, "note {note}: RMS {}", rms(&out[4800..]));
+        }
+        // a slide glides the pitch over the same sample, no new attack
+        let mut v = VOICE;
+        let p = Patch { glide: 0.02, ..p };
+        v.start(&p, 69.0, 0.8, (2.0 * SR) as i64, false, 1, Some(&b), 0);
+        run(&mut v, &b, 0.2);
+        let z = v.sm;
+        v.start(&p, 74.0, 0.8, (2.0 * SR) as i64, true, 1, Some(&b), 0);
+        let out = run(&mut v, &b, 0.5);
+        let l: Vec<f32> = out[12000..].iter().map(|x| x[0]).collect();
+        assert!((testdata::freq(&l) / hz(74.0) - 1.0).abs() < 0.002, "slid to {:.2}", testdata::freq(&l));
+        assert_eq!(v.sm.n, z.n);
+        // a 0.3 s gate: the release (the instrument's own, 0.1 s to -60 dB),
+        // then the voice is free
+        let mut v = VOICE;
+        let p = Patch { samp: b.multi("sine", "sus").unwrap(), gain: 1.0, ..SAMPLED };
+        v.start(&p, 69.0, 0.8, (0.3 * SR) as i64, false, 1, Some(&b), 0);
+        let out = run(&mut v, &b, 0.6);
+        assert!(rms(&out[12000..14000]) > 0.3, "held");
+        assert!(rms(&out[20000..]) < 1e-3 && !v.on, "released and free");
+        // a sample that runs out with the gate open (the staccato's 0.2 s): it
+        // fades and the voice ends
+        let mut v = VOICE;
+        let p = Patch { samp: b.multi("sine", "stac").unwrap(), ..SAMPLED };
+        v.start(&p, 69.0, 0.8, (2.0 * SR) as i64, false, 1, Some(&b), 0);
+        let out = run(&mut v, &b, 0.5);
+        assert!(!v.on && out[9700..].iter().all(|x| x[0] == 0.0));
+        // no bank, or an id it lacks: the synthesiser plays the patch
+        let mut v = VOICE;
+        v.start(&p, 69.0, 0.8, 4800, false, 1, None, 0);
+        assert_eq!(v.sm.n, 0);
+        v.start(&Patch { samp: 999, ..p }, 69.0, 0.8, 4800, false, 1, Some(&b), 0);
+        assert_eq!(v.sm.n, 0);
+    }
+
+    #[test]
+    fn sampled_drums_play_once_and_choke() {
+        let d = testdata::dir("drums");
+        let path = d.join(samples::SF2);
+        std::fs::write(&path, testdata::tiny_sf2()).unwrap();
+        let b = samples::load(&d).expect("load");
+        let _ = std::fs::remove_dir_all(&d);
+        let (closed, open) = (b.drum("Standard", 42).unwrap(), b.drum("Standard", 46).unwrap());
+        let hats = vec![DrumPatch { samp: closed, ..DRUM }, DrumPatch { samp: open, ..DRUM }];
+        let render = |c: &mut Channel, secs: f32| {
+            let mut v = Vec::new();
+            for _ in 0..(secs * SR) as usize / BLOCK {
+                c.render(BLOCK, Some(&b));
+                v.extend_from_slice(&c.buf);
+            }
+            v
+        };
+        // an open hat alone rings out, once through (0.47 s: key 46 from root 69)
+        let mut c = Channel::new(0, 4);
+        c.drums = hats.clone();
+        c.hit(true, HAT_O, 0.8, 1, Some(&b));
+        let out = render(&mut c, 0.4);
+        assert!(rms(&out) > 0.05 && c.dv.iter().any(|d| d.on));
+        let out = render(&mut c, 0.2);
+        assert!(!c.dv.iter().any(|d| d.on) && out[4800..].iter().all(|x| x[0] == 0.0));
+        // a closed hat on the hat channel chokes it; elsewhere, its
+        // exclusive class does
+        for hats_ch in [true, false] {
+            let mut c = Channel::new(0, 4);
+            c.drums = hats.clone();
+            c.hit(hats_ch, HAT_O, 0.8, 1, Some(&b));
+            render(&mut c, 0.05);
+            c.hit(hats_ch, HAT_C, 0.8, 1, Some(&b));
+            render(&mut c, 0.1);
+            let open_on = c.dv.iter().filter(|d| d.on && d.sm.key == 46.0).count();
+            assert_eq!(open_on, 0, "hat channel {hats_ch}: the open hat still rings");
+        }
+        // round robins cycle in order, each kind its own (a shaker's
+        // strokes down, up), whatever else the channel plays between
+        let d = testdata::held("rr");
+        let b2 = samples::load(&d).expect("load");
+        let _ = std::fs::remove_dir_all(&d);
+        let mut c = Channel::new(0, 4);
+        let shake = DrumPatch { samp: b2.multi("shake", "hit").unwrap(), ..DRUM };
+        c.drums = vec![DrumPatch { samp: b2.multi("held", "sus").unwrap(), ..DRUM }, shake];
+        let mut seen = Vec::new();
+        for k in 0..7 {
+            c.hit(false, (k % 2 == 0) as u8, 0.8, 1, Some(&b2));
+            c.dv.iter_mut().for_each(|d| d.on = false);
+            if k % 2 == 0 {
+                // the zone the shaker played: its first frames' sign changes tell
+                let mut v = vec![[0.0f32; 2]; 2400];
+                let mut dr = DRUMV;
+                dr.start(&shake, 1, 0.8, 1, Some(&b2), seen.len() as u32);
+                dr.render(&mut v[..], Some(&b2));
+                seen.push(v.windows(2).filter(|w| (w[0][0] > 0.0) != (w[1][0] > 0.0)).count());
+            }
+        }
+        assert_eq!((c.rr[0], c.rr[1]), (3, 4));
+        assert!(seen[0] < seen[1] && seen[1] < seen[2] && seen[3] == seen[0], "{seen:?}");
+        // without the bank, the synthesiser's (silent here: no tone, no noise)
+        let mut c = Channel::new(0, 4);
+        c.drums = hats;
+        c.hit(true, HAT_O, 0.8, 1, None);
+        assert!(c.dv.iter().all(|d| d.sm.n == 0));
+    }
+
+    /// Where `samples::CAL` and `CAL_DRUM` come from: the synthesiser's plain
+    /// saw against a sine at the samples' reference level; a dozen of its
+    /// drums against MuseScore General's Standard kit's of the same kinds
+    /// (RMS over the first second), when the SoundFont is there.
+    #[test]
+    fn calibration() {
+        let d = testdata::synthetic("cal");
+        let b = samples::load(&d).expect("load");
+        let _ = std::fs::remove_dir_all(&d);
+        let saw = loudness_in(&PATCH, 60.0, None);
+        let sampled = loudness_in(&Patch { samp: b.multi("sine", "sus").unwrap(), ..SAMPLED }, 69.0, Some(&b));
+        let cal = saw / (sampled / samples::CAL);
+        eprintln!(
+            "saw at gain 1, velocity 0.8: RMS {saw:.4}; the reference sampled: {:.4}; CAL {cal:.3}",
+            sampled / samples::CAL
+        );
+        assert!((cal / samples::CAL - 1.0).abs() < 0.01, "CAL measures {cal}");
+        let first_second = |p: &DrumPatch, bank: Option<&Bank>| {
+            let mut dr = DRUMV;
+            dr.start(p, 0, 0.8, 7, bank, 0);
+            let mut buf = vec![[0.0f32; 2]; SR as usize];
+            for c in buf.chunks_mut(BLOCK) {
+                if dr.on {
+                    dr.render(c, bank);
+                }
+            }
+            20.0 * rms(&buf).log10()
+        };
+        // a recorded hit plays at the reference times CAL_DRUM at velocity 0.8
+        let hit = first_second(&DrumPatch { samp: b.multi("hit", "one").unwrap(), ..DRUM }, Some(&b));
+        let want = 20.0 * (0.08 * samples::CAL_DRUM).log10();
+        assert!((hit - want).abs() < 0.2, "a sampled hit at {hit:.1} dBFS, not {want:.1}");
+        // the synthesiser's drums against MuseScore General's Standard kit's
+        let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".local/share/fleece/samples")
+            .join(samples::SF2);
+        let Ok(kit) = testdata::sf2_bank(&path, &[], &["Standard"]) else {
+            eprintln!("no {}: the drums' calibration skipped", path.display());
+            return;
+        };
+        let mut r = Rng::new(5);
+        let pairs: Vec<(&str, DrumPatch, u8)> = vec![
+            ("ska kick", ska_kit_kick(&mut r)[0], 36),
+            ("909 kick", kit_kick_909(&mut r)[0], 36),
+            ("ska snare", ska_kit_snare(&mut r)[0], 38),
+            ("punk snare", ska_kit_punk_snare(&mut r)[0], 38),
+            ("hand clap", kit_hand_clap(&mut r)[0], 39),
+            ("closed hat", ska_kit_hats(&mut r)[0], 42),
+            ("open hat", ska_kit_hats(&mut r)[1], 46),
+            ("shaker", kit_shaker(&mut r)[0], 82),
+            ("ride", kit_ride(&mut r)[0], 51),
+            ("crash", crash(&mut r)[0], 49),
+            ("tom", ska_kit_toms(&mut r)[1], 45),
+            ("conga", kit_perc_hand(&mut r)[1], 64),
+        ];
+        let mut sum = 0.0;
+        for (name, p, key) in &pairs {
+            let id = kit.drum("Standard", *key).expect("key");
+            let (syn, smp) = (
+                first_second(&DrumPatch { gain: 1.0, ..*p }, None),
+                first_second(&DrumPatch { samp: id, ..DRUM }, Some(&kit)),
+            );
+            eprintln!("  {name:10} the synthesiser's {syn:6.1} dBFS, key {key}'s {smp:6.1}");
+            sum += syn - smp;
+        }
+        let off = sum / pairs.len() as f32;
+        let cal = samples::CAL_DRUM * 10f32.powf(off / 20.0);
+        eprintln!("drums: the kit {off:+.1} dB from the synthesiser's on average: CAL_DRUM {cal:.2}");
+        assert!(off.abs() < 0.3, "CAL_DRUM measures {cal}");
+    }
+}
