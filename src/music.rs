@@ -8207,7 +8207,16 @@ fn kit_bones_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// The bones (castanets' recording), the frame drum's strokes, finger
 /// cymbals, a shaker.
 fn kit_bones(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_bones_synth(r), &[(samples::gm("Castanets"), -7.9), frame_drum(1, 4.9), frame_drum(2, 3.5), finger_cymbals(7.1), shaker_rec(0, -10.2)])
+    rec_kit_db(
+        kit_bones_synth(r),
+        &[
+            (samples::gm("Castanets"), -7.9),
+            frame_drum(1, 4.9),
+            frame_drum(2, 3.5),
+            finger_cymbals(7.1),
+            shaker_rec(0, -10.2),
+        ],
+    )
 }
 
 fn band_tavern(r: &mut Rng, s: &Synth) -> Band {
@@ -11011,7 +11020,14 @@ fn rec_keep(p: Patch, id: Option<u16>, note: f32, keep: impl FnOnce(Patch) -> Pa
 /// `rec_keep`'s usual: a low-pass at `k` times the patch's cutoff, no
 /// resonance unless `res`, no envelope (a felt hammer, a darker horn).
 fn rec_lp(p: Patch, id: Option<u16>, note: f32, k: f32, res: f32) -> Patch {
-    rec_keep(p, id, note, |q| Patch { filter: true, cutoff: k * p.cutoff, keytrack: p.keytrack, res, env_amt: 0.0, ..q })
+    rec_keep(p, id, note, |q| Patch {
+        filter: true,
+        cutoff: k * p.cutoff,
+        keytrack: p.keytrack,
+        res,
+        env_amt: 0.0,
+        ..q
+    })
 }
 
 /// `rec_kit`, each kind (a recording and a trim, dB) as loud as its kind's
@@ -11117,7 +11133,6 @@ fn frame_drum(kind: usize, db: f32) -> (Option<u16>, f32) {
 fn finger_cymbals(db: f32) -> (Option<u16>, f32) {
     cc0_or("finger_cymbals", "hit", db, samples::drum("Standard", 81))
 }
-
 
 /// A musette accordion: three reeds a little apart (the synthesiser's).
 fn accordion_synth(r: &mut Rng) -> Patch {
@@ -11629,7 +11644,16 @@ fn drone_hum(r: &mut Rng) -> Patch {
 }
 
 fn drone_choir_synth(r: &mut Rng) -> Patch {
-    Patch { vowel: r.pick(&[4, 5]), unison: 2, detune: 8.0, width: 0.6, a: 3.0, r: 5.0, keytrack: 0.0, ..pad_choir_synth(r) }
+    Patch {
+        vowel: r.pick(&[4, 5]),
+        unison: 2,
+        detune: 8.0,
+        width: 0.6,
+        a: 3.0,
+        r: 5.0,
+        keytrack: 0.0,
+        ..pad_choir_synth(r)
+    }
 }
 
 fn drone_choir(r: &mut Rng) -> Patch {
@@ -11825,7 +11849,10 @@ fn kit_hand_clap_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_hand_clap_synth(r), &[(samples::multi("claps", "solo"), 1.9), (samples::multi("claps", "solo"), 1.9)])
+    rec_kit_db(
+        kit_hand_clap_synth(r),
+        &[(samples::multi("claps", "solo"), 1.9), (samples::multi("claps", "solo"), 1.9)],
+    )
 }
 
 /// Hats: [closed, open].
@@ -11928,7 +11955,10 @@ fn kit_perc_hand_synth(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_perc_hand(r: &mut Rng) -> Vec<DrumPatch> {
     // a clave, the low and the open high conga, the low bongo, a shaker
     let std = |k: u8| samples::drum("Standard", k);
-    rec_kit_db(kit_perc_hand_synth(r), &[(std(75), -0.5), (std(64), 1.8), (std(63), 3.7), (std(61), 5.1), shaker_rec(0, -10.2)])
+    rec_kit_db(
+        kit_perc_hand_synth(r),
+        &[(std(75), -0.5), (std(64), 1.8), (std(63), 3.7), (std(61), 5.1), shaker_rec(0, -10.2)],
+    )
 }
 fn kit_perc_metal(r: &mut Rng) -> Vec<DrumPatch> {
     // a cowbell, electronic toms, a woodblock
@@ -12011,7 +12041,16 @@ fn kit_spoons_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// The spoons (castanets' recording), the frame drum's strokes, finger
 /// cymbals, a shaker.
 fn kit_spoons(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_spoons_synth(r), &[(samples::drum("Standard", 85), -2.8), frame_drum(1, 4.9), frame_drum(2, 3.5), finger_cymbals(7.1), shaker_rec(0, -10.2)])
+    rec_kit_db(
+        kit_spoons_synth(r),
+        &[
+            (samples::drum("Standard", 85), -2.8),
+            frame_drum(1, 4.9),
+            frame_drum(2, 3.5),
+            finger_cymbals(7.1),
+            shaker_rec(0, -10.2),
+        ],
+    )
 }
 
 // -- the genres' palettes (each role's tuned original comes on top)
