@@ -6297,6 +6297,13 @@ impl Song {
             ..Mariachi::default()
         };
         sounds_mariachi(r, s);
+        // the slow styles' guitarrón (a note or three a bar) louder, its low
+        // end as full as the others'
+        s.ch[CH_BASS].gain *= match style {
+            MARIACHI_VALS => 1.3,
+            MARIACHI_BOLERO => 1.25,
+            _ => 1.0,
+        };
         self.band = band_mariachi(r, s);
         s.dly.target = (self.step_len() * 3.0) as f32;
     }
@@ -6440,11 +6447,11 @@ impl Song {
     }
 
     /// The vihuela's chord (its five strings within A3-E5, any inversion) or
-    /// the guitar's (from the root up, six strings at most).
+    /// the guitar's (from the root on its low strings up, six at most).
     fn mariachi_voicing(&self, c: Harm, guitar: bool) -> Vec<i32> {
         let pcs = self.pcs(c);
         if guitar {
-            let lo = 47 + (self.root + c.root - 47).rem_euclid(12);
+            let lo = 40 + (self.root + c.root - 40).rem_euclid(12);
             let mut v = in_range(&pcs, lo, lo + 19);
             v.truncate(6);
             v
@@ -6486,8 +6493,12 @@ impl Song {
                 }
             }
             _ => {
+                // the guitar's down strokes weighted to its bass strings (the
+                // thumb on the lowest)
+                let w: &[f32] = if ch == CH_PAD { &[1.6, 1.25, 1.0, 0.8, 0.8, 0.8] } else { &[1.0] };
                 for (k, &p) in v.iter().enumerate() {
-                    b.note(st, late + gap * k as f32, ch, p, vel * r.range(0.88, 1.0), len, false);
+                    let t = w[k.min(w.len() - 1)];
+                    b.note(st, late + gap * k as f32, ch, p, vel * t * r.range(0.88, 1.0), len, false);
                 }
             }
         }
@@ -6536,12 +6547,14 @@ impl Song {
     /// it moves. A waltz's bar on a chord held over plays its fifth.
     fn mariachi_bass(&mut self, b: &mut Bar, chords: [Harm; 2], next: Harm, hemi: bool, vb: bool, walk: bool, held: bool) {
         let (bs, style) = (self.mc.bar_steps, self.mc.style);
-        let lo = self.tonic_near(43) - 5;
+        // roots in the octave up from C2 (fundamentals of 65-125 Hz), the
+        // octave above them doubling
+        let lo = MARIACHI_BASS_LO;
         let root = |c: Harm| lo + (self.root + c.bass() - lo).rem_euclid(12);
         let fifth = |c: Harm| {
             let r0 = root(c);
             let f = r0 - 7 + (self.root + c.root + 7 - (r0 - 7)).rem_euclid(12);
-            if f < 33 { f + 12 } else { f }
+            if f < lo { f + 12 } else { f }
         };
         let (rn, roots, fifths) = (root(next), [root(chords[0]), root(chords[1])], [fifth(chords[0]), fifth(chords[1])]);
         let scale = |p: i32| MODES[self.mode].contains(&(p - self.root).rem_euclid(12));
@@ -6553,7 +6566,7 @@ impl Song {
             MARIACHI_VALS => &[(0, false)],
             MARIACHI_POLKA => &[(0, false), (4, true)],
             _ if vb => &[(0, false), (6, true), (8, true)],
-            _ => &[(0, false), (8, true)],
+            _ => &[(0, false), (8, true), (12, true)],
         };
         let mut notes: Vec<(u32, i32, f32)> = Vec::with_capacity(6);
         let mut second = false;
@@ -6571,7 +6584,9 @@ impl Song {
             let wa = if style == MARIACHI_VALS { 4 } else { bs - 4 };
             let q = if style == MARIACHI_VALS { 4 } else { 2 };
             notes.retain(|n| n.0 < wa || n.0 == 0);
-            let up = rn >= cur;
+            // (into a root near the bottom from above: the guitarrón's
+            // lowest string is A1)
+            let up = rn >= cur && rn - 4 >= 33;
             let path: Vec<i32> = if up {
                 (rn - 4..rn).rev().filter(|&p| scale(p)).take(2).collect()
             } else {
@@ -6799,8 +6814,7 @@ impl Song {
             if button { &[(0.0, 1.5, 0.85), (second, bs - second + 2.0, 1.0)] } else { &[(0.0, bs + 4.0, 1.0)] };
         let mixed = self.guest.is_some();
         let vk = [self.mariachi_voicing(home, false), self.mariachi_voicing(home, true)];
-        let lo = self.tonic_near(43) - 5;
-        let root = lo + (self.root - lo).rem_euclid(12);
+        let root = MARIACHI_BASS_LO + (self.root - MARIACHI_BASS_LO).rem_euclid(12);
         for &(st, len, v) in stabs {
             if m & L_KICK != 0 || mixed {
                 b.hit(st, 0.0, CH_KICK, 0, v);
@@ -11159,6 +11173,8 @@ const MARIACHI_FALSETE: i8 = 22;
 /// A tune's range, semitones about its tonic.
 const MARIACHI_LO: i32 = -3;
 const MARIACHI_HI: i32 = 14;
+/// The guitarrón's lowest root (C2).
+const MARIACHI_BASS_LO: i32 = 36;
 
 /// Eight-bar plans (a chord a bar; A+B, two): verses (A); choruses (B), away
 /// from home at first; the contrasting part (C: a major piece's to the
@@ -11656,7 +11672,7 @@ fn mariachi_trumpet(r: &mut Rng) -> Patch {
         unison: 2,
         detune: r.range(4.0, 7.0),
         width: 0.15,
-        cutoff: r.range(1700.0, 2300.0),
+        cutoff: r.range(2200.0, 2800.0),
         res: 0.2,
         env_amt: 1.5,
         fdec: 0.12,
@@ -11726,7 +11742,7 @@ fn mariachi_guitar(r: &mut Rng) -> Patch {
     // a Spanish guitar's nylon strings, damped quickly for the chops
     Patch {
         ks: r.range(1.4, 2.0),
-        ks_tone: r.range(0.55, 0.65),
+        ks_tone: r.range(0.48, 0.58),
         cutoff: 4000.0,
         keytrack: 0.3,
         a: 0.001,
@@ -11753,16 +11769,18 @@ fn mariachi_requinto(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_guitarron(r: &mut Rng) -> Patch {
-    // the deep acoustic bass: a string plucked hard, its snap a brief
-    // opening of the filter, a little grit
+    // the deep acoustic bass: a string plucked hard and ringing, its snap a
+    // brief opening of the filter, then dark (the filter following the
+    // note: its body the fundamental and the first few harmonics), a little
+    // grit
     Patch {
-        ks: r.range(1.0, 1.5),
-        ks_tone: r.range(0.5, 0.6),
-        cutoff: r.range(500.0, 700.0),
-        env_amt: 2.0,
-        fdec: 0.06,
-        keytrack: 0.3,
-        drive: 0.4,
+        ks: r.range(4.0, 5.0),
+        ks_tone: r.range(0.3, 0.36),
+        cutoff: r.range(600.0, 720.0),
+        env_amt: 2.8,
+        fdec: 0.035,
+        keytrack: 1.0,
+        drive: 0.12,
         a: 0.001,
         d: 2.0,
         s: 1.0,
@@ -11773,7 +11791,12 @@ fn mariachi_guitarron(r: &mut Rng) -> Patch {
 }
 
 fn mariachi_guitarron_round(r: &mut Rng) -> Patch {
-    Patch { ks_tone: 0.4, cutoff: r.range(750.0, 900.0), env_amt: 0.8, drive: 0.0, ..mariachi_guitarron(r) }
+    Patch { ks_tone: 0.3, cutoff: r.range(420.0, 500.0), env_amt: 1.0, drive: 0.0, ..mariachi_guitarron(r) }
+}
+
+fn mariachi_upright(r: &mut Rng) -> Patch {
+    // an upright bass as dark as the guitarrón
+    Patch { cutoff: 520.0, keytrack: 1.0, ..bass_upright(r) }
 }
 
 fn mariachi_arpa(r: &mut Rng) -> Patch {
@@ -11923,7 +11946,7 @@ const P_MARIACHI_GUITAR: &[(&str, Make)] = &[
 const P_MARIACHI_BASS: &[(&str, Make)] = &[
     ("guitarrón", mariachi_guitarron),
     ("round guitarrón", mariachi_guitarron_round),
-    ("upright bass", bass_upright),
+    ("upright bass", mariachi_upright),
 ];
 const P_MARIACHI_HARP: &[(&str, Make)] = &[
     ("arpa", mariachi_arpa),
@@ -11979,10 +12002,13 @@ fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
 }
 
 /// Mariachi's sounds: the violins (the first mono, sliding into their
-/// ornaments; the second under them), the trumpets, the vihuela and guitar
-/// either side, the guitarrón in the middle, the harp; the tarima, palmas,
-/// maracas and guiro; a room with some air (a plaza's), a little echo on the
-/// trumpets.
+/// ornaments; the second under them), the trumpets, the vihuela and guitar,
+/// the guitarrón, the harp; the tarima, palmas, maracas and guiro; a room
+/// with some air (a plaza's), a little echo on the trumpets. Spread as the
+/// band stands: the first violins to one side, the trumpets to the other,
+/// the second violins between the trumpets and the middle; the vihuela and
+/// guitar a little either side, the guitarrón in the middle, loud (the
+/// records' low end), the harp by the violins.
 fn sounds_mariachi(r: &mut Rng, s: &mut Synth) {
     let ch = &mut s.ch;
     ch[CH_LEAD].patch = mariachi_violins(r);
@@ -12000,13 +12026,13 @@ fn sounds_mariachi(r: &mut Rng, s: &mut Synth) {
     ch[CH_SNARE].drums = mariachi_kit_palmas(r);
     ch[CH_HAT].drums = mariachi_kit_maracas(r);
     ch[CH_PERC].drums = mariachi_kit_guiro(r);
-    mix(&mut ch[CH_LEAD], 0.85, 0.2, 0.25, 0.04, 0.0);
-    mix(&mut ch[CH_DRONE], 0.2, 0.05, 0.28, 0.0, 0.0);
-    mix(&mut ch[CH_ARP], 0.55, -0.2, 0.25, 0.06, 0.0);
-    mix(&mut ch[CH_KEYS], 0.32, 0.35, 0.12, 0.0, 0.0);
-    mix(&mut ch[CH_PAD], 0.26, -0.35, 0.12, 0.0, 0.0);
-    mix(&mut ch[CH_BASS], 0.5, 0.0, 0.05, 0.0, 0.0);
-    mix(&mut ch[CH_BELL], 0.34, 0.15, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_LEAD], 0.93, 0.6, 0.25, 0.04, 0.0);
+    mix(&mut ch[CH_DRONE], 0.15, -0.3, 0.28, 0.0, 0.0);
+    mix(&mut ch[CH_ARP], 0.63, -0.6, 0.25, 0.06, 0.0);
+    mix(&mut ch[CH_KEYS], 0.3, 0.3, 0.12, 0.0, 0.0);
+    mix(&mut ch[CH_PAD], 0.21, -0.3, 0.12, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], 0.9, 0.0, 0.05, 0.0, 0.0);
+    mix(&mut ch[CH_BELL], 0.34, 0.3, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_KICK], 0.55, 0.0, 0.12, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.35, 0.1, 0.2, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.3, 0.3, 0.1, 0.0, 0.0);
