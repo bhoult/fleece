@@ -29,10 +29,10 @@ const SP_FINALE: u8 = 6;
 
 /// The cymbals' kinds (CH_CYM): a clash, a swell into the next downbeat
 /// (2 s or 4 s), the gong.
-const CY_CLASH: u8 = 0;
+pub(super) const CY_CLASH: u8 = 0;
 const CY_SWELL2: u8 = 1;
 const CY_SWELL4: u8 = 2;
-const CY_GONG: u8 = 3;
+pub(super) const CY_GONG: u8 = 3;
 
 /// A note of a tune: its 16th from the tune's start (a fraction for a
 /// triplet), its length in 16ths, its pitch (semitones above the tune's
@@ -134,7 +134,7 @@ const C_END: u8 = 5;
 const C_LYRIC: u8 = 6;
 const C_SIGH: u8 = 7;
 
-const T3: f32 = 4.0 / 3.0;
+pub(super) const T3: f32 = 4.0 / 3.0;
 
 /// A cell's notes (16th, length) in a bar of 16 (4/4) or 12 (6/8), and how
 /// each moves from the last: scale steps, or M_CT the nearest chord tone,
@@ -164,13 +164,13 @@ fn sw_cell(bs: u32, kind: u8) -> (&'static [(f32, f32)], &'static [i32]) {
     }
 }
 
-const M_CT: i32 = 50;
-const M_LEAP: i32 = 51;
-const M_HOME: i32 = 52;
-const M_UNDER: i32 = 53;
+pub(super) const M_CT: i32 = 50;
+pub(super) const M_LEAP: i32 = 51;
+pub(super) const M_HOME: i32 = 52;
+pub(super) const M_UNDER: i32 = 53;
 
 /// `p` moved `n` steps along the mode's scale (semitones above the tonic).
-fn sw_step(mode: usize, p: i32, n: i32) -> i32 {
+pub(super) fn sw_step(mode: usize, p: i32, n: i32) -> i32 {
     let sc = |q: i32| MODES[mode].contains(&q.rem_euclid(12));
     let mut q = p;
     for _ in 0..n.abs() {
@@ -183,7 +183,7 @@ fn sw_step(mode: usize, p: i32, n: i32) -> i32 {
 }
 
 /// The tone of `h` nearest `p` (at or above it when `up`).
-fn sw_ct(h: Harm, p: i32, up: bool) -> i32 {
+pub(super) fn sw_ct(h: Harm, p: i32, up: bool) -> i32 {
     let pcs = h.pcs();
     (0..12).flat_map(|k| [p + k, p - k]).find(|q| pcs.contains(&q.rem_euclid(12)) && (!up || *q >= p)).unwrap_or(p)
 }
@@ -365,7 +365,7 @@ fn sw_low_strings_synth(r: &mut Rng) -> Patch {
 }
 
 /// The violins: held, or spiccato under a quarter of a second (CC0 section).
-fn sw_violins(r: &mut Rng) -> Patch {
+pub(super) fn sw_violins(r: &mut Rng) -> Patch {
     rec(sw_strings_synth(r), multi_or("violins", "auto", "Strings Slow"), 74.0)
 }
 
@@ -383,14 +383,9 @@ fn sw_cellos_spic(r: &mut Rng) -> Patch {
 }
 
 /// The tremolo: the violins' (CC0) or the SoundFont's strings.
-fn sw_tremolo(r: &mut Rng) -> Patch {
+pub(super) fn sw_tremolo(r: &mut Rng) -> Patch {
     let p = Patch { trem: 0.6, vib_rate: r.range(11.0, 13.0), vib: 0.0, ..sw_strings_synth(r) };
     rec(p, multi_or("violins_trem", "sus", "Strings Tremolo"), 72.0)
-}
-
-fn sw_tremolo_gm(r: &mut Rng) -> Patch {
-    let p = Patch { trem: 0.6, vib_rate: r.range(11.0, 13.0), vib: 0.0, ..sw_strings_synth(r) };
-    rec(p, samples::gm("Strings Tremolo"), 64.0)
 }
 
 /// The string ensemble held (the SoundFont's two, the fast one brighter).
@@ -403,7 +398,7 @@ fn sw_violas(r: &mut Rng) -> Patch {
 }
 
 /// The basses: the cellos and the bowed contrabass (CC0).
-fn sw_cellos(r: &mut Rng) -> Patch {
+pub(super) fn sw_cellos(r: &mut Rng) -> Patch {
     rec(sw_low_strings_synth(r), multi_or("cellos", "auto", "Cello"), 48.0)
 }
 
@@ -476,7 +471,7 @@ fn sw_timpani_synth(r: &mut Rng) -> Patch {
 
 /// The timpani (the SoundFont's, nine layers), on a tonal channel: tuned
 /// to the piece's tonic and dominant, played by note.
-fn sw_timpani(r: &mut Rng) -> Patch {
+pub(super) fn sw_timpani(r: &mut Rng) -> Patch {
     rec(sw_timpani_synth(r), samples::gm("Timpani"), 43.0)
 }
 
@@ -506,11 +501,11 @@ fn sw_kit_bass_drum_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 /// The orchestra's bass drum (CC0, four layers).
-fn sw_kit_bass_drum(r: &mut Rng) -> Vec<DrumPatch> {
+pub(super) fn sw_kit_bass_drum(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit(sw_kit_bass_drum_synth(r), &[multi_or("bass_drum", "hit", "Concert Bass Drum")])
 }
 
-fn sw_kit_snare_synth(r: &mut Rng) -> Vec<DrumPatch> {
+pub(super) fn sw_kit_snare_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let sn = DrumPatch {
         tone: 0.35,
         f0: r.range(240.0, 280.0),
@@ -557,7 +552,7 @@ fn sw_kit_triangle(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit(sw_kit_triangle_synth(r), &[samples::multi("triangle", "hit")])
 }
 
-fn sw_kit_cymbals_synth(r: &mut Rng) -> Vec<DrumPatch> {
+pub(super) fn sw_kit_cymbals_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let clash = DrumPatch {
         noise: 1.0,
         nmode: 2,
@@ -611,7 +606,6 @@ fn sw_kit_cymbals(r: &mut Rng) -> Vec<DrumPatch> {
 // the palettes (each a role's alternates, the mixes' borrowings)
 
 const P_SW_THEME: &[(&str, Make)] = &[("trumpets", trumpet), ("horns", horn), ("violins", sw_violins)];
-const P_SW_LOW_THEME: &[(&str, Make)] = &[("horns", horn), ("trombones", sw_trombones), ("horn section", sw_horns)];
 const P_SW_BRASS: &[(&str, Make)] =
     &[("brass section", sw_brass), ("horn section", sw_horns), ("trombones", sw_trombones)];
 const P_SW_OSTINATO: &[(&str, Make)] = &[
@@ -626,7 +620,6 @@ const P_SW_STRINGS: &[(&str, Make)] =
 const P_SW_CHOIR: &[(&str, Make)] = &[("choir", sw_choir), ("voices", sw_oohs)];
 const P_SW_COLOUR: &[(&str, Make)] = &[("harp", harp), ("celesta", celesta), ("glockenspiel", glockenspiel)];
 const P_SW_BASS: &[(&str, Make)] = &[("cellos", sw_cellos), ("contrabass", sw_contrabass), ("tuba", tuba)];
-const P_SW_TIMPANI: &[(&str, Make)] = &[("timpani", sw_timpani), ("choir", sw_choir)];
 const K_SW_KICK: &[(&str, MakeKit)] = &[("bass drum", sw_kit_bass_drum)];
 const K_SW_SNARE: &[(&str, MakeKit)] = &[("snare drum", sw_kit_snare)];
 const K_SW_HAT: &[(&str, MakeKit)] = &[("triangle", sw_kit_triangle)];
@@ -674,7 +667,7 @@ fn band_starwars(r: &mut Rng, s: &Synth, style: u8) -> Band {
         SWS_MARCH => {
             sw_pair(&mut b, r, s, CH_LEAD, None, sw_violins, 74.0);
             sw_pair(&mut b, r, s, CH_KEYS, None, sw_horns, 58.0);
-            let w: Make = r.pick(&[flute, sw_oboe, clarinet]);
+            let w: Make = P_SW_WINDS[r.below(3)].1;
             sw_pair(&mut b, r, s, CH_ARP, None, w, 72.0);
         }
         SWS_DARK => {
@@ -692,8 +685,45 @@ fn band_starwars(r: &mut Rng, s: &Synth, style: u8) -> Band {
     sw_pair(&mut b, r, s, CH_BELL, None, if style == SWS_BATTLE { glockenspiel } else { celesta }, 74.0);
     sw_pair(&mut b, r, s, CH_DRONE, None, sw_oohs, 45.0);
     sw_pair(&mut b, r, s, CH_BASS, None, if style == SWS_DARK { tuba } else { sw_contrabass }, 40.0);
-    b.kits.push((CH_KICK, [s.ch[CH_KICK].drums.clone(), s.ch[CH_KICK].drums.clone()]));
     b
+}
+
+/// The recordings against the synthesiser's patches they replace, by style
+/// and channel (dB): measured over whole pieces (each channel alone, the
+/// leveller frozen, K-weighted mean power with the samples against
+/// without, the same notes; 8 seeds' first 300 s, by the pieces' styles).
+/// The levelling's one early note misreads the spiccato's short notes, the
+/// held strings' swell and the low brass; the bass drum, the cymbals and
+/// the gong ring otherwise than the synthesiser's.
+fn sw_rec_trim(style: u8, ch: usize) -> f32 {
+    match (style, ch) {
+        (SWS_MARCH, CH_BASS) => 3.0,
+        (SWS_MARCH, CH_PAD) => 1.5,
+        (SWS_MARCH, CH_ARP) => -4.2,
+        (SWS_MARCH, CH_BELL) => 1.1,
+        (SWS_MARCH, CH_KEYS) => 0.9,
+        (SWS_DARK, CH_BASS) => 5.1,
+        (SWS_DARK, CH_LEAD) => 0.8,
+        (SWS_DARK, CH_KEYS) => 2.1,
+        (SWS_DARK, CH_DRONE) => 0.7,
+        (SWS_BATTLE, CH_BASS) => 2.4,
+        (SWS_BATTLE, CH_PAD) => 4.4,
+        (SWS_BATTLE, CH_ARP) => -1.6,
+        (SWS_BATTLE, CH_LEAD) => 2.2,
+        (SWS_BATTLE, CH_BELL) => -2.2,
+        (SWS_BATTLE, CH_KEYS) => 1.8,
+        (SWS_BATTLE, CH_DRONE) => -0.9,
+        _ => 0.0,
+    }
+}
+
+/// `sw_rec_trim`'s for the kits.
+fn sw_kit_trims(style: u8) -> [(usize, f32); 4] {
+    match style {
+        SWS_MARCH => [(CH_KICK, 7.7), (CH_SNARE, -0.7), (CH_HAT, 9.3), (CH_CYM, 5.5)],
+        SWS_DARK => [(CH_KICK, 8.4), (CH_SNARE, -0.5), (CH_HAT, 9.3), (CH_CYM, 10.8)],
+        _ => [(CH_KICK, 7.7), (CH_SNARE, -0.5), (CH_HAT, 9.3), (CH_CYM, 4.4)],
+    }
 }
 
 /// Star Wars's sounds (a mix's drummer's: the march's or the battle's).
@@ -728,16 +758,29 @@ fn sw_sounds(r: &mut Rng, s: &mut Synth, style: u8) {
     ch[CH_SNARE].drums = sw_kit_snare(r);
     ch[CH_HAT].drums = sw_kit_triangle(r);
     ch[CH_CYM].drums = sw_kit_cymbals(r);
+    // the recorded kits at the synthesiser's balance (`SW_REC_TRIMS`'s measure)
+    for (c, db) in sw_kit_trims(style) {
+        ch[c].drums = kit_trim(std::mem::take(&mut ch[c].drums), db);
+    }
+    // the balance (measured over whole pieces, K-weighted): the tune on
+    // top, the brass 3 dB under it, the strings 4-6, the ostinato 6-8, the
+    // timpani and the percussion well under (the low strings' ostinato
+    // speaks quietly, so its channel is up)
+    let (arp, bass, timp, snare) = match style {
+        SWS_MARCH => (1.25, 0.95, 0.17, 0.76),
+        SWS_DARK => (4.0, 0.75, 0.15, 0.6),
+        _ => (2.5, 1.06, 0.21, 0.68),
+    };
     mix(&mut ch[CH_LEAD], 0.8, -0.25, 0.32, 0.0, 0.0);
     mix(&mut ch[CH_KEYS], 0.55, 0.3, 0.35, 0.0, 0.0);
-    mix(&mut ch[CH_ARP], 0.5, -0.35, 0.28, 0.0, 0.0);
-    mix(&mut ch[CH_PAD], 0.42, 0.0, 0.38, 0.0, 0.0);
-    mix(&mut ch[CH_BELL], 0.42, -0.5, 0.4, 0.0, 0.0);
-    mix(&mut ch[CH_DRONE], 0.6, 0.15, 0.35, 0.0, 0.0);
-    mix(&mut ch[CH_BASS], 0.75, 0.35, 0.25, 0.0, 0.0);
-    mix(&mut ch[CH_KICK], 0.6, 0.1, 0.35, 0.0, 0.0);
-    mix(&mut ch[CH_SNARE], 0.38, 0.15, 0.3, 0.0, 0.0);
-    mix(&mut ch[CH_HAT], 0.3, -0.3, 0.4, 0.0, 0.0);
+    mix(&mut ch[CH_ARP], arp, -0.35, 0.28, 0.0, 0.0);
+    mix(&mut ch[CH_PAD], if style == SWS_BATTLE { 0.5 } else { 0.53 }, 0.0, 0.38, 0.0, 0.0);
+    mix(&mut ch[CH_BELL], 0.5, -0.5, 0.4, 0.0, 0.0);
+    mix(&mut ch[CH_DRONE], timp, 0.15, 0.35, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], bass, 0.35, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_KICK], 0.3, 0.1, 0.35, 0.0, 0.0);
+    mix(&mut ch[CH_SNARE], snare, 0.15, 0.3, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], 0.4, -0.3, 0.4, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.42, 0.2, 0.4, 0.0, 0.0);
     mix(&mut ch[CH_FX], 0.35, 0.0, 0.5, 0.0, 0.0);
     // the hall's recordings narrowed to where they sit
@@ -873,6 +916,7 @@ impl Song {
         };
         sw_sounds(r, s, style);
         self.band = band_starwars(r, s, style);
+        rec_trim(&mut self.band, s, |ch, _| sw_rec_trim(style, ch));
     }
 
     /// A section begins: its chords, its bars' lengths (the battle's bar of
@@ -1073,7 +1117,7 @@ impl Song {
                 }
             }
             SWS_DARK => {
-                let lo = 40;
+                let lo = 45;
                 for st in (0..bs).step_by(2) {
                     let x = c[(st as f32 >= half) as usize];
                     let r0 = lo + (self.root + x.bass() - lo).rem_euclid(12);
@@ -1364,7 +1408,8 @@ impl Song {
         let end = if last { bs as f32 - beat as f32 } else { bs as f32 };
         match self.sw.style {
             SWS_MARCH => {
-                for st in (0..bs).step_by(2 * beat as usize).map(|x| x as f32).filter(|&st| st < end) {
+                let every = if e >= 0.9 { 2 } else { 4 } * beat as usize;
+                for st in (0..bs).step_by(every).map(|x| x as f32).filter(|&st| st < end) {
                     let x = c[(st >= half) as usize];
                     b.note(
                         st,
