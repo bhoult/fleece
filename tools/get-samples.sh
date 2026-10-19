@@ -13,15 +13,16 @@
 #   - Folders of Versilian Studios' VS Chamber Orchestra 2: Community Edition
 #     (github.com/sgossner/VSCO-2-CE) and Versilian Community Sample Library
 #     (github.com/sgossner/VCSL), both CC0 1.0 (public domain), as sparse, shallow, blobless git
-#     clones pinned to a commit: violins, violin, trumpet, trombone, tuba, horn, contrabass, harp,
-#     tenor sax, clarinet, flute, recorder, ocarina, harmonica, psaltery, kalimba, vibraphone,
-#     marimba, glockenspiel, guiro, shakers, claps, cajon, frame drum, tambourine and finger
-#     cymbals.
+#     clones pinned to a commit: violins, violin, violas, cellos, trumpet, trombone, tuba, horn,
+#     contrabass, harp, folk harp, tenor sax, clarinet, flute, oboe, bassoon, recorder, ocarina,
+#     harmonica, psaltery, kalimba, vibraphone, marimba, glockenspiel, balafon, guiro, shakers,
+#     claps, cajon, congas, bongos, frame drum, tambourine, finger cymbals, snares, bass drum,
+#     cymbals, hi-hat, gong, triangle, anvil, slapstick, vibraslap, bell tree and agogo bells.
 # and writes into DEST: the SoundFont files; multi/<instrument>/<articulation>/*.wav (48 kHz,
 # 16-bit, trimmed); manifest.tsv (what the sampler reads); sources.tsv (each file's origin);
 # SOURCES.md; and licenses/ (each source's license and readme, verbatim).
 #
-# Disk space: about 755 MB in DEST (216 MB SoundFont, 538 MB multi/), plus about 2 GB
+# Disk space: about 1 GB in DEST (216 MB SoundFont, 790 MB multi/), plus about 3 GB
 # of git clones in the cache (FLEECE_SAMPLES_SRC, default ~/.cache/fleece/samples-src), which
 # is only needed to rebuild multi/ and can be deleted afterwards.
 #

@@ -2819,6 +2819,17 @@ impl Song {
         }
     }
 
+    /// Bar `k` of the section playing, in samples (star wars's and western's
+    /// meters change from bar to bar).
+    fn bar_len_at(&self, k: u32) -> f64 {
+        let steps = match self.genre {
+            STARWARS => self.sw.bs_at(k),
+            WESTERN => self.wn.bs_at(k),
+            _ => self.bar_steps(),
+        };
+        steps as f64 * self.step_len()
+    }
+
     /// A 16th, in samples.
     fn step_len(&self) -> f64 {
         60.0 / self.bpm * SR as f64 / self.beat_steps() as f64
@@ -3087,7 +3098,11 @@ impl Song {
             return;
         }
         let bar = self.bar_steps() as f64 * self.step_len();
-        let outro = self.plan[last].bars as f64 * bar;
+        // the outro's length, as near as can be told before it starts (star
+        // wars's and western's meters are made with each section, their last
+        // bar long: a bar more for them)
+        let extra = if matches!(self.genre, STARWARS | WESTERN) { 1.0 } else { 0.0 };
+        let outro = (self.plan[last].bars as f64 + extra) * bar;
         if self.sec == last {
             // the outro in its course: another piece after it, or the last
             // one (but too early: back to the last main section first)
@@ -3119,6 +3134,8 @@ impl Song {
         // last bars (but techno's and synthwave's, which keep time)
         e.last = true;
         e.bpm = self.bpm;
+        // (its bars now made: their lengths)
+        let outro: f64 = (0..self.plan[last].bars).map(|k| self.bar_len_at(k)).sum();
         let left = (e.at - (t0 + outro)).max(0.0);
         let n = self.plan[last].bars as f64;
         let m = n.min(4.0);
@@ -15304,8 +15321,9 @@ pub fn render_wav(genre: usize, seed: u64, secs: f64, path: &str, ending: Ending
     let mut mix = Mix::new(genre, seed);
     if ending == Ending::Natural {
         let tail = end_tail(genre);
-        // (the last bar as late as a second before the end, if that is nearer the mark)
-        mix.cur.song.end_at((secs - tail).max(0.0) * RATE as f64, (tail - 1.0).max(0.5) * RATE as f64);
+        // (the last bar as late as a second before the end, or 2.5 s after the
+        // mark, if that is nearer it)
+        mix.cur.song.end_at((secs - tail).max(0.0) * RATE as f64, (tail - 1.0).clamp(0.5, 2.5) * RATE as f64);
     }
     let mut f = vec![0.0f32; 2 * CHUNK];
     let mut left = frames;
