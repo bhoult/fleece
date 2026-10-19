@@ -67,7 +67,7 @@ use western::*;
 /// Whether `genre`'s pieces end on a final hit (its last bar its own in a mix,
 /// the drummer's beat left out).
 fn ends_on_a_hit(genre: usize) -> bool {
-    matches!(genre, POLKA | TAVERN | SKA | MARIACHI)
+    matches!(genre, POLKA | TAVERN | SKA | MARIACHI | INDONESIAN | CELTIC)
 }
 /// The music's ids: a genre alone (below `NG`), or a mix of a primary genre and a
 /// secondary one (`mix_id`): the primary writes the music (its form, meter,
@@ -12683,6 +12683,16 @@ fn palette(g: usize, ch: usize) -> Option<&'static [(&'static str, Make)]> {
         (MARIACHI, CH_KEYS) => P_MARIACHI_STRUM,
         (MARIACHI, CH_PAD | CH_DRONE) => P_MARIACHI_SUSTAIN,
         (MARIACHI, CH_BASS) => P_MARIACHI_BASS,
+        (INDONESIAN, CH_BELL | CH_ARP) => P_IDN_BARS,
+        (INDONESIAN, CH_KEYS | CH_PAD) => P_IDN_KETTLES,
+        (INDONESIAN, CH_LEAD) => P_IDN_LEAD,
+        (INDONESIAN, CH_BASS) => P_IDN_LOW,
+        (INDONESIAN, CH_DRONE) => P_IDN_GONG,
+        (CELTIC, CH_LEAD) => P_CE_LEAD,
+        (CELTIC, CH_BELL | CH_ARP) => P_CE_SECOND,
+        (CELTIC, CH_KEYS | CH_PAD) => P_CE_STRUM,
+        (CELTIC, CH_DRONE) => P_CE_DRONE,
+        (CELTIC, CH_BASS) => P_CE_BASS,
         _ => return None,
     })
 }
@@ -12721,6 +12731,14 @@ fn kit_palette(g: usize, ch: usize) -> Option<&'static [(&'static str, MakeKit)]
         (MARIACHI, CH_SNARE) => K_MARIACHI_SNARE,
         (MARIACHI, CH_HAT) => K_MARIACHI_HAT,
         (MARIACHI, CH_PERC) => K_MARIACHI_PERC,
+        (INDONESIAN, CH_KICK) => K_IDN_KICK,
+        (INDONESIAN, CH_SNARE) => K_IDN_SNARE,
+        (INDONESIAN, CH_HAT) => K_IDN_HAT,
+        (INDONESIAN, CH_PERC) => K_IDN_PERC,
+        (INDONESIAN, CH_CYM) => K_IDN_CYM,
+        (CELTIC, CH_KICK) => K_CE_KICK,
+        (CELTIC, CH_SNARE) => K_CE_SNARE,
+        (CELTIC, CH_PERC) => K_CE_PERC,
         _ => return None,
     })
 }
