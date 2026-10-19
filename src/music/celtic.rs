@@ -162,6 +162,8 @@ pub(super) struct Celtic {
     drum: Vec<u8>,
     /// the off-beat eighths' delay (16ths): a reel's lilt, a hornpipe's swing
     lilt: f32,
+    /// the tune playing (an outro the ending jumps to closes it)
+    cur: usize,
     /// a mix's drummer: the bodhrán's triplets this piece
     dready: bool,
     dtrip: f32,
@@ -518,6 +520,10 @@ impl Song {
     pub(super) fn celtic_section(&mut self) {
         let Some(&x) = self.ce.map.get(self.sec) else { return };
         let sec = self.plan[self.sec];
+        // the outro closes the tune it comes from (its B part's cadence)
+        let x = if sec.kind == OUTRO { CSec { tune: self.ce.cur, part: 1, time: 0, rep: true } } else { x };
+        self.ce.map[self.sec] = x;
+        self.ce.cur = x.tune;
         let tune = self.ce.tunes[x.tune].clone();
         let (bs, beat, meter) = ct_meter(tune.ty);
         (self.ce.bar_steps, self.ce.beat_steps, self.ce.meter) = (bs, beat, meter);
@@ -1219,13 +1225,15 @@ fn sounds_ce(r: &mut Rng, s: &mut Synth, style: u8) {
             ch[CH_SNARE].drums = kit_side_drum(r);
             ch[CH_PERC].drums = kit_bones(r);
             ch[CH_HAT].drums = kit_trim(kit_tambourine(r), -4.8);
-            mix(&mut ch[CH_LEAD], 0.42, 0.2, 0.2, 0.03, 0.0);
-            mix(&mut ch[CH_BELL], 0.34, -0.3, 0.22, 0.03, 0.0);
-            mix(&mut ch[CH_ARP], 0.3, 0.35, 0.18, 0.0, 0.0);
-            mix(&mut ch[CH_KEYS], if air { 0.5 } else { 0.4 }, -0.15, 0.2, 0.0, 0.0);
+            // around the table: the fiddle to one side, the flute or whistle
+            // to the other, the box beside the fiddle, the guitar opposite
+            mix(&mut ch[CH_LEAD], 0.42, 0.35, 0.2, 0.03, 0.0);
+            mix(&mut ch[CH_BELL], 0.34, -0.45, 0.22, 0.03, 0.0);
+            mix(&mut ch[CH_ARP], 0.3, 0.55, 0.18, 0.0, 0.0);
+            mix(&mut ch[CH_KEYS], if air { 0.5 } else { 0.4 }, -0.3, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_BASS], 0.42, -0.1, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_DRONE], 0.18, 0.0, 0.2, 0.0, 0.0);
-            mix(&mut ch[CH_KICK], 0.6, 0.0, 0.12, 0.0, 0.0);
+            mix(&mut ch[CH_KICK], 0.42, -0.1, 0.12, 0.0, 0.0);
             mix(&mut ch[CH_SNARE], 0.35, 0.1, 0.15, 0.0, 0.0);
             mix(&mut ch[CH_PERC], 0.3, -0.35, 0.15, 0.0, 0.0);
             mix(&mut ch[CH_HAT], 0.22, 0.3, 0.12, 0.0, 0.0);
@@ -1236,7 +1244,7 @@ fn sounds_ce(r: &mut Rng, s: &mut Synth, style: u8) {
         }
     }
     for c in [CH_LEAD, CH_BELL, CH_ARP] {
-        ch[c].width = if ch[c].patch.samp != 0 { 0.35 } else { 1.0 };
+        ch[c].width = if ch[c].patch.samp != 0 { 0.7 } else { 1.0 };
     }
     s.dly.fb = 0.0;
     s.dly_rev = 0.0;

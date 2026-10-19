@@ -618,8 +618,9 @@ impl Song {
         // the suwuk's last beats spread out (the slowing into the gong)
         let spread = |st: f32| -> f32 {
             if ending {
+                // (the bar's last hit still inside it)
                 let y = st / 16.0;
-                st + 3.0 * y * y
+                st + 0.9 * y * y
             } else {
                 st
             }
@@ -853,8 +854,9 @@ impl Song {
         let at = |j: u32| -> i32 { g[(j % nb) as usize] };
         let spread = |st: f32| -> f32 {
             if ending {
+                // (the bar's last hit still inside it)
                 let y = st / 16.0;
-                st + 3.0 * y * y
+                st + 0.9 * y * y
             } else {
                 st
             }

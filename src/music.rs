@@ -15613,7 +15613,8 @@ mod tests {
     /// techno's kick on the one, polka+techno's clap on the second beat; the
     /// tavern writer's frame drum (its second stroke) gone under another
     /// drummer but for the piece's last bar (under a drummer whose own kick
-    /// has a second stroke, mariachi's toe taps, it cannot be told apart).
+    /// has a second stroke, mariachi's toe taps, the kendang's dhah, the
+    /// bodhrán's top, it cannot be told apart).
     #[test]
     fn mixes_drum_in_the_writers_meter() {
         for p in 0..NG {
@@ -15638,7 +15639,7 @@ mod tests {
                                 let at = (t as f64 - t0) / step;
                                 assert!((-0.01..bs as f64).contains(&at), "{} seed {seed}: a hit at {at} of {bs}", name(id));
                                 assert!(
-                                    ending || !(p == TAVERN && !matches!(g, TAVERN | MARIACHI) && ch as usize == CH_KICK && kind == 1),
+                                    ending || !(p == TAVERN && !matches!(g, TAVERN | MARIACHI | INDONESIAN | CELTIC) && ch as usize == CH_KICK && kind == 1),
                                     "{}: the writer's frame drum",
                                     name(id)
                                 );
