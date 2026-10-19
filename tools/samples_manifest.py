@@ -356,6 +356,85 @@ UNPITCHED = [
     ("finger_cymbals", "hit", "VCSL", G + "Finger Cymbals", [["Fing_Cymb.wav"]]),
 ]
 
+# -- star wars / western ---------------------------------------------------------------------
+# The orchestra's other sections (STAR WARS) and the spaghetti western's percussion (WESTERN).
+# Every VSCO-2-CE folder here names its notes an octave low, as its others do (C3 = middle C):
+# each one's lowest note is then its instrument's (the cellos' C2, the violas' C3, the
+# contrabass's F#1, the bassoon's Bb1, the oboe's Bb3, the violins' G3). Checked on the converted
+# files (2026-10-18, numpy, outside this repository): YIN over 0.2-0.5 s after the onset within
+# 0.25 semitone of the root for 298 of the 308; the other ten an octave out by YIN alone and right
+# by their spectra (the oboe's F6 and the violas' D6: the strongest partial the root, nothing at
+# half of it; the violas' C3 and E3: the fundamental 34-58 dB under the second harmonic, a low
+# viola's, with the root's odd harmonics 9-18 dB under it, so not an octave up).
+ROOT_FIX_FOLDER.update({
+    ("VSCO-2-CE", "Strings/Viola Section/susvib"): 12,
+    ("VSCO-2-CE", "Strings/Viola Section/spic"): 12,
+    ("VSCO-2-CE", "Strings/Cello Section/susvib"): 12,
+    ("VSCO-2-CE", "Strings/Cello Section/spic"): 12,
+    ("VSCO-2-CE", "Strings/Violin Section/Trem"): 12,
+    ("VSCO-2-CE", "Strings/Solo Contrabass/SusVib"): 12,
+    ("VSCO-2-CE", "Woodwinds/Bassoon/sus"): 12,
+    ("VSCO-2-CE", "Woodwinds/Bassoon/stac"): 12,
+    ("VSCO-2-CE", "Woodwinds/Oboe/Vib"): 12,
+    ("VSCO-2-CE", "Woodwinds/Oboe/Stacc"): 12,
+})
+PITCHED += [
+    # the string sections: held (with vibrato) and spiccato, two layers each; the violins'
+    # tremolo held too (so it loops), as an instrument of its own
+    ("violas", "sus", "VSCO-2-CE", "Strings/Viola Section/susvib", [("v1", r"_v1_"), ("v2", r"_v2_")], None),
+    ("violas", "stac", "VSCO-2-CE", "Strings/Viola Section/spic", [("v1", r"_v1_"), ("v2", r"_v2_")], None),
+    # (E1's second take left out)
+    ("cellos", "sus", "VSCO-2-CE", "Strings/Cello Section/susvib", [("v1", r"_v1_"), ("v3", r"_v3_")], r"_1\.wav$"),
+    ("cellos", "stac", "VSCO-2-CE", "Strings/Cello Section/spic", [("v1", r"_v1_"), ("v2", r"_v2_")], None),
+    ("violins_trem", "sus", "VSCO-2-CE", "Strings/Violin Section/Trem", [("v1", r"_v1\."), ("v2", r"_v2\.")], None),
+    # the solo contrabass bowed (its pizzicato is above), under the cellos
+    ("contrabass", "sus", "VSCO-2-CE", "Strings/Solo Contrabass/SusVib", [("v1", r"_v1_"), ("v3", r"_v3_")], None),
+    # the double reeds: held (one layer, the loudest, as the other woodwinds' sustains), and
+    # staccato (two; A#0, D#2 and D1 have only v2, lent to v1)
+    ("bassoon", "sus", "VSCO-2-CE", "Woodwinds/Bassoon/sus", [("v2", r"_v2_")], None),
+    ("bassoon", "stac", "VSCO-2-CE", "Woodwinds/Bassoon/stac",
+     [("v1", r"_v1_|_(A#0|D#2|D1)_v2_"), ("v2", r"_v2_")], None),
+    ("oboe", "vib", "VSCO-2-CE", "Woodwinds/Oboe/Vib", [("v3", r"_v3_")], None),
+    ("oboe", "stac", "VSCO-2-CE", "Woodwinds/Oboe/Stacc", [("v1", r"_v1_"), ("v3", r"_v3_")], None),
+]
+UNPITCHED += [
+    # the orchestra's percussion: a concert snare (VSCO 1's first drum, six layers), a bass drum,
+    # clash cymbals, a suspended cymbal's strokes and its swells (rolls growing for 2 and 4 s
+    # into the stroke: articulations of their own, uncapped, as are the gong's and the clash
+    # cymbals' rings), a gong, a triangle
+    ("snare", "hit", "VSCO-2-CE", "VSCO 1 Percussion/drums/snare/drum1",
+     [["snare1_ppp_1.wav", "snare1_ppp_2.wav"], ["snare1_pp_1.wav", "snare1_p_1.wav"],
+      ["snare1_mp_1.wav", "snare1_mp_2.wav"], ["snare1_f_1.wav", "snare1_f_2.wav", "snare1_f_3.wav"],
+      ["snare1_ff_1.wav", "snare1_ff_2.wav"], ["snare1_fff_1.wav", "snare1_fff_2.wav"]]),
+    ("bass_drum", "hit", "VCSL", M + "Bass Drum 1",
+     [["BDrumNew_hit_v%d_rr1_Sum.wav" % v, "BDrumNew_hit_v%d_rr2_Sum.wav" % v] for v in (2, 3, 5, 7)]),
+    ("cymbals", "clash", "VCSL", G + "Clash Cymbals 1",
+     [["cymbal_crash1_pp1.wav", "cymbal_crash1_pp2.wav"], ["cymbal_crash1_mp1.wav", "cymbal_crash1_mp2.wav"],
+      ["cymbal_crash1_mf1.wav", "cymbal_crash1_mf2.wav"], ["cymbal_crash1_ff2.wav", "cymbal_crash1_ff3.wav"]]),
+    ("cymbal", "swell2", "VCSL", G + "Suspended Cymbal 1", [["susCymb1_cresc_2s.wav"]]),
+    ("cymbal", "swell4", "VCSL", G + "Suspended Cymbal 1", [["susCymb1_cresc_4s.wav"]]),
+    ("cymbal", "ring", "VCSL", G + "Suspended Cymbal 1",
+     [["susCymb1_hit_pp1.wav"], ["susCymb1_hit_mp1.wav"], ["susCymb1_hit_f1.wav"], ["susCymb1_hit_fff1.wav"]]),
+    ("gong", "ring", "VCSL", G + "Gong 1", [["gong_p.wav"], ["gong_mf.wav"], ["gong_f.wav", "gong_2_f.wav"], ["gong_fff.wav"]]),
+    ("triangle", "hit", "VCSL", G + "Triangles",
+     [["Triangle1_Hit_v1_rr1_Mid.wav", "Triangle1_Hit_v1_rr2_Mid.wav"],
+      ["Triangle1_Hit_v2_rr1_Mid.wav", "Triangle1_Hit_v2_rr2_Mid.wav"]]),
+    # the western's: an anvil (three strikes, three layers), a whip (the orchestra's, a
+    # slapstick), a vibraslap's rattle, a bell tree swept, a rope-tension field snare
+    ("anvil", "hit", "VCSL", G + "Anvil", [["Anvil_Hit%d_v%d_rr1_Mid.wav" % (h, v) for h in (1, 2, 3)] for v in (1, 2, 3)]),
+    ("whip", "crack", "VCSL", G + "Slapstick",
+     [["slapstick_quiet_rr1.wav", "slapstick_quiet_rr2.wav"], ["slapstick_rr1.wav", "slapstick_rr2.wav", "slapstick_rr3.wav"]]),
+    ("vibraslap", "rattle", "VCSL", G + "Vibraslap/Legacy", [["vibraslap_rr%d.wav" % i for i in (1, 2, 3, 4)]]),
+    ("bell_tree", "stroke", "VCSL", G + "Bell Tree/Stroke",
+     [["BellTree_Stroke_%d_Mid.wav" % i for i in (1, 3, 4, 6, 10)]]),
+    ("field_snare", "hit", "VCSL", M + "Snare Drum, Rope Tension/Hi",
+     [["RopeSnare_hi_sn_Main_vl1_rr1.wav", "RopeSnare_hi_sn_Main_vl1_rr2.wav"],
+      ["RopeSnare_hi_sn_Main_vl2_rr1.wav", "RopeSnare_hi_sn_Main_vl2_rr2.wav"],
+      ["RopeSnare_hi_sn_Main_vl3_rr1.wav", "RopeSnare_hi_sn_Main_vl3_rr3.wav"],
+      ["RopeSnare_hi_sn_Main_vl4_rr1.wav", "RopeSnare_hi_sn_Main_vl4_rr2.wav"]]),
+]
+# -- end star wars / western -----------------------------------------------------------------
+
 UNPITCHED_NAMES = {u[0] for u in UNPITCHED}
 LICENSE_FILES = {"VSCO-2-CE": ["LICENSE", "README.md", "Readme.txt"], "VCSL": ["LICENSE", "README.md"]}
 MUSESCORE_DOCS = ["MuseScore_General_License.md", "MuseScore_General_Readme.md"]

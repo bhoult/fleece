@@ -177,6 +177,12 @@ pub const GM_PRESETS: &[&str] = &[
     "Concert Bass Drum",
     "808 Tom",
     "Timpani",
+    // -- star wars / western: the strings' tremolo, a cymbal's swell (a
+    // reversed crash), a church bell
+    "Strings Tremolo",
+    "Reverse Cymbal",
+    "Church Bell",
+    // -- end star wars / western
 ];
 
 /// Its drum kits loaded (bank 128), by name.
