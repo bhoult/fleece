@@ -2593,6 +2593,33 @@ impl Bar<'_> {
     }
 }
 
+/// An ending asked of the music: its last bar to end at `at` (samples). On
+/// the way, at a phrase's or section's start, the piece jumps to its outro
+/// when waiting for the next would end too late; an outro reached too early
+/// for another piece goes back to the last main section instead. In the last
+/// outro the music slows down over its last bars (by at most `RIT_MAX`; not
+/// techno or synthwave, which keep time) to land on `at`; then silence, the
+/// sounds ringing out.
+#[derive(Clone, Copy)]
+struct End {
+    at: f64,
+    /// how late the last bar may end (samples), into the ring-out
+    slack: f64,
+    /// in the last outro: the piece's own tempo, and each bar's slowing
+    /// (the last four bars', a quadratic rise)
+    last: bool,
+    bpm: f64,
+    rit: f64,
+    /// the last bar played: where it ended
+    done: Option<f64>,
+}
+
+/// The longest another piece may take when it starts within this of the end
+/// (seconds): any closer, the piece playing is the last.
+const END_MIN_PIECE: f64 = 45.0;
+/// The last bar's tempo at most this much slower (an ending's ritardando).
+const RIT_MAX: f64 = 0.35;
+
 struct Song {
     genre: usize,
     rng: Rng,
@@ -2675,6 +2702,8 @@ struct Song {
     sw: StarWars,
     ce: Celtic,
     wn: Western,
+    /// where the music is to end (`--ending natural`), else None: it goes on
+    end: Option<End>,
     /// a mix's drummer (the genre `genre` writes for), a synthesiser its
     /// drums are made on, and its patterns
     guest: Option<usize>,
@@ -2751,6 +2780,7 @@ impl Song {
             sw: StarWars::default(),
             ce: Celtic::default(),
             wn: Western::default(),
+            end: None,
             guest,
             scratch: guest.map(|g| Box::new(Synth::new(g))),
             dr: Drummer::default(),
@@ -2931,6 +2961,15 @@ impl Song {
 
     /// The next bar: its events into `ev`, starting at sample `t0`; its length in samples.
     fn bar(&mut self, s: &mut Synth, t0: f64, ev: &mut Vec<(u64, Ev)>) -> f64 {
+        if let Some(e) = &mut self.end {
+            if e.done.is_some() {
+                return self.bar_steps() as f64 * self.step_len();
+            }
+            if e.last && self.sec_bar >= self.plan[self.sec].bars && self.sec + 1 >= self.plan.len() {
+                e.done = Some(t0);
+                return self.bar_steps() as f64 * self.step_len();
+            }
+        }
         if self.sec_bar >= self.plan[self.sec].bars {
             self.sec_bar = 0;
             self.sec += 1;
@@ -2938,6 +2977,9 @@ impl Song {
                 self.new_piece(s);
             }
             self.section_start(s);
+        }
+        if self.end.is_some() {
+            self.steer_end(s, t0);
         }
         let sec = self.plan[self.sec];
         // the last bar before a key change ends on the new key's dominant
@@ -3015,6 +3057,76 @@ impl Song {
         }
         self.sec_bar += 1;
         len
+    }
+
+    /// Asks the music to end its last bar at sample `at`, or as late as
+    /// `slack` samples after it (see `End`).
+    fn end_at(&mut self, at: f64, slack: f64) {
+        self.end = Some(End { at, slack, last: false, bpm: self.bpm, rit: 0.0, done: None });
+    }
+
+    /// At a bar's start, on the way to an ending (see `End`): whether to jump
+    /// to the outro (or back to a main section), and in the last outro the
+    /// bar's tempo.
+    fn steer_end(&mut self, s: &mut Synth, t0: f64) {
+        let Some(mut e) = self.end else { return };
+        let last = self.plan.len() - 1;
+        if e.last {
+            // the ritardando: the outro's last four bars slower and slower
+            let n = self.plan[last].bars as f64;
+            let k = self.sec_bar as f64;
+            let w = ((k + 1.0 - (n - 4.0).max(0.0)) / 4.0f64.min(n)).max(0.0);
+            self.bpm = e.bpm / (1.0 + e.rit * w * w);
+            return;
+        }
+        let sec = self.plan[self.sec];
+        // where it can turn: a section's start, or every second bar of a main
+        // section or a break
+        let inner = matches!(sec.kind, MAIN | BREAK);
+        if self.sec_bar != 0 && !(self.sec_bar.is_multiple_of(2) && inner) {
+            return;
+        }
+        let bar = self.bar_steps() as f64 * self.step_len();
+        let outro = self.plan[last].bars as f64 * bar;
+        if self.sec == last {
+            // the outro in its course: another piece after it, or the last
+            // one (but too early: back to the last main section first)
+            let left = e.at - (t0 + outro);
+            if left >= END_MIN_PIECE * SR as f64 {
+                return;
+            }
+            let main = (0..last).rev().find(|&k| self.plan[k].kind == MAIN);
+            if let Some(m) = main.filter(|_| left > 2.0 * bar) {
+                self.sec = m;
+                self.section_start(s);
+                return;
+            }
+        } else {
+            // waiting for the next turn: fine while the outro still ends in
+            // time, or a little late (`slack`, eaten into the ring-out) but
+            // nearer the mark than turning now
+            let rest = (sec.bars - self.sec_bar) as f64 * bar;
+            let next = if inner { rest.min(2.0 * bar) } else { rest };
+            let (late, early) = (t0 + next + outro - e.at, e.at - (t0 + outro));
+            if late <= 0.0 || (late <= e.slack && late < early) {
+                return;
+            }
+            self.sec = last;
+            self.sec_bar = 0;
+            self.section_start(s);
+        }
+        // the last outro: what it leaves to the end, taken up by slowing its
+        // last bars (but techno's and synthwave's, which keep time)
+        e.last = true;
+        e.bpm = self.bpm;
+        let left = (e.at - (t0 + outro)).max(0.0);
+        let n = self.plan[last].bars as f64;
+        let m = n.min(4.0);
+        // the four bars' lengths grow by rit * (k/4)^2: their sum's growth
+        let sum: f64 = (1..=m as usize).map(|k| (k as f64 / m) * (k as f64 / m)).sum();
+        e.rit = if matches!(parts(self.genre).0, TECHNO | SYNTHWAVE) { 0.0 } else { (left / bar / sum).min(RIT_MAX) };
+        self.end = Some(e);
+        self.steer_end(s, t0);
     }
 
     fn new_piece(&mut self, s: &mut Synth) {
@@ -15109,9 +15221,60 @@ impl Drop for Player {
     }
 }
 
-/// Renders `secs` seconds of the music `genre` (an id) with `seed` to a 16-bit stereo 48 kHz WAV (deterministic for a given genre+seed).
-pub fn render_wav(genre: usize, seed: u64, secs: f64, path: &str) -> Result<(), String> {
-    let frames = (secs.max(0.0) * RATE as f64).round() as usize;
+/// How rendered music ends (`--ending`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ending {
+    /// where the time runs out
+    Cut,
+    /// winding down to an ending of its own (`End`), its last bar
+    /// `end_tail` before the end, its sounds ringing out (the last
+    /// `END_FADE` faded); faded out over the last `FADE_OUT` where it cannot
+    /// (too short a time for an outro)
+    Natural,
+    /// faded out over the last seconds
+    Fade,
+}
+
+impl Ending {
+    pub fn parse(s: &str) -> Option<Ending> {
+        match s {
+            "cut" => Some(Ending::Cut),
+            "natural" => Some(Ending::Natural),
+            "fade" => Some(Ending::Fade),
+            _ => None,
+        }
+    }
+}
+
+/// What a natural ending leaves after its last bar for the sounds to ring
+/// out (seconds): the writer's reverb and releases (measured: ambient's pads
+/// and room still -40 dB 9 s on, lo-fi's under -60 dB after 6 s, techno's
+/// and synthwave's after 0.5-1.6 s, the rest after 0.2-2.4 s).
+fn end_tail(genre: usize) -> f64 {
+    match parts(genre).0 {
+        AMBIENT => 8.0,
+        LOFI => 5.0,
+        TECHNO | SYNTHWAVE => 2.5,
+        _ => 3.5,
+    }
+}
+
+/// A natural ending's last seconds faded, whatever still rings.
+const END_FADE: f64 = 1.5;
+
+/// The music's fade-out where it is faded (seconds).
+pub const FADE_OUT: f64 = 4.0;
+
+/// Renders `secs` seconds of the music `genre` (an id) with `seed` to a
+/// 16-bit stereo 48 kHz WAV (deterministic for a given genre and seed),
+/// ending as `ending` says (but for a cut, 0.1 s of silence after: a video's
+/// soundtrack not the shorter stream), faded in over `fade_in` seconds. Ok:
+/// where a natural ending's last bar ended (seconds), None when it was faded
+/// instead (or cut).
+pub fn render_wav(genre: usize, seed: u64, secs: f64, path: &str, ending: Ending, fade_in: f64) -> Result<Option<f64>, String> {
+    let pad = if ending == Ending::Cut { 0.0 } else { 0.1 };
+    let end = (secs.max(0.0) * RATE as f64).round() as usize;
+    let frames = (end as f64 + pad * RATE as f64).round() as usize;
     let bytes = frames * 4;
     let mut data = Vec::with_capacity(44 + bytes);
     data.extend_from_slice(b"RIFF");
@@ -15127,18 +15290,53 @@ pub fn render_wav(genre: usize, seed: u64, secs: f64, path: &str) -> Result<(), 
     data.extend_from_slice(b"data");
     data.extend_from_slice(&(bytes as u32).to_le_bytes());
     let mut mix = Mix::new(genre, seed);
+    if ending == Ending::Natural {
+        let tail = end_tail(genre);
+        // (the last bar as late as a second before the end, if that is nearer the mark)
+        mix.cur.song.end_at((secs - tail).max(0.0) * RATE as f64, (tail - 1.0).max(0.5) * RATE as f64);
+    }
     let mut f = vec![0.0f32; 2 * CHUNK];
     let mut left = frames;
+    let mut t = 0usize;
     while left > 0 {
         let n = left.min(CHUNK);
         mix.render(&mut f[..2 * n]);
-        for &x in &f[..2 * n] {
-            data.extend_from_slice(&to_i16(x).to_le_bytes());
+        for (k, x) in f[..2 * n].iter().enumerate() {
+            let g = if fade_in > 0.0 { smooth((t + k / 2) as f64 / (fade_in * RATE as f64)) } else { 1.0 };
+            data.extend_from_slice(&to_i16(x * g).to_le_bytes());
         }
+        t += n;
         left -= n;
     }
-    std::fs::write(path, data).map_err(|e| format!("{path}: {e}"))
+    // the ending: a natural one's last bar, else (or when it could not
+    // finish) a fade over the last seconds; anything left at the end a 50 ms one
+    let done = mix.cur.song.end.and_then(|e| e.done).map(|d| d / RATE as f64).filter(|&d| d < secs);
+    let out = match (ending, done) {
+        (Ending::Cut, _) => 0.0,
+        (Ending::Natural, Some(d)) => END_FADE.min(secs - d).max(0.05),
+        _ => FADE_OUT.min(secs),
+    };
+    if out > 0.0 {
+        let n = (out * RATE as f64) as usize;
+        for i in end.saturating_sub(n)..frames {
+            let g = if i >= end { 0.0 } else { smooth((end - i) as f64 / n as f64) };
+            for c in 0..2 {
+                let o = 44 + 4 * i + 2 * c;
+                let x = i16::from_le_bytes([data[o], data[o + 1]]) as f32 * g;
+                data[o..o + 2].copy_from_slice(&(x.round() as i16).to_le_bytes());
+            }
+        }
+    }
+    std::fs::write(path, data).map_err(|e| format!("{path}: {e}"))?;
+    Ok(if ending == Ending::Natural { done } else { None })
 }
+
+/// A smoothstep from 0 (at 0) to 1 (at 1).
+pub fn smooth(x: f64) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    (x * x * (3.0 - 2.0 * x)) as f32
+}
+
 
 /// The pieces (start in seconds, tempo, tonic, mode) the first `secs` of a
 /// genre and seed hold: the composer run alone, without the sound.
@@ -15243,8 +15441,9 @@ fn stats(genre: usize, seed: u64, secs: f64) -> Stats {
     }
 }
 
-/// `--musicwav GENRE SECONDS OUT.wav`: renders and says how long it took.
-pub fn cli(args: &[String], seed: u64) {
+/// `--musicwav GENRE SECONDS OUT.wav`: renders and says how long it took
+/// (ending as `ending` says, faded in over `fade_in` seconds).
+pub fn cli(args: &[String], seed: u64, ending: Ending, fade_in: f64) {
     let genre = args.first().and_then(|g| find(g));
     let secs = args.get(1).and_then(|s| s.parse::<f64>().ok());
     let (Some(genre), Some(secs), Some(path)) = (genre, secs, args.get(2)) else {
@@ -15254,11 +15453,19 @@ pub fn cli(args: &[String], seed: u64) {
     // the recorded instruments before the first note: a seed's music the same every time
     samples::load_now();
     let t0 = Instant::now();
-    if let Err(e) = render_wav(genre, seed, secs, path) {
-        eprintln!("fleece: {e}");
-        std::process::exit(1);
-    }
+    let done = match render_wav(genre, seed, secs, path, ending, fade_in) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("fleece: {e}");
+            std::process::exit(1);
+        }
+    };
     let took = t0.elapsed().as_secs_f64();
+    match (ending, done) {
+        (Ending::Natural, Some(d)) => println!("{path}: the music ends at {d:.1} s, ringing out to {secs:.1} s"),
+        (Ending::Natural, None) => println!("{path}: too short a time for an ending of its own: faded out over the last {FADE_OUT} s"),
+        _ => {}
+    }
     let pieces = pieces(genre, seed, secs);
     const KEYS: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
     const MODE: [&str; 7] = ["ionian", "dorian", "phrygian", "lydian", "mixolydian", "aeolian", "harmonic minor"];
@@ -15296,6 +15503,23 @@ mod tests {
         let mut v = vec![0.0; 2 * (secs * SR) as usize];
         m.render(&mut v);
         v
+    }
+
+    /// Every piece's plan ends on an outro (where an ending jumps to), every
+    /// genre's and every mix's.
+    #[test]
+    fn plans_end_on_an_outro() {
+        for id in (0..IDS).filter(|&id| canon(id) == id) {
+            for seed in 0..12u64 {
+                let mut syn = Synth::new(id);
+                let mut song = Song::new(id, seed, &mut syn);
+                for piece in 0..3 {
+                    let last = song.plan.last().expect("a plan");
+                    assert_eq!(last.kind, OUTRO, "{} seed {seed} piece {piece}: ends on kind {}", name(id), last.kind);
+                    song.new_piece(&mut syn);
+                }
+            }
+        }
     }
 
     #[test]

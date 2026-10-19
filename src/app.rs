@@ -1446,28 +1446,62 @@ pub fn video(o: &Opts) {
     let per_round = gpu::WALKERS as f64 * gpu::ITERS as f64;
     let rounds = ((o.quality as f64 * app.rw as f64 * app.rh as f64) / per_round).ceil().max(1.0) as u32;
     let mut frames = o.frames;
-    // generated music: rendered first (a second longer than the video), then
-    // made to like any soundtrack, and deleted once in the file
-    let made = o.music.filter(|_| o.soundtrack.is_none()).map(|g| {
-        let dir = std::env::var("HOME").map(|h| format!("{h}/.cache/fleece")).unwrap_or_else(|_| ".".into());
-        let _ = std::fs::create_dir_all(&dir);
-        let path = format!("{dir}/music-{}.wav", std::process::id());
-        let secs = frames as f64 / o.fps + 1.0;
-        eprintln!("fleece: making {:.0} s of {} music", secs, crate::music::name(g).to_lowercase());
-        // the recorded instruments first: a seed's music the same every time
-        crate::samples::load_now();
-        if let Err(e) = crate::music::render_wav(g, o.seed as u64, secs, &path) {
-            eprintln!("fleece: music: {e}");
-            std::process::exit(1)
+    use crate::music::{Ending, FADE_OUT};
+    // the picture fades in and out over `fade`, the music in over half of it;
+    // generated music winds down to an ending of its own unless told otherwise
+    let fade = o.fade.unwrap_or(2.0);
+    let ending = o.ending.unwrap_or(Ending::Natural);
+    // generated music: rendered first (as long as the video, or a second
+    // longer when cut), then made to like any soundtrack, and deleted once in
+    // the file; a natural ending's last bar (seconds)
+    let mut music_end = None;
+    let made = match o.music.filter(|_| o.soundtrack.is_none()) {
+        Some(g) => {
+            let dir = std::env::var("HOME").map(|h| format!("{h}/.cache/fleece")).unwrap_or_else(|_| ".".into());
+            let _ = std::fs::create_dir_all(&dir);
+            let path = format!("{dir}/music-{}.wav", std::process::id());
+            let secs = frames as f64 / o.fps;
+            let secs = if ending == Ending::Cut { secs + 1.0 } else { secs };
+            eprintln!("fleece: making {:.0} s of {} music", secs, crate::music::name(g).to_lowercase());
+            // the recorded instruments first: a seed's music the same every time
+            crate::samples::load_now();
+            match crate::music::render_wav(g, o.seed as u64, secs, &path, ending, 0.5 * fade) {
+                Ok(d) => music_end = d,
+                Err(e) => {
+                    eprintln!("fleece: music: {e}");
+                    std::process::exit(1)
+                }
+            }
+            match (ending, music_end) {
+                (Ending::Natural, Some(d)) => eprintln!("fleece: the music ends at {d:.1} s, ringing out to {secs:.1} s"),
+                (Ending::Natural, None) => eprintln!("fleece: too short a time for the music to end on its own: faded over the last {FADE_OUT} s"),
+                _ => {}
+            }
+            Some(path)
         }
-        path
-    });
+        None => None,
+    };
     let soundtrack = o.soundtrack.clone().or(made.clone());
+    // a recording given (--audio): faded in, and out when the video ends before it
+    let mut afilter = None;
     if let Some(f) = &soundtrack {
         match crate::audio::timeline(f) {
             Ok((tl, hop)) => {
+                let track = tl.len() as f64 * hop;
                 if frames == 0 {
-                    frames = (tl.len() as f64 * hop * o.fps).round() as u64;
+                    frames = (track * o.fps).round() as u64;
+                }
+                if o.soundtrack.is_some() {
+                    let secs = frames as f64 / o.fps;
+                    let mut fx = Vec::new();
+                    if fade > 0.0 {
+                        fx.push(format!("afade=t=in:d={:.3}", 0.5 * fade));
+                    }
+                    if ending != Ending::Cut && secs < track - 0.5 {
+                        fx.push(format!("afade=t=out:st={:.3}:d={FADE_OUT}", (secs - FADE_OUT).max(0.0)));
+                        music_end = Some((secs - FADE_OUT).max(0.0));
+                    }
+                    afilter = (!fx.is_empty()).then(|| fx.join(","));
                 }
                 eprintln!("fleece: made to {f} ({:.1} s)", tl.len() as f64 * hop);
                 app.track = Some((tl, hop));
@@ -1478,7 +1512,7 @@ pub fn video(o: &Opts) {
             }
         }
     }
-    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow", soundtrack.as_deref()).unwrap_or_else(|e| {
+    let mut sink = crate::video::Sink::open(&o.out, app.rw, app.rh, o.fps, o.crf, "slow", soundtrack.as_deref(), afilter.as_deref()).unwrap_or_else(|e| {
         eprintln!("fleece: {e}");
         std::process::exit(1)
     });
@@ -1532,6 +1566,18 @@ pub fn video(o: &Opts) {
         if o.credit {
             let fade = credit_fade((f - 1) as f64 / o.fps, o.credit_secs);
             stamp_credit(&mut rgb, app.rw as usize, app.rh as usize, &st.name, &st.nick, st.nc, fade);
+        }
+        // in from black, and out to black: from where the music ended (or
+        // began its fade), else over `fade` at the end
+        if fade > 0.0 {
+            let (t, total) = ((f - 1) as f64 / o.fps, frames as f64 / o.fps);
+            let out = music_end.map_or(total - fade, |d| d.min(total - fade)).max(0.0);
+            let g = crate::music::smooth(t / fade).min(crate::music::smooth((total - 1.0 / o.fps - t) / (total - 1.0 / o.fps - out).max(1e-3)));
+            if g < 1.0 {
+                for px in rgb.iter_mut() {
+                    *px = (*px as f32 * g).round() as u8;
+                }
+            }
         }
         if let Err(e) = sink.write(&rgb) {
             eprintln!("fleece: writing the video: {e}");
