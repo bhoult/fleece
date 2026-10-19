@@ -1638,8 +1638,8 @@ const JAVA_REC_TRIMS: &[(usize, &str, f32)] = &[
     (CH_KEYS, "vibraphone:soft", -0.8),
     (CH_PAD, "gong:ring", -1.7),
     (CH_DRONE, "gong:ring", -3.6),
-    (CH_LEAD, "violin:sus", 2.2),
-    (CH_LEAD, "Shakuhachi", 1.0),
+    (CH_LEAD, "violin:sus", 3.0),
+    (CH_LEAD, "Shakuhachi", 3.0),
 ];
 
 /// Balinese.
