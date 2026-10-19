@@ -104,6 +104,12 @@ pub struct Opts {
     pub musicwav: Vec<String>,
     /// generated music (a music::mix_id: a genre, or a primary and a secondary): played in the window, the soundtrack of a video
     pub music: Option<usize>,
+    /// --ending: how a video's generated music, or --musicwav's, ends (None:
+    /// natural for a video, cut for --musicwav)
+    pub ending: Option<music::Ending>,
+    /// --fade SECS: a video fades in from black and out to black over this,
+    /// its music in over half of it (None: 2 s for a video, none for --musicwav)
+    pub fade: Option<f64>,
     /// --samples DIR: the recorded instruments' directory (else ~/.local/share/fleece/samples)
     samples: Option<String>,
     /// --no-samples: the music all synthesiser
@@ -130,10 +136,15 @@ fn usage() -> ! {
     eprintln!("              [--credit on|off]   a video (any ffmpeg format by extension; .y4m needs no ffmpeg;");
     eprintln!("              - is raw RGB24 on stdout); the credit is burned in for the first --credit-secs (10)");
     eprintln!("              unless off, and always in the metadata");
+    eprintln!("              [--music GENRE[+GENRE]] [--ending natural|fade|cut] [--fade SECS]   with music: it");
+    eprintln!("              winds down to an ending of its own a few seconds before the end (natural, the");
+    eprintln!("              default), fades over the last 4 s (fade) or stops (cut); the picture fades in");
+    eprintln!("              from black and out to black over --fade SECS (2; 0: none), the music in over half");
     eprintln!("       fleece --varcheck   CPU against GPU, every variation");
     eprintln!("       fleece --audiocheck [FILE.wav | -] [--seconds S]   audio levels of a WAV (-: stdin), or live from");
     eprintln!("              what the speakers play for S seconds (10)");
-    eprintln!("       fleece --musicwav GENRE SECONDS OUT.wav [--seed N]   generated music to a WAV");
+    eprintln!("       fleece --musicwav GENRE SECONDS OUT.wav [--seed N] [--ending natural|fade|cut] [--fade SECS]");
+    eprintln!("              generated music to a WAV (cut by default; --fade: faded in over half of SECS)");
     eprintln!("       --samples DIR: recorded instruments for the music (~/.local/share/fleece/samples by default;");
     eprintln!("              tools/get-samples.sh fetches them); --no-samples: all synthesiser");
     eprintln!("       fleece --samples-list   the samples directory's SoundFont presets and what loads");
@@ -176,6 +187,8 @@ fn parse() -> Opts {
         sound_delay: None,
         optimize: true,
         musicwav: Vec::new(),
+        ending: None,
+        fade: None,
         music: None,
         samples: None,
         no_samples: false,
@@ -294,6 +307,20 @@ fn parse() -> Opts {
             "--seconds" => {
                 i += 1;
                 seconds = Some(num(i).max(0.0));
+            }
+            "--ending" => {
+                i += 1;
+                match args.get(i).and_then(|e| music::Ending::parse(e)) {
+                    Some(e) => o.ending = Some(e),
+                    None => {
+                        eprintln!("fleece: --ending natural, fade or cut");
+                        std::process::exit(2)
+                    }
+                }
+            }
+            "--fade" => {
+                i += 1;
+                o.fade = Some(num(i).max(0.0));
             }
             "--credit" => {
                 // --credit on (the default) / off; a bare --credit means on
@@ -1105,7 +1132,7 @@ fn main() {
         Mode::Video => app::video(&o),
         Mode::TasteFit => tastefit(&o),
         Mode::AudioCheck => audio::check(&o.out, o.frames),
-        Mode::MusicWav => music::cli(&o.musicwav, o.seed as u64),
+        Mode::MusicWav => music::cli(&o.musicwav, o.seed as u64, o.ending.unwrap_or(music::Ending::Cut), o.fade.unwrap_or(0.0) * 0.5),
         Mode::SamplesList => samples::list_cli(),
     }
 }
