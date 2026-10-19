@@ -28,6 +28,23 @@ impl Song {
     }
 }
 
+impl Western {
+    pub(super) fn bs_at(&self, _k: u32) -> u32 {
+        self.bar_steps.max(1)
+    }
+    pub(super) fn dress_at(&self, _k: usize) -> usize {
+        0
+    }
+}
+
+pub(super) fn palette_western(_ch: usize) -> Option<&'static [(&'static str, Make)]> {
+    None
+}
+
+pub(super) fn kit_palette_western(_ch: usize) -> Option<&'static [(&'static str, MakeKit)]> {
+    None
+}
+
 pub(super) fn sounds_western(r: &mut Rng, s: &mut Synth) {
     sounds_lofi(r, s)
 }

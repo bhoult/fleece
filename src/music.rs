@@ -67,7 +67,7 @@ use western::*;
 /// Whether `genre`'s pieces end on a final hit (its last bar its own in a mix,
 /// the drummer's beat left out).
 fn ends_on_a_hit(genre: usize) -> bool {
-    matches!(genre, POLKA | TAVERN | SKA | MARIACHI)
+    matches!(genre, POLKA | TAVERN | SKA | MARIACHI | STARWARS | WESTERN)
 }
 /// The music's ids: a genre alone (below `NG`), or a mix of a primary genre and a
 /// secondary one (`mix_id`): the primary writes the music (its form, meter,
@@ -2768,9 +2768,9 @@ impl Song {
             SKA => self.sk.bar_steps.max(1),
             MARIACHI => self.mc.bar_steps.max(1),
             INDONESIAN => self.idn.bar_steps.max(1),
-            STARWARS => self.sw.bar_steps.max(1),
+            STARWARS => self.sw.bs_at(self.sec_bar),
             CELTIC => self.ce.bar_steps.max(1),
-            WESTERN => self.wn.bar_steps.max(1),
+            WESTERN => self.wn.bs_at(self.sec_bar),
             _ => 16,
         }
     }
@@ -2949,8 +2949,8 @@ impl Song {
             }
         }
         let len = self.bar_steps() as f64 * self.step_len();
-        // (a jig's; mariachi's 6/8 is even)
-        let lilt = if self.beat_steps() == 6 && self.genre != MARIACHI { 0.18 } else { 0.0 };
+        // (a jig's; mariachi's, the battle's and the gallop's 6/8 are even)
+        let lilt = if self.beat_steps() == 6 && !matches!(self.genre, MARIACHI | STARWARS | WESTERN) { 0.18 } else { 0.0 };
         let mut b = Bar { t0, step: self.step_len(), swing: self.swing, lilt, lift: self.lift, ev };
         if self.sec_bar.is_multiple_of(8) && self.sec_bar > 0 && sec.kind == MAIN {
             // now and then an optional layer sits out a phrase
@@ -2962,9 +2962,9 @@ impl Song {
                 SKA => &[L_DRONE, L_PAD, L_PERC, L_OHAT],
                 MARIACHI => &[L_BELL, L_DRONE, L_PAD, L_HAT],
                 INDONESIAN => &[L_LEAD, L_PERC, L_HAT],
-                STARWARS => &[L_LEAD, L_PERC, L_HAT],
+                STARWARS => &[L_BELL, L_HAT, L_CTR],
                 CELTIC => &[L_LEAD, L_PERC, L_HAT],
-                WESTERN => &[L_LEAD, L_PERC, L_HAT],
+                WESTERN => &[L_BELL, L_HAT, L_CTR],
                 _ => &[L_HAT],
             };
             self.mute = if self.rng.chance(0.5) { self.rng.pick(opt) } else { 0 };
@@ -3035,7 +3035,11 @@ impl Song {
             SKA => [5.0, 1.0, 0.0, 0.0, 1.5, 1.5, 0.5],
             // mariachi: major mostly, minor ones in harmonic minor
             MARIACHI => [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4],
-            INDONESIAN | STARWARS | CELTIC | WESTERN => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
+            // star wars: major (the march) or minor (the battle, the dark
+            // march); the western: minor mostly, Phrygian now and then
+            STARWARS => [4.0, 0.0, 0.6, 1.2, 0.8, 3.0, 1.2],
+            WESTERN => [1.0, 1.0, 1.0, 0.0, 0.6, 3.0, 2.0],
+            INDONESIAN | CELTIC => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
             // polka: major mostly, now and then a minor one
             _ => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         };
@@ -3105,6 +3109,8 @@ impl Song {
             (SYNTHWAVE, MAIN) => (sec.mask & L_LEAD != 0) as usize,
             (LOFI, MAIN) => (sec.mask & L_LEAD != 0 || r.chance(0.3)) as usize,
             (SKA, _) => self.sk.map.get(self.sec).map_or(0, |x| x.dress as usize),
+            (STARWARS, _) => self.sw.dress_at(self.sec),
+            (WESTERN, _) => self.wn.dress_at(self.sec),
             _ => 0,
         };
         self.prog = self.progs[which.min(self.progs.len() - 1)].clone();
@@ -12683,6 +12689,8 @@ fn palette(g: usize, ch: usize) -> Option<&'static [(&'static str, Make)]> {
         (MARIACHI, CH_KEYS) => P_MARIACHI_STRUM,
         (MARIACHI, CH_PAD | CH_DRONE) => P_MARIACHI_SUSTAIN,
         (MARIACHI, CH_BASS) => P_MARIACHI_BASS,
+        (STARWARS, _) => return palette_starwars(ch),
+        (WESTERN, _) => return palette_western(ch),
         _ => return None,
     })
 }
@@ -12721,6 +12729,8 @@ fn kit_palette(g: usize, ch: usize) -> Option<&'static [(&'static str, MakeKit)]
         (MARIACHI, CH_SNARE) => K_MARIACHI_SNARE,
         (MARIACHI, CH_HAT) => K_MARIACHI_HAT,
         (MARIACHI, CH_PERC) => K_MARIACHI_PERC,
+        (STARWARS, _) => return kit_palette_starwars(ch),
+        (WESTERN, _) => return kit_palette_western(ch),
         _ => return None,
     })
 }
