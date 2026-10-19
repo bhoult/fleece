@@ -14998,6 +14998,10 @@ struct Mix {
     seed: u64,
     switches: u64,
     want: usize,
+    /// skips asked for (counted from outside, like `want`), and the count
+    /// already honoured: each new count starts a new piece of the same genre
+    skip: u64,
+    skipped: u64,
     tmp: Vec<f32>,
 }
 
@@ -15005,7 +15009,7 @@ impl Mix {
     fn new(genre: usize, seed: u64) -> Mix {
         let cur = Engine::new(genre, seed);
         let want = cur.genre;
-        Mix { cur, next: None, fade: 0, at: None, seed, switches: 0, want, tmp: vec![0.0; 2 * BLOCK] }
+        Mix { cur, next: None, fade: 0, at: None, seed, switches: 0, want, skip: 0, skipped: 0, tmp: vec![0.0; 2 * BLOCK] }
     }
 
     fn render(&mut self, out: &mut [f32]) {
@@ -15015,7 +15019,7 @@ impl Mix {
         while done < frames {
             let mut n = (frames - done).min(BLOCK);
             if self.next.is_none() {
-                if canon(self.want) == self.cur.genre {
+                if canon(self.want) == self.cur.genre && self.skip == self.skipped {
                     self.at = None;
                 } else {
                     let at = match self.at {
@@ -15029,6 +15033,9 @@ impl Mix {
                         self.cur.done = true;
                         self.fade = 0;
                         self.at = None;
+                        // presses before now are this piece's; one during
+                        // the crossfade skips the piece coming in
+                        self.skipped = self.skip;
                     } else {
                         n = n.min((at - self.cur.t) as usize);
                     }
@@ -15101,6 +15108,8 @@ fn to_i16(x: f32) -> i16 {
 /// its own writing to pacat.
 pub struct Player {
     want: Arc<AtomicUsize>,
+    /// skips asked for
+    skip: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     /// frames made so far (the tests watch it)
     #[cfg_attr(not(test), allow(dead_code))]
@@ -15116,6 +15125,7 @@ pub struct Player {
 struct Live {
     mix: std::sync::Mutex<(Mix, Vec<f32>)>,
     want: Arc<AtomicUsize>,
+    skip: Arc<AtomicU64>,
     frames: Arc<AtomicU64>,
 }
 
@@ -15128,6 +15138,7 @@ unsafe extern "C" fn fill(user: *mut std::ffi::c_void, stream: *mut u8, len: std
     let (mix, buf) = &mut *g;
     buf.resize(out.len(), 0.0);
     mix.want = live.want.load(Ordering::Relaxed);
+    mix.skip = live.skip.load(Ordering::Relaxed);
     mix.render(buf);
     for (o, &x) in out.iter_mut().zip(buf.iter()) {
         *o = to_i16(x);
@@ -15155,12 +15166,18 @@ impl Player {
     fn device(genre: usize, seed: u64) -> Result<Player, String> {
         let genre = canon(genre);
         let want = Arc::new(AtomicUsize::new(genre));
+        let skip = Arc::new(AtomicU64::new(0));
         let frames = Arc::new(AtomicU64::new(0));
-        let live = Box::new(Live { mix: std::sync::Mutex::new((Mix::new(genre, seed), Vec::new())), want: want.clone(), frames: frames.clone() });
+        let live = Box::new(Live {
+            mix: std::sync::Mutex::new((Mix::new(genre, seed), Vec::new())),
+            want: want.clone(),
+            skip: skip.clone(),
+            frames: frames.clone(),
+        });
         // SAFETY: the Live is boxed (it never moves) and dropped only after the device
         let out = unsafe { crate::sdl::AudioOut::open(RATE, 4096, fill, &*live as *const Live as *mut std::ffi::c_void)? };
         eprintln!("fleece: music through {}", out.driver());
-        Ok(Player { want, stop: Arc::new(AtomicBool::new(false)), frames, child: None, thread: None, device: Some((out, live)) })
+        Ok(Player { want, skip, stop: Arc::new(AtomicBool::new(false)), frames, child: None, thread: None, device: Some((out, live)) })
     }
 
     /// The same, writing to `cmd`'s stdin.
@@ -15175,9 +15192,10 @@ impl Player {
         let mut pipe = child.stdin.take().expect("piped stdin");
         let genre = canon(genre);
         let want = Arc::new(AtomicUsize::new(genre));
+        let skip = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(AtomicU64::new(0));
-        let (w, st, fr) = (want.clone(), stop.clone(), frames.clone());
+        let (w, sk, st, fr) = (want.clone(), skip.clone(), stop.clone(), frames.clone());
         let thread = std::thread::Builder::new().name("music".into()).spawn(move || {
             let mut mix = Mix::new(genre, seed);
             let mut f = vec![0.0f32; 2 * CHUNK];
@@ -15185,6 +15203,7 @@ impl Player {
             // blocking writes pace the generator to the sound server
             while !st.load(Ordering::Relaxed) {
                 mix.want = w.load(Ordering::Relaxed);
+                mix.skip = sk.load(Ordering::Relaxed);
                 mix.render(&mut f);
                 for (o, &x) in bytes.chunks_exact_mut(2).zip(&f) {
                     o.copy_from_slice(&to_i16(x).to_le_bytes());
@@ -15203,7 +15222,7 @@ impl Player {
                 return Err(format!("music thread: {e}"));
             }
         };
-        let mut p = Player { want, stop, frames, child: Some(child), thread: Some(thread), device: None };
+        let mut p = Player { want, skip, stop, frames, child: Some(child), thread: Some(thread), device: None };
         // a sound server that is not there shows as the player exiting at once
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_millis(300) {
@@ -15225,6 +15244,12 @@ impl Player {
 
     pub fn genre(&self) -> usize {
         self.want.load(Ordering::Relaxed)
+    }
+
+    /// Skips to a new piece of the same music, as a genre switch does: at the
+    /// next bar line, or beat when bars are long, with a crossfade.
+    pub fn skip(&self) {
+        self.skip.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -15789,6 +15814,28 @@ mod tests {
             assert!(rms > 1e-3, "a gap at the switch");
             assert!(w.iter().all(|x| x.is_finite() && x.abs() < 0.95));
         }
+    }
+
+    #[test]
+    fn skip_starts_a_new_piece_once() {
+        let mut m = Mix::new(POLKA, 3);
+        let mut a = vec![0.0; 2 * 6 * RATE as usize];
+        m.render(&mut a);
+        // two presses before the bar line: one new piece
+        m.skip = 2;
+        let mut b = vec![0.0; 2 * 8 * RATE as usize];
+        m.render(&mut b);
+        assert_eq!((m.switches, m.skipped, m.cur.genre), (1, 2, POLKA));
+        assert!(m.next.is_none());
+        // a new engine: its clock started at the switch
+        assert!(m.cur.t < 8 * RATE as u64);
+        for w in b.chunks(2 * 4800) {
+            let rms = (w.iter().map(|x| x * x).sum::<f32>() / w.len() as f32).sqrt();
+            assert!(rms > 1e-3, "a gap at the skip");
+            assert!(w.iter().all(|x| x.is_finite() && x.abs() < 0.95));
+        }
+        m.render(&mut b);
+        assert_eq!(m.switches, 1);
     }
 
     #[test]

@@ -624,12 +624,12 @@ impl App {
     }
 
     /// The HUD's buttons, each labelled with its key and lit when its setting
-    /// is on: the show, v2's effects, the renderer.
+    /// is on: the show, v2's effects and the music, the renderer.
     fn button_rows(&self) -> Vec<Vec<Item>> {
         let f = &self.fx;
         let classic = *f == Fx::CLASSIC;
         let lines = |n: u32| self.fixed.is_none() && self.rh == n;
-        vec![
+        let mut rows = vec![
             vec![
                 Item::button("LEFT", "PREVIOUS", '<', false),
                 Item::button("RIGHT", "NEXT", '>', false),
@@ -687,7 +687,12 @@ impl App {
                 Item::button("K", "CREDIT IN RECORDINGS", 'k', self.burn_credit),
                 Item::button("Z", format!("OPTIMIZE FOR {:.0} FPS", 1.0 / self.period), 'z', self.opt.is_some()),
             ],
-        ]
+        ];
+        // while music plays: a new piece of it
+        if self.music.is_some() {
+            rows[1].push(Item::button("Y", "NEXT SONG", 'y', false));
+        }
+        rows
     }
 
     /// Drawable pixel (`x`, `y`) on the HUD overlay, if past its corner.
@@ -1119,6 +1124,11 @@ impl App {
             'z' => self.optimize(),
             'n' => self.cycle_music(),
             'j' => self.cycle_secondary(),
+            'y' => {
+                if let Some(p) = &self.music {
+                    p.skip();
+                }
+            }
             _ => {}
         }
         true
