@@ -15650,14 +15650,14 @@ mod sample_tests {
             ("909 kick", kit_kick_909_synth(&mut r)[0], 36),
             ("ska snare", ska_kit_snare(&mut r)[0], 38),
             ("punk snare", ska_kit_punk_snare(&mut r)[0], 38),
-            ("hand clap", kit_hand_clap(&mut r)[0], 39),
+            ("hand clap", kit_hand_clap_synth(&mut r)[0], 39),
             ("closed hat", ska_kit_hats(&mut r)[0], 42),
             ("open hat", ska_kit_hats(&mut r)[1], 46),
-            ("shaker", kit_shaker(&mut r)[0], 82),
-            ("ride", kit_ride(&mut r)[0], 51),
+            ("shaker", kit_shaker_synth(&mut r)[0], 82),
+            ("ride", kit_ride_synth(&mut r)[0], 51),
             ("crash", crash(&mut r)[0], 49),
             ("tom", ska_kit_toms(&mut r)[1], 45),
-            ("conga", kit_perc_hand(&mut r)[1], 64),
+            ("conga", kit_perc_hand_synth(&mut r)[1], 64),
         ];
         let mut sum = 0.0;
         for (name, p, key) in &pairs {
