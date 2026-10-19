@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 use crate::samples::{self, Bank, SAMPLER, Sampler};
 
 /// Genre names, shown on screen in capitals (the app's font has only A-Z, 0-9 and " -.:/!+()[],%").
-pub const GENRES: &[&str] = &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN", "SKA", "MARIACHI"];
+pub const GENRES: &[&str] =
+    &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN", "SKA", "MARIACHI", "INDONESIAN", "STAR WARS", "CELTIC", "WESTERN"];
 const AMBIENT: usize = 0;
 const TECHNO: usize = 1;
 const SYNTHWAVE: usize = 2;
@@ -38,15 +39,43 @@ const POLKA: usize = 4;
 const TAVERN: usize = 5;
 const SKA: usize = 6;
 const MARIACHI: usize = 7;
+const INDONESIAN: usize = 8;
+const STARWARS: usize = 9;
+const CELTIC: usize = 10;
+const WESTERN: usize = 11;
+/// Other names `find` takes for a genre (squashed, as it compares them).
+const ALIASES: &[(&str, &str)] = &[
+    ("KELTIC", "CELTIC"),
+    ("SPAGHETTIWESTERN", "WESTERN"),
+    ("SPAGHETTI", "WESTERN"),
+    ("GAMELAN", "INDONESIAN"),
+    ("SPACEOPERA", "STARWARS"),
+];
 /// How many genres.
 const NG: usize = GENRES.len();
+
+// the later genres, each in a file of its own (src/music/)
+mod celtic;
+mod indonesian;
+mod starwars;
+mod western;
+use celtic::*;
+use indonesian::*;
+use starwars::*;
+use western::*;
+
+/// Whether `genre`'s pieces end on a final hit (its last bar its own in a mix,
+/// the drummer's beat left out).
+fn ends_on_a_hit(genre: usize) -> bool {
+    matches!(genre, POLKA | TAVERN | SKA | MARIACHI)
+}
 /// The music's ids: a genre alone (below `NG`), or a mix of a primary genre and a
 /// secondary one (`mix_id`): the primary writes the music (its form, meter,
 /// harmony and tunes), the secondary drums it (its beat, its effects, its
 /// tempo, near enough), and each part has an instrument of each.
 pub const IDS: usize = NG * (NG + 1);
 /// Each genre's tempo, about (a mix's lies 60 % of the way to its drummer's).
-const MID_BPM: [f64; NG] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0, 135.0, 118.0];
+const MID_BPM: [f64; NG] = [94.0, 132.0, 112.0, 90.0, 120.0, 115.0, 135.0, 118.0, 90.0, 108.0, 112.0, 100.0];
 
 /// The id of `primary` alone, or mixed with `secondary` (another genre).
 pub fn mix_id(primary: usize, secondary: Option<usize>) -> usize {
@@ -70,17 +99,34 @@ pub fn name(id: usize) -> String {
     }
 }
 
+/// The genres as `--music` takes them: lower case, no spaces.
+pub fn cli_names() -> String {
+    GENRES.iter().map(|g| g.replace(' ', "").to_lowercase()).collect::<Vec<_>>().join(", ")
+}
+
+/// The composer's dice for `id`: the mixes of the first eight genres as they
+/// were numbered with eight (primary + 8 * (secondary + 1)), so a seed plays
+/// the music it did; any id with a later genre in it above those.
+fn dice_key(id: usize) -> u64 {
+    const OLD: usize = 8;
+    match parts(id) {
+        (p, s) if p < OLD && s.is_none_or(|g| g < OLD) => (p + OLD * s.map_or(0, |g| g + 1)) as u64,
+        (p, s) => (OLD * (OLD + 1) + p + NG * s.map_or(0, |g| g + 1)) as u64,
+    }
+}
+
 /// `id` in its one spelling (a mix of a genre with itself is the genre alone).
 fn canon(id: usize) -> usize {
     let (p, s) = parts(id);
     mix_id(p, s)
 }
 
-/// The music called `name` (any case, spaces and dashes ignored; a mix's
-/// primary genre first), or its id.
+/// The music called `name` (any case, spaces and dashes ignored, `ALIASES`
+/// too; a mix's primary genre first), or its id.
 pub fn find(name_: &str) -> Option<usize> {
     let squash = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
-    let want = squash(name_);
+    let alias = |q: String| ALIASES.iter().find(|a| a.0 == q).map_or(q, |a| a.1.to_string());
+    let want: String = name_.split('+').map(|p| alias(squash(p))).collect();
     (0..IDS)
         .filter(|&id| canon(id) == id)
         .find(|&id| squash(&name(id)) == want)
@@ -1859,6 +1905,10 @@ impl Synth {
             TAVERN => 0.65,
             SKA => 0.85,
             MARIACHI => 0.85,
+            INDONESIAN => 1.0,
+            STARWARS => 1.3,
+            CELTIC => 0.75,
+            WESTERN => 1.1,
             _ => 0.9,
         };
         let (writer, drummer) = parts(genre);
@@ -2621,6 +2671,10 @@ struct Song {
     tv: Tavern,
     sk: Ska,
     mc: Mariachi,
+    idn: Indonesian,
+    sw: StarWars,
+    ce: Celtic,
+    wn: Western,
     /// a mix's drummer (the genre `genre` writes for), a synthesiser its
     /// drums are made on, and its patterns
     guest: Option<usize>,
@@ -2633,7 +2687,7 @@ impl Song {
         let (writer, guest) = parts(genre);
         let mut song = Song {
             genre: writer,
-            rng: Rng::new(seed ^ (genre as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03)),
+            rng: Rng::new(seed ^ (dice_key(genre) + 1).wrapping_mul(0xD1B5_4A32_D192_ED03)),
             piece: 0,
             bpm: 120.0,
             swing: 0.0,
@@ -2693,6 +2747,10 @@ impl Song {
             tv: Tavern::default(),
             sk: Ska::default(),
             mc: Mariachi::default(),
+            idn: Indonesian::default(),
+            sw: StarWars::default(),
+            ce: Celtic::default(),
+            wn: Western::default(),
             guest,
             scratch: guest.map(|g| Box::new(Synth::new(g))),
             dr: Drummer::default(),
@@ -2709,6 +2767,10 @@ impl Song {
             TAVERN => self.tv.bar_steps.max(1),
             SKA => self.sk.bar_steps.max(1),
             MARIACHI => self.mc.bar_steps.max(1),
+            INDONESIAN => self.idn.bar_steps.max(1),
+            STARWARS => self.sw.bar_steps.max(1),
+            CELTIC => self.ce.bar_steps.max(1),
+            WESTERN => self.wn.bar_steps.max(1),
             _ => 16,
         }
     }
@@ -2719,6 +2781,10 @@ impl Song {
             TAVERN => self.tv.beat_steps.max(1),
             SKA => self.sk.beat_steps.max(1),
             MARIACHI => self.mc.beat_steps.max(1),
+            INDONESIAN => self.idn.beat_steps.max(1),
+            STARWARS => self.sw.beat_steps.max(1),
+            CELTIC => self.ce.beat_steps.max(1),
+            WESTERN => self.wn.beat_steps.max(1),
             _ => 4,
         }
     }
@@ -2895,6 +2961,10 @@ impl Song {
                 LOFI => &[L_LEAD, L_PERC, L_HAT],
                 SKA => &[L_DRONE, L_PAD, L_PERC, L_OHAT],
                 MARIACHI => &[L_BELL, L_DRONE, L_PAD, L_HAT],
+                INDONESIAN => &[L_LEAD, L_PERC, L_HAT],
+                STARWARS => &[L_LEAD, L_PERC, L_HAT],
+                CELTIC => &[L_LEAD, L_PERC, L_HAT],
+                WESTERN => &[L_LEAD, L_PERC, L_HAT],
                 _ => &[L_HAT],
             };
             self.mute = if self.rng.chance(0.5) { self.rng.pick(opt) } else { 0 };
@@ -2912,11 +2982,15 @@ impl Song {
             TAVERN => self.tavern(s, &mut b, sec, m),
             SKA => self.ska(s, &mut b, sec, m),
             MARIACHI => self.mariachi(s, &mut b, sec, m),
+            INDONESIAN => self.indonesian(s, &mut b, sec, m),
+            STARWARS => self.starwars(s, &mut b, sec, m),
+            CELTIC => self.celtic(s, &mut b, sec, m),
+            WESTERN => self.western(s, &mut b, sec, m),
             _ => self.polka(&mut b, sec),
         }
         // a mix: the drummer's beat for the writer's (but for polka's,
         // tavern's, ska's and mariachi's last bar, their ending)
-        let ending = matches!(self.genre, POLKA | TAVERN | SKA | MARIACHI) && sec.kind == OUTRO && self.sec_bar + 1 == sec.bars;
+        let ending = ends_on_a_hit(self.genre) && sec.kind == OUTRO && self.sec_bar + 1 == sec.bars;
         if self.guest.is_some() && !ending {
             let mut k = n0;
             for j in n0..b.ev.len() {
@@ -2961,6 +3035,7 @@ impl Song {
             SKA => [5.0, 1.0, 0.0, 0.0, 1.5, 1.5, 0.5],
             // mariachi: major mostly, minor ones in harmonic minor
             MARIACHI => [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4],
+            INDONESIAN | STARWARS | CELTIC | WESTERN => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
             // polka: major mostly, now and then a minor one
             _ => [4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         };
@@ -2983,6 +3058,10 @@ impl Song {
             TAVERN => self.piece_tavern(s),
             SKA => self.piece_ska(s),
             MARIACHI => self.piece_mariachi(s),
+            INDONESIAN => self.piece_indonesian(s),
+            STARWARS => self.piece_starwars(s),
+            CELTIC => self.piece_celtic(s),
+            WESTERN => self.piece_western(s),
             _ => self.piece_polka(s),
         }
         self.fuse(s);
@@ -2996,6 +3075,10 @@ impl Song {
             (TAVERN, _) => "4/4 ballad",
             (SKA, _) => self.sk.meter,
             (MARIACHI, _) => self.mc.meter,
+            (INDONESIAN, _) => self.idn.meter,
+            (STARWARS, _) => self.sw.meter,
+            (CELTIC, _) => self.ce.meter,
+            (WESTERN, _) => self.wn.meter,
             _ => "4/4",
         };
         self.log.push((self.bpm, self.root, self.mode, meter));
@@ -3090,6 +3173,10 @@ impl Song {
             TAVERN => self.tavern_section(),
             SKA => self.ska_section(),
             MARIACHI => self.mariachi_section(),
+            INDONESIAN => self.indonesian_section(),
+            STARWARS => self.starwars_section(),
+            CELTIC => self.celtic_section(),
+            WESTERN => self.western_section(),
             _ => self.polka_section(),
         }
         self.dress(s, dress);
@@ -6194,6 +6281,10 @@ impl Song {
             Some(POLKA) => self.polka_beat(b, sec, m),
             Some(SKA) => self.ska_beat(b, sec, m),
             Some(MARIACHI) => self.mariachi_beat(s, b, sec, m),
+            Some(INDONESIAN) => self.indonesian_beat(s, b, sec, m),
+            Some(STARWARS) => self.starwars_beat(s, b, sec, m),
+            Some(CELTIC) => self.celtic_beat(s, b, sec, m),
+            Some(WESTERN) => self.western_beat(s, b, sec, m),
             Some(_) => self.tavern_drums(b, sec, m),
             None => {}
         }
@@ -12653,6 +12744,10 @@ fn sounds(g: usize, r: &mut Rng, s: &mut Synth) {
             sounds_ska(r, s, style)
         }
         MARIACHI => sounds_mariachi(r, s),
+        INDONESIAN => sounds_indonesian(r, s),
+        STARWARS => sounds_starwars(r, s),
+        CELTIC => sounds_celtic(r, s),
+        WESTERN => sounds_western(r, s),
         _ => sounds_tavern(r, s),
     }
 }
