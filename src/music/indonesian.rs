@@ -331,6 +331,23 @@ impl Song {
         self.root = (self.idn.tun.pitch(self.idn.home).round() as i32).rem_euclid(12);
         sounds_gamelan(&mut self.rng, s, style);
         self.band = band_indonesian(&mut self.rng, s, &mut self.idn);
+        // the recordings brought to the synthesiser's balance
+        let table = if style == IDN_JAVA { JAVA_REC_TRIMS } else { BALI_REC_TRIMS };
+        let trim = |ch: usize, p: &mut Patch| {
+            if p.samp != 0 {
+                p.gain *= 10f32.powf(trim_of(table, ch, p.samp) / 20.0);
+            }
+        };
+        for (ch, pair, _) in self.band.tones.iter_mut() {
+            pair.iter_mut().for_each(|p| trim(*ch, p));
+        }
+        for (k, ch) in [CH_KEYS, CH_ARP, CH_LEAD].into_iter().enumerate() {
+            trim(ch, &mut self.idn.loud[k]);
+            trim(ch, &mut self.idn.soft[k]);
+        }
+        for (ch, c) in s.ch.iter_mut().enumerate() {
+            trim(ch, &mut c.patch);
+        }
         self.idn.dready = false;
         let first = self.idn.map[0];
         self.bpm = first.bpm0;
@@ -1488,7 +1505,7 @@ fn kit_kendang_lo_synth(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_kendang_lo(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit_db(
         kit_kendang_lo_synth(r),
-        &[(samples::multi("conga", "tumba"), 0.0), (samples::multi("conga", "tumba_muted"), 0.0)],
+        &[(samples::multi("conga", "tumba"), 5.2), (samples::multi("conga", "tumba_muted"), 5.2)],
     )
 }
 
@@ -1528,9 +1545,9 @@ fn kit_kendang_hi(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit_db(
         kit_kendang_hi_synth(r),
         &[
-            (samples::multi("bongo", "high_muted"), 0.0),
-            (samples::multi("conga", "quinto"), 0.0),
-            (samples::multi("conga", "muted"), 0.0),
+            (samples::multi("bongo", "high_muted"), 0.5),
+            (samples::multi("conga", "quinto"), 0.5),
+            (samples::multi("conga", "muted"), 0.5),
         ],
     )
 }
@@ -1544,7 +1561,7 @@ fn kit_cengceng_synth(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_cengceng(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit_db(
         kit_cengceng_synth(r),
-        &[(samples::multi("hihat", "closed"), 0.0), (samples::multi("cymbal", "clash_short"), 0.0)],
+        &[(samples::multi("hihat", "closed"), -10.0), (samples::multi("cymbal", "clash_short"), -8.0)],
     )
 }
 
@@ -1572,7 +1589,7 @@ fn kit_ketuk_synth(r: &mut Rng) -> Vec<DrumPatch> {
 
 /// The ketuk and kempyang: the agogo bells' low and high bells.
 fn kit_ketuk(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_ketuk_synth(r), &[(samples::multi("agogo", "low"), 0.0), (samples::multi("agogo", "high"), 0.0)])
+    rec_kit_db(kit_ketuk_synth(r), &[(samples::multi("agogo", "low"), 3.6), (samples::multi("agogo", "high"), 3.6)])
 }
 
 /// The gong and the kebyar's clashed cymbals, as drums: [gong, clash].
@@ -1602,8 +1619,40 @@ fn kit_gong_synth(r: &mut Rng) -> Vec<DrumPatch> {
 /// one pitch, and the gong's is a kempul's, not a gong ageng's); the clash
 /// cymbal's recording.
 fn kit_gong(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_gong_synth(r), &[(None, 0.0), (samples::multi("cymbal", "clash"), 0.0)])
+    rec_kit_db(kit_gong_synth(r), &[(None, 0.0), (samples::multi("cymbal", "clash"), 5.2)])
 }
+
+// The recordings' trims (dB), against the synthesiser's patch each
+// replaces: each channel alone over whole pieces (6 seeds' first 90 s, the
+// leveller frozen), K-weighted mean power against the synthesiser's twin
+// playing the same notes; the swapped parts (bonang and gender, peking and
+// gambang, rebab and suling) measured with each forced in. Under half a dB
+// left out.
+
+/// Javanese.
+const JAVA_REC_TRIMS: &[(usize, &str, f32)] = &[
+    (CH_BELL, "glockenspiel:hit", -1.3),
+    (CH_ARP, "glockenspiel:hit", -0.6),
+    (CH_ARP, "balafon:hit", -1.3),
+    (CH_KEYS, "gong:ring", -2.9),
+    (CH_KEYS, "vibraphone:soft", -0.8),
+    (CH_PAD, "gong:ring", -1.7),
+    (CH_DRONE, "gong:ring", -3.6),
+    (CH_LEAD, "violin:sus", 2.2),
+    (CH_LEAD, "Shakuhachi", 1.0),
+];
+
+/// Balinese.
+const BALI_REC_TRIMS: &[(usize, &str, f32)] = &[
+    (CH_BELL, "glockenspiel:hit", -3.2),
+    (CH_ARP, "glockenspiel:hit", -2.1),
+    (CH_KEYS, "gong:ring", -1.5),
+    (CH_PAD, "vibraphone:soft", 2.6),
+    (CH_BASS, "vibraphone:soft", -1.6),
+    (CH_DRONE, "gong:ring", -3.0),
+    (CH_LEAD, "glockenspiel:hit", -2.4),
+    (CH_LEAD, "Shakuhachi", 3.2),
+];
 
 /// The gamelan's instruments lent to another genre's parts, in a mix (at its pitches).
 pub(super) const P_IDN_BARS: &[(&str, Make)] =

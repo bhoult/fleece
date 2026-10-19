@@ -15255,6 +15255,8 @@ fn end_tail(genre: usize) -> f64 {
         AMBIENT => 8.0,
         LOFI => 5.0,
         TECHNO | SYNTHWAVE => 2.5,
+        // the gong ageng's ring
+        INDONESIAN => 6.0,
         _ => 3.5,
     }
 }

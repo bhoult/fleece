@@ -510,6 +510,18 @@ impl Song {
         self.bpm = self.ce.tunes[0].bpm;
         sounds_ce(&mut self.rng, s, style);
         self.band = band_celtic(&mut self.rng, s, style);
+        // the recordings brought to the synthesiser's balance
+        let table = match style {
+            CS_SESSION => SESSION_REC_TRIMS,
+            CS_PIPES => PIPES_REC_TRIMS,
+            _ => AIR_REC_TRIMS,
+        };
+        band_trim(&mut self.band, s, table, &[]);
+        for (ch, c) in s.ch.iter_mut().enumerate() {
+            if c.patch.samp != 0 {
+                c.patch.gain *= 10f32.powf(trim_of(table, ch, c.patch.samp) / 20.0);
+            }
+        }
         s.dly.target = (self.step_len() * 3.0) as f32;
     }
 
@@ -1097,7 +1109,7 @@ fn kit_side_drum_synth(r: &mut Rng) -> Vec<DrumPatch> {
 
 /// The side drum: the kit's snare and its side stroke.
 fn kit_side_drum(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_side_drum_synth(r), &[(samples::drum("Standard", 38), 0.0), (samples::drum("Standard", 40), -4.0)])
+    rec_kit_db(kit_side_drum_synth(r), &[(samples::drum("Standard", 38), -1.1), (samples::drum("Standard", 40), -5.1)])
 }
 
 /// The pipe band's bass drum.
@@ -1108,7 +1120,7 @@ fn kit_pipe_bass_synth(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_pipe_bass(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit_db(
         kit_pipe_bass_synth(r),
-        &[(samples::drum("Orchestra Kit", 36).or_else(|| samples::drum("Standard", 36)), 0.0)],
+        &[(samples::drum("Orchestra Kit", 36).or_else(|| samples::drum("Standard", 36)), -1.5)],
     )
 }
 
@@ -1116,6 +1128,45 @@ fn kit_pipe_bass(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_tenor(r: &mut Rng) -> Vec<DrumPatch> {
     rec_percs(percs(r))
 }
+
+// The recordings' trims (dB) against the synthesiser's patch each replaces,
+// by style: each instrument forced onto its channel (both halves of the
+// pair), the channel alone over whole pieces (6 seeds' first 90 s, the
+// leveller frozen), K-weighted mean power against the synthesiser's twin
+// playing the same notes. Under half a dB left out.
+
+/// The session's.
+const SESSION_REC_TRIMS: &[(usize, &str, f32)] = &[
+    (CH_LEAD, "violin:sus", 0.8),
+    (CH_LEAD, "flute:auto", -2.6),
+    (CH_BELL, "Whistle", 2.2),
+    (CH_BELL, "flute:auto", -2.6),
+    (CH_BELL, "violin:sus", 1.2),
+    (CH_BELL, "Bagpipe", 2.6),
+    (CH_ARP, "Accordion", -2.5),
+    (CH_ARP, "Bandoneon", -0.7),
+    (CH_ARP, "Banjo", 1.9),
+    (CH_ARP, "Mandolin", 4.5),
+    (CH_ARP, "folk_harp:pluck", 3.3),
+    (CH_KEYS, "Steel String Guitar", 1.9),
+    (CH_KEYS, "12-String Guitar", 0.8),
+];
+
+/// The pipe set's.
+const PIPES_REC_TRIMS: &[(usize, &str, f32)] =
+    &[(CH_LEAD, "Bagpipe", -2.4), (CH_BELL, "Bagpipe", -2.5), (CH_DRONE, "Bagpipe", 1.7)];
+
+/// The air's.
+const AIR_REC_TRIMS: &[(usize, &str, f32)] = &[
+    (CH_LEAD, "violin:sus", -1.6),
+    (CH_LEAD, "flute:auto", -2.2),
+    (CH_LEAD, "Bagpipe", -4.0),
+    (CH_BELL, "flute:auto", -2.9),
+    (CH_BELL, "violin:sus", -2.7),
+    (CH_BELL, "Whistle", 2.6),
+    (CH_KEYS, "folk_harp:pluck", 2.0),
+    (CH_BASS, "folk_harp:pluck", 5.5),
+];
 
 /// The session's instruments lent to another genre's parts, in a mix.
 pub(super) const P_CE_LEAD: &[(&str, Make)] =
@@ -1221,7 +1272,7 @@ fn sounds_ce(r: &mut Rng, s: &mut Synth, style: u8) {
             ch[CH_LEAD].mono = true;
             ch[CH_BELL].mono = true;
             ch[CH_ARP].mono = false;
-            ch[CH_KICK].drums = kit_bodhran(r);
+            ch[CH_KICK].drums = kit_trim(kit_bodhran(r), 1.2);
             ch[CH_SNARE].drums = kit_side_drum(r);
             ch[CH_PERC].drums = kit_bones(r);
             ch[CH_HAT].drums = kit_trim(kit_tambourine(r), -4.8);
