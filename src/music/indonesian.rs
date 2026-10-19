@@ -396,9 +396,9 @@ impl Song {
         // the tempo: irama I's balungan beat; irama II's at about half (the
         // elaboration a little faster than irama I's)
         let t1 = match form {
-            F_LANCARAN => r.range(84.0, 104.0),
-            F_KETAWANG => r.range(56.0, 66.0),
-            _ => r.range(54.0, 68.0),
+            F_LANCARAN => r.range(90.0, 110.0),
+            F_KETAWANG => r.range(60.0, 70.0),
+            _ => r.range(60.0, 72.0),
         } as f64;
         let t1 = idn_pull(guest, t1);
         let t2 = t1 * r.range(1.04, 1.16) as f64;
@@ -1278,7 +1278,7 @@ fn bar_synth(r: &mut Rng, bright: f32, dec: f32, gain: f32) -> Patch {
 /// gamelan's bronze ones), played down a fifth to two octaves: as a saron's
 /// or gangsa's, its ring the longer.
 fn glock_bar(p: Patch, note: f32) -> Patch {
-    let q = Patch { cutoff: 2600.0, keytrack: 0.8, ..p };
+    let q = Patch { cutoff: 2000.0, keytrack: 0.8, ..p };
     rec_lp(q, multi_or("glockenspiel", "hit", "Glockenspiel"), note, 1.0, 0.0)
 }
 
@@ -1730,22 +1730,25 @@ fn sounds_gamelan(r: &mut Rng, s: &mut Synth, style: u8) {
     ch[CH_CYM].drums = kit_gong(r);
     // as the gamelan sits: the balungan to one side, the elaborating
     // instruments to the other, the gongs at the back in the middle
-    let (bell_pan, arp_pan) = if java { (-0.35, 0.3) } else { (-0.5, 0.5) };
+    // (measured against Javanese and Balinese records: the Javanese's
+    // 1-3 kHz, the bonang's and peking's, to the fore, its low end and top
+    // lighter; both near mono)
+    let (bell_pan, arp_pan) = if java { (-0.2, 0.18) } else { (-0.35, 0.35) };
     mix(&mut ch[CH_BELL], 0.42, bell_pan, 0.25, 0.0, 0.0);
-    mix(&mut ch[CH_ARP], 0.34, arp_pan, 0.25, 0.0, 0.0);
-    mix(&mut ch[CH_KEYS], 0.34, if java { 0.45 } else { 0.15 }, 0.25, 0.0, 0.0);
-    mix(&mut ch[CH_PAD], 0.36, if java { -0.15 } else { -0.25 }, 0.3, 0.0, 0.0);
-    mix(&mut ch[CH_BASS], 0.3, if java { -0.2 } else { 0.1 }, 0.25, 0.0, 0.0);
-    mix(&mut ch[CH_DRONE], 0.38, 0.05, 0.35, 0.0, 0.0);
+    mix(&mut ch[CH_ARP], if java { 0.42 } else { 0.34 }, arp_pan, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_KEYS], if java { 0.42 } else { 0.34 }, if java { 0.25 } else { 0.1 }, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_PAD], 0.36, if java { -0.1 } else { -0.2 }, 0.3, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], if java { 0.2 } else { 0.3 }, if java { -0.1 } else { 0.05 }, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_DRONE], if java { 0.3 } else { 0.38 }, 0.05, 0.35, 0.0, 0.0);
     mix(&mut ch[CH_LEAD], 0.4, if java { 0.1 } else { 0.0 }, 0.28, 0.02, 0.0);
     mix(&mut ch[CH_KICK], 0.5, 0.05, 0.15, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.42, 0.05, 0.15, 0.0, 0.0);
-    mix(&mut ch[CH_HAT], if java { 0.16 } else { 0.24 }, 0.25, 0.18, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], if java { 0.1 } else { 0.24 }, 0.2, 0.18, 0.0, 0.0);
     mix(&mut ch[CH_PERC], 0.36, -0.25, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.5, 0.0, 0.3, 0.0, 0.0);
     // the recordings' own stereo narrowed (the records are near mono)
     for c in [CH_BELL, CH_ARP, CH_KEYS, CH_PAD, CH_BASS, CH_DRONE, CH_LEAD] {
-        ch[c].width = if ch[c].patch.samp != 0 { 0.45 } else { 1.0 };
+        ch[c].width = if ch[c].patch.samp != 0 { 0.3 } else { 0.7 };
     }
     s.rev.fb = r.range(0.8, 0.85);
     s.rev.damp = 0.4;

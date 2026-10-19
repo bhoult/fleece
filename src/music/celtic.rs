@@ -1244,15 +1244,17 @@ fn sounds_ce(r: &mut Rng, s: &mut Synth, style: u8) {
             ch[CH_SNARE].drums = kit_side_drum(r);
             ch[CH_PERC].drums = kit_tenor(r);
             ch[CH_HAT].drums = kit_trim(kit_tambourine(r), -4.8);
-            mix(&mut ch[CH_LEAD], 0.4, -0.15, 0.2, 0.0, 0.0);
-            mix(&mut ch[CH_BELL], 0.34, 0.2, 0.22, 0.0, 0.0);
-            mix(&mut ch[CH_DRONE], 0.26, 0.0, 0.2, 0.0, 0.0);
+            // (against a pipe band's record: the chanters forward and
+            // near mono, the drones and the bass drum lighter)
+            mix(&mut ch[CH_LEAD], 0.48, -0.05, 0.2, 0.0, 0.0);
+            mix(&mut ch[CH_BELL], 0.4, 0.06, 0.22, 0.0, 0.0);
+            mix(&mut ch[CH_DRONE], 0.15, 0.0, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_ARP], 0.3, 0.0, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_KEYS], 0.3, 0.0, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_BASS], 0.3, 0.0, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_SNARE], 0.42, 0.1, 0.18, 0.0, 0.0);
-            mix(&mut ch[CH_KICK], 0.55, 0.0, 0.15, 0.0, 0.0);
-            mix(&mut ch[CH_PERC], 0.3, -0.2, 0.15, 0.0, 0.0);
+            mix(&mut ch[CH_KICK], 0.38, 0.0, 0.15, 0.0, 0.0);
+            mix(&mut ch[CH_PERC], 0.3, -0.1, 0.15, 0.0, 0.0);
             mix(&mut ch[CH_HAT], 0.2, 0.3, 0.1, 0.0, 0.0);
             ch[CH_LEAD].mono = true;
             ch[CH_BELL].mono = true;
@@ -1281,10 +1283,11 @@ fn sounds_ce(r: &mut Rng, s: &mut Synth, style: u8) {
             mix(&mut ch[CH_LEAD], 0.42, 0.35, 0.2, 0.03, 0.0);
             mix(&mut ch[CH_BELL], 0.34, -0.45, 0.22, 0.03, 0.0);
             mix(&mut ch[CH_ARP], 0.3, 0.55, 0.18, 0.0, 0.0);
-            mix(&mut ch[CH_KEYS], if air { 0.5 } else { 0.4 }, -0.3, 0.2, 0.0, 0.0);
+            mix(&mut ch[CH_KEYS], 0.5, -0.3, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_BASS], 0.42, -0.1, 0.2, 0.0, 0.0);
             mix(&mut ch[CH_DRONE], 0.18, 0.0, 0.2, 0.0, 0.0);
-            mix(&mut ch[CH_KICK], 0.42, -0.1, 0.12, 0.0, 0.0);
+            // (against session records: the bodhrán's boom lighter)
+            mix(&mut ch[CH_KICK], 0.3, -0.1, 0.12, 0.0, 0.0);
             mix(&mut ch[CH_SNARE], 0.35, 0.1, 0.15, 0.0, 0.0);
             mix(&mut ch[CH_PERC], 0.3, -0.35, 0.15, 0.0, 0.0);
             mix(&mut ch[CH_HAT], 0.22, 0.3, 0.12, 0.0, 0.0);
