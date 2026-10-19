@@ -607,16 +607,27 @@ fn worker(id: usize, sh: Arc<Shared>) {
     }
 }
 
-/// Nice 10: the workers take every idle cycle but yield to the render thread,
-/// the sound (the music's player, the sound server's client threads) and the
-/// desktop.
+/// SCHED_IDLE (else nice 10): the workers take every idle cycle but yield to
+/// the render thread, the sound and the desktop. Nice 10 was not enough: with
+/// every core busy, a sound server that is not real-time (PipeWire without
+/// RTKit) waited a slice behind a worker at each of its threads' wake-ups and
+/// missed its 10 ms cycles, and the music dropped out for 5-350 ms a few
+/// times a minute. A thread waking preempts an idle-class one at once, and a
+/// core running only idle-class threads counts as free for it.
 fn lower_priority() {
+    #[repr(C)]
+    struct SchedParam {
+        priority: i32,
+    }
+    const SCHED_IDLE: i32 = 5;
     unsafe extern "C" {
         fn setpriority(which: i32, who: u32, prio: i32) -> i32;
         fn gettid() -> i32;
+        fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
     }
     unsafe {
         setpriority(0, gettid() as u32, 10);
+        sched_setscheduler(0, SCHED_IDLE, &SchedParam { priority: 0 });
     }
 }
 
