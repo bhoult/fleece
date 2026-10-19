@@ -691,12 +691,15 @@ fn band_starwars(r: &mut Rng, s: &Synth, style: u8) -> Band {
 /// The recordings against the synthesiser's patches they replace, by style
 /// and channel (dB): measured over whole pieces (each channel alone, the
 /// leveller frozen, K-weighted mean power with the samples against
-/// without, the same notes; 8 seeds' first 300 s, by the pieces' styles).
+/// without, the same notes; 8 seeds' first 300 s, by the pieces' styles,
+/// checked again on 6 after: all but a stray tail within 1 dB).
 /// The levelling's one early note misreads the spiccato's short notes, the
 /// held strings' swell and the low brass; the bass drum, the cymbals and
 /// the gong ring otherwise than the synthesiser's.
-fn sw_rec_trim(style: u8, ch: usize) -> f32 {
+fn sw_rec_trim(style: u8, six: bool, ch: usize) -> f32 {
     match (style, ch) {
+        (SWS_DARK, CH_ARP) => -9.3,
+        (SWS_BATTLE, CH_ARP) if six => -4.5,
         (SWS_MARCH, CH_BASS) => 3.0,
         (SWS_MARCH, CH_PAD) => 1.5,
         (SWS_MARCH, CH_ARP) => -4.2,
@@ -708,7 +711,7 @@ fn sw_rec_trim(style: u8, ch: usize) -> f32 {
         (SWS_DARK, CH_DRONE) => 0.7,
         (SWS_BATTLE, CH_BASS) => 2.4,
         (SWS_BATTLE, CH_PAD) => 4.4,
-        (SWS_BATTLE, CH_ARP) => -1.6,
+        (SWS_BATTLE, CH_ARP) => 0.6,
         (SWS_BATTLE, CH_LEAD) => 2.2,
         (SWS_BATTLE, CH_BELL) => -2.2,
         (SWS_BATTLE, CH_KEYS) => 1.8,
@@ -720,7 +723,7 @@ fn sw_rec_trim(style: u8, ch: usize) -> f32 {
 /// `sw_rec_trim`'s for the kits.
 fn sw_kit_trims(style: u8) -> [(usize, f32); 4] {
     match style {
-        SWS_MARCH => [(CH_KICK, 7.7), (CH_SNARE, -0.7), (CH_HAT, 9.3), (CH_CYM, 5.5)],
+        SWS_MARCH => [(CH_KICK, 7.7), (CH_SNARE, -0.7), (CH_HAT, 9.3), (CH_CYM, 4.3)],
         SWS_DARK => [(CH_KICK, 8.4), (CH_SNARE, -0.5), (CH_HAT, 9.3), (CH_CYM, 10.8)],
         _ => [(CH_KICK, 7.7), (CH_SNARE, -0.5), (CH_HAT, 9.3), (CH_CYM, 4.4)],
     }
@@ -916,7 +919,7 @@ impl Song {
         };
         sw_sounds(r, s, style);
         self.band = band_starwars(r, s, style);
-        rec_trim(&mut self.band, s, |ch, _| sw_rec_trim(style, ch));
+        rec_trim(&mut self.band, s, |ch, _| sw_rec_trim(style, six, ch));
     }
 
     /// A section begins: its chords, its bars' lengths (the battle's bar of
