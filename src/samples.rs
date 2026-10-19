@@ -13,7 +13,8 @@
 //!
 //! Levels: every instrument is brought to one reference, its loudest layer
 //! at -20 dBFS RMS over the first second of a middle note (the manifest's
-//! `gain_db` does it for the WAVs, `normalise` for the SoundFont's presets;
+//! `gain_db` does it for the WAVs, each root and velocity layer evened to
+//! the instrument's level as well; `normalise` for the SoundFont's presets;
 //! a kit keeps its maker's balance, brought to the reference at its snare),
 //! and a sampled voice is then scaled by `CAL` (a drum by `CAL_DRUM`),
 //! measured so that a sampled note sounds about as loud as the
@@ -865,6 +866,7 @@ fn parse_row(f: &[&str]) -> Result<Row, String> {
 /// level (its RMS over the first `AUTO_MATCH` to the long one's over the
 /// first second, at the long one's middle root, loudest layer): the
 /// manifest levels each by its first second, which makes a short note hot.
+/// One root does for all, as the manifest evens each articulation's roots.
 fn load_multi(b: &mut Bank, dir: &Path) -> Result<(), String> {
     let path = dir.join(MANIFEST);
     let text = read_file(&path, 16 << 20)?;

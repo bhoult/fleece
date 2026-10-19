@@ -20,7 +20,10 @@ Output format (the interface fleece's sampler reads):
     from the start; the tail cut where it stays below -60 dB relative to the peak, with a 50 ms
     fade (a quarter of the sample for samples under 200 ms); sustained articulations capped at
     MAX_SECONDS after the onset, with a FADE_CAPPED fade; a file in TUNE_FILE retuned to its root.
-  manifest.tsv: instrument articulation root vel_lo vel_hi rr gain_db file (tab-separated).
+  manifest.tsv: instrument articulation root vel_lo vel_hi rr gain_db file (tab-separated);
+    gain_db per file: its instrument/articulation's gain (the loudest layer's median RMS over the
+    first second at TARGET_DB) plus a trim for its root and layer (to the loudest layer's median
+    K-weighted level, within LEVEL_BOOST and LEVEL_CUT).
 """
 
 import hashlib
@@ -56,6 +59,21 @@ MAX_SECONDS = {"sus": 5.5, "vib": 5.5, "pluck": 4.5, "bow": 5.5, "hit": 4.0, "so
                "roll": 3.0}
 FADE_CAPPED = 0.5    # the fade of a capped sample
 TARGET_DB = -20.0    # the loudest layer's median RMS (first 1 s after the onset), in dBFS
+# Each root and velocity layer is then brought to its instrument/articulation's level: the
+# recordings are uneven from note to note (a flute's low C 36 dB under its top C, a tuba's D4 16 dB
+# under its A#3), and their soft layers 5-40 dB under the loud ones, where the sampler's voices scale
+# by velocity already. The level: K-weighted (ITU-R BS.1770) RMS over HELD_WINDOW after the onset
+# for the sustained articulations (HELD), over SHORT_WINDOW for the rest (a short note or a hit as
+# it is heard); the reference, the loudest layer's median over the roots (a root there keeps the
+# instrument/articulation's gain). A trim raises a file at most LEVEL_BOOST dB (its noise comes
+# up with it) and lowers it at most LEVEL_CUT dB.
+HELD = ("sus", "vib", "bow")
+HELD_WINDOW = 1.0
+SHORT_WINDOW = 0.3
+LEVEL_BOOST = 15.0
+LEVEL_CUT = 24.0
+K_WEIGHT = ("biquad=b0=1.53512485958697:b1=-2.69169618940638:b2=1.19839281085285:a0=1:a1=-1.69065929318241"
+            ":a2=0.73248077421585,biquad=b0=1:b1=-2:b2=1:a0=1:a1=-1.99004745483398:a2=0.99007225036621")
 
 # --------------------------------------------------------------------------------------------
 # Root corrections. Every pitched sample's root was verified by pitch estimation on a steady
@@ -560,11 +578,25 @@ def convert(job, src, stage):
         w.setframerate(RATE)
         w.writeframes(out.tobytes())
     os.replace(dst + ".part", dst)
-    job.update(channels=ch, seconds=n / RATE, onset_ms=1000.0 * (on - start) / RATE,
+    k_db = k_level(dst, HELD_WINDOW if job["articulation"] in HELD else SHORT_WINDOW)
+    job.update(k_db=k_db, channels=ch, seconds=n / RATE, onset_ms=1000.0 * (on - start) / RATE,
                rms_db=20 * math.log10(rms / 32768) if rms > 0 else -200.0,
                peak_db=20 * math.log10(pk / 32768), capped=capped, cut_s=(frames - end) / RATE,
                lead_s=start / RATE, src_seconds=frames / RATE)
     return job
+
+
+def k_level(path, secs):
+    """The file's K-weighted RMS over its first `secs`, in dB (its channels' mean power): the
+    BS.1770 pre-filter (high shelf, then high-pass; 48 kHz coefficients) and astats, in ffmpeg."""
+    p = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-t", "%g" % secs, "-i", "file:" + path,
+                        "-af", K_WEIGHT + ",astats=measure_perchannel=none:measure_overall=RMS_level",
+                        "-f", "null", "-"], capture_output=True, text=True)
+    m = re.findall(r"RMS level dB: (\S+)", p.stderr)
+    if p.returncode != 0 or not m:
+        die("ffmpeg could not measure %s: %s" % (path, p.stderr.strip()[-300:]))
+    v = float(m[-1])
+    return v if v > -200.0 else -200.0
 
 
 def median(v):
@@ -598,26 +630,44 @@ def build(src, dest):
     for key in sorted({(j["instrument"], j["articulation"]) for j in jobs}):
         top = [j for j in jobs if (j["instrument"], j["articulation"]) == key and j["layer"] == j["nlayers"] - 1]
         gains[key] = round(TARGET_DB - median([j["rms_db"] for j in top]), 1)
+    # trim per root and layer: to the loudest layer's median K-weighted level (see LEVEL_BOOST)
+    cells = {}
     for j in jobs:
-        j["gain_db"] = gains[(j["instrument"], j["articulation"])]
+        cells.setdefault((j["instrument"], j["articulation"]), {}).setdefault((j["root"], j["layer"]), []).append(
+            j["k_db"])
+    trims = {}
+    for key, cs in sorted(cells.items()):
+        lv = {c: median(v) for c, v in cs.items()}
+        top = max(c[1] for c in lv)
+        ref = median([v for c, v in lv.items() if c[1] == top])
+        for c, v in sorted(lv.items()):
+            t = ref - v
+            if t > LEVEL_BOOST or t < -LEVEL_CUT:
+                log("  %s/%s root %d layer %d: %+.1f dB to its level, held to %+.1f"
+                    % (key + c + (t, min(LEVEL_BOOST, max(-LEVEL_CUT, t)))))
+            trims[key + c] = round(min(LEVEL_BOOST, max(-LEVEL_CUT, t)), 1)
+    for j in jobs:
+        j["trim_db"] = trims[(j["instrument"], j["articulation"], j["root"], j["layer"])]
+        j["gain_db"] = round(gains[(j["instrument"], j["articulation"])] + j["trim_db"], 1)
     jobs.sort(key=lambda j: (j["instrument"], j["articulation"], j["vel_lo"], j["root"], j["rr"]))
     with open(os.path.join(stage, "manifest.tsv"), "w", encoding="utf-8", newline="\n") as f:
         f.write("# fleece multi-samples: generated by tools/get-samples.sh (samples_manifest.py %s)\n" % stamp())
         f.write("# root: MIDI note (verified by pitch estimation; 60 for unpitched); vel_lo..vel_hi tile 0..127 per\n"
-                "# instrument/articulation; rr: round robin within root and layer; gain_db: one per\n"
-                "# instrument/articulation, putting the loudest layer's median RMS (first 1 s) at %g dBFS\n" % TARGET_DB)
+                "# instrument/articulation; rr: round robin within root and layer; gain_db: the\n"
+                "# instrument/articulation's gain, putting the loudest layer's median RMS (first 1 s) at %g dBFS,\n"
+                "# plus a trim per root and layer to the loudest layer's median K-weighted level\n" % TARGET_DB)
         f.write("instrument\tarticulation\troot\tvel_lo\tvel_hi\trr\tgain_db\tfile\n")
         for j in jobs:
             f.write("%s\t%s\t%d\t%d\t%d\t%d\t%.1f\t%s\n" % (j["instrument"], j["articulation"], j["root"],
                                                          j["vel_lo"], j["vel_hi"], j["rr"], j["gain_db"], j["file"]))
     with open(os.path.join(stage, "sources.tsv"), "w", encoding="utf-8", newline="\n") as f:
         f.write("file\tsource\tsource_path\tnamed_note\troot\troot_name\tlayer\tchannels\tseconds\tcapped\t"
-                "rms_db_first_1s\tpeak_db\n")
+                "rms_db_first_1s\tpeak_db\tk_level_db\ttrim_db\n")
         for j in jobs:
-            f.write("%s\t%s\t%s/%s\t%s\t%d\t%s\t%s\t%d\t%.3f\t%s\t%.1f\t%.1f\n" % (
+            f.write("%s\t%s\t%s/%s\t%s\t%d\t%s\t%s\t%d\t%.3f\t%s\t%.1f\t%.1f\t%.1f\t%.1f\n" % (
                 j["file"], j["repo"], j["folder"], j["src"], j["named"], j["root"],
                 note_name(j["root"]) if j["pitched"] else "", j["layer_name"], j["channels"], j["seconds"],
-                "yes" if j["capped"] else "no", j["rms_db"], j["peak_db"]))
+                "yes" if j["capped"] else "no", j["rms_db"], j["peak_db"], j["k_db"], j["trim_db"]))
     # licenses, copied verbatim
     lic = os.path.join(stage, "licenses")
     for repo, files in LICENSE_FILES.items():
@@ -724,22 +774,28 @@ def sources_md(jobs, gains, dest):
     w("- Retuned (resampled to its root, the length changing with it): %d files of the Tanzanian mbira, tuned"
       " to its own scale (%+d to %+d cents); see `TUNE_FILE` in `tools/samples_manifest.py`."
       % (len(TUNE_FILE), min(TUNE_FILE.values()), max(TUNE_FILE.values())))
-    w("- Velocity layers split 0-127 evenly, softest first; `gain_db` is one value per instrument/articulation,"
-      " putting the loudest layer's median RMS over the first 1 s after the onset at %g dBFS, so the layers keep"
-      " their recorded loudness relationship." % TARGET_DB)
+    w("- Velocity layers split 0-127 evenly, softest first. `gain_db` is the instrument/articulation's gain, putting"
+      " the loudest layer's median RMS over the first 1 s after the onset at %g dBFS, plus a trim per root and"
+      " layer that brings each to the loudest layer's median K-weighted (ITU-R BS.1770) level, over %g s after"
+      " the onset for the sustained articulations (%s) and %g s for the rest: the recordings are uneven from note"
+      " to note, and the player scales a note by its velocity already. A trim raises a file at most %g dB and"
+      " lowers it at most %g dB; `sources.tsv` lists each file's level and trim."
+      % (TARGET_DB, HELD_WINDOW, ", ".join(HELD), SHORT_WINDOW, LEVEL_BOOST, LEVEL_CUT))
     w("- Octave fixes applied (folder: semitones added to the named note):")
     for (repo, folder), fix in sorted(ROOT_FIX_FOLDER.items()):
         w("  - %s `%s`: %+d" % (repo, folder, fix))
     w("\n## Contents\n")
-    w("| instrument/articulation | roots (MIDI) | layers | round robins | files | MB | gain dB |")
-    w("|---|---|---|---|---|---|---|")
+    w("| instrument/articulation | roots (MIDI) | layers | round robins | files | MB | gain dB | trims dB |")
+    w("|---|---|---|---|---|---|---|---|")
     for (inst, art), js in sorted(by.items()):
         roots = [j["root"] for j in js]
         mb = sum(os.path.getsize(os.path.join(dest, ".multi.new", j["file"])) for j in js) / 1e6
         rng = ("%s-%s (%d-%d)" % (note_name(min(roots)), note_name(max(roots)), min(roots), max(roots))) \
             if js[0]["pitched"] else "60 (unpitched)"
-        w("| %s/%s | %s | %d | %d | %d | %.1f | %+.1f |" % (inst, art, rng, js[0]["nlayers"], max(j["rr"] for j in js),
-                                                         len(js), mb, gains[(inst, art)]))
+        t = [j["trim_db"] for j in js]
+        w("| %s/%s | %s | %d | %d | %d | %.1f | %+.1f | %+.1f to %+.1f |"
+          % (inst, art, rng, js[0]["nlayers"], max(j["rr"] for j in js), len(js), mb, gains[(inst, art)],
+             min(t), max(t)))
     return "\n".join(L) + "\n"
 
 
@@ -771,10 +827,9 @@ def summary(dest):
     for r in rows:
         by.setdefault((r["instrument"], r["articulation"]), []).append(r)
     total = 0
-    log("%-28s %-22s %6s %6s %6s %8s %7s" % ("instrument/articulation", "roots", "layers", "rr", "files", "MB", "gain"))
+    log("%-28s %-22s %6s %6s %6s %8s %13s" % ("instrument/articulation", "roots", "layers", "rr", "files", "MB",
+                                               "gains"))
     for key, rs in sorted(by.items()):
-        if len({r["gain_db"] for r in rs}) != 1:
-            errors.append("%s/%s: more than one gain_db" % key)
         layers = sorted({(r["vel_lo"], r["vel_hi"]) for r in rs})
         lo = 0
         for a, b in layers:
@@ -813,8 +868,9 @@ def summary(dest):
         roots = sorted({r["root"] for r in rs})
         rng = "60 (unpitched)" if key[0] in UNPITCHED_NAMES else \
             "%s-%s (%d-%d)" % (note_name(roots[0]), note_name(roots[-1]), roots[0], roots[-1])
-        log("%-28s %-22s %6d %6d %6d %8.1f %+7.1f" % ("%s/%s" % key, rng, len(layers),
-                                                      max(r["rr"] for r in rs), len(rs), size / 1e6, rs[0]["gain_db"]))
+        g = [r["gain_db"] for r in rs]
+        log("%-28s %-22s %6d %6d %6d %8.1f %+6.1f%+7.1f" % ("%s/%s" % key, rng, len(layers), max(r["rr"] for r in rs),
+                                                           len(rs), size / 1e6, min(g), max(g)))
     log("%-28s %-22s %6s %6s %6d %8.1f" % ("total", "", "", "", len(rows), total / 1e6))
     if errors:
         for e in errors:
