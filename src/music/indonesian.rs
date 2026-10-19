@@ -151,10 +151,6 @@ pub(super) struct Indonesian {
     /// the soft instruments' last notes (voice leading), the suling's phrase
     gender: i32,
     gambang: i32,
-    /// the instruments for the loud parts and the soft (bonang and gender,
-    /// peking and gambang, rebab or ugal and suling)
-    loud: Vec<Patch>,
-    soft: Vec<Patch>,
     /// a mix's drummer: whether its style is drawn, and which
     dready: bool,
     dstyle: u8,
@@ -340,10 +336,6 @@ impl Song {
         };
         for (ch, pair, _) in self.band.tones.iter_mut() {
             pair.iter_mut().for_each(|p| trim(*ch, p));
-        }
-        for (k, ch) in [CH_KEYS, CH_ARP, CH_LEAD].into_iter().enumerate() {
-            trim(ch, &mut self.idn.loud[k]);
-            trim(ch, &mut self.idn.soft[k]);
         }
         for (ch, c) in s.ch.iter_mut().enumerate() {
             trim(ch, &mut c.patch);
@@ -579,10 +571,12 @@ impl Song {
             let soft = matches!(x.part, PT_SOFT | PT_SULING) || (x.part == PT_SUWUK && x.irama == 2);
             // (the Javanese soft parts' line the rebab's two times in three, else the suling's)
             let suling = soft && (self.idn.style == IDN_BALI || self.rng.chance(0.35));
+            // (the band's pairs: loud first, soft second; in a mix, either
+            // may be the drummer's instrument)
             for (k, ch) in [CH_KEYS, CH_ARP, CH_LEAD].into_iter().enumerate() {
-                let v = if (k < 2 && soft) || (k == 2 && suling) { &self.idn.soft } else { &self.idn.loud };
-                if let Some(&p) = v.get(k) {
-                    s.ch[ch].patch = p;
+                let which = (k < 2 && soft) || (k == 2 && suling);
+                if let Some(t) = self.band.tones.iter().find(|t| t.0 == ch) {
+                    s.ch[ch].patch = t.1[which as usize];
                 }
             }
         }
@@ -1682,8 +1676,6 @@ fn band_indonesian(r: &mut Rng, s: &Synth, idn: &mut Indonesian) -> Band {
     let soft_keys = if java { lv(CH_KEYS, 64.0, gender(r)) } else { keys };
     let soft_arp = if java { lv(CH_ARP, 72.0, gambang(r)) } else { arp };
     let soft_lead = lv(CH_LEAD, 79.0, suling(r));
-    idn.loud = vec![keys, arp, lead];
-    idn.soft = vec![soft_keys, soft_arp, soft_lead];
     b.tones.push((CH_KEYS, [keys, soft_keys], 64.0));
     b.tones.push((CH_ARP, [arp, soft_arp], 72.0));
     b.tones.push((CH_LEAD, [lead, soft_lead], 76.0));

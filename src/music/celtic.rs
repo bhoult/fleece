@@ -608,12 +608,11 @@ impl Song {
     }
 
     /// A bar of Celtic music.
-    pub(super) fn celtic(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+    pub(super) fn celtic(&mut self, _s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let x = self.ce.map[self.sec];
         let tune = &self.ce.tunes[x.tune];
         let (ty, mode, key) = (tune.ty, tune.mode, tune.key);
         let (bs, beat) = (self.ce.bar_steps, self.ce.beat_steps);
-        let beats = bs / beat;
         let i = self.sec_bar;
         let style = self.ce.style;
         let part = &tune.parts[x.part.min(tune.parts.len() - 1)];
@@ -627,7 +626,6 @@ impl Song {
             _ => [home, home],
         };
         let e = sec.energy;
-        let h = self.human;
         let lilt = self.ce.lilt;
         // the off-beat eighths late (the lilt, the hornpipe's swing)
         let late_of = |st: f32| -> f32 { if beat == 4 && (st % 4.0 - 2.0).abs() < 0.01 { lilt } else { 0.0 } };
@@ -635,7 +633,6 @@ impl Song {
         let root = self.root;
         let tonic = |center: i32| center - 6 + (root + key - (center - 6)).rem_euclid(12);
         let tune_t = if style == CS_PIPES { tonic(70) } else { tonic(67) };
-        let chord_at = |k: u32| chords[((k * 2) / beats.max(1)) as usize];
         // the tune for this bar (the outro: the B part's cadence, then the tonic)
         let pick = |v: &[PNote], bar: usize| -> Vec<PNote> {
             v.iter()
@@ -689,7 +686,6 @@ impl Song {
         }
         // the drums
         self.ce_drums(b, sec, m, ty, last_bar);
-        let _ = (chord_at(0), h, s.ch.len());
     }
 
     /// A line on channel `ch`: the notes about `t`, each with its ornament
