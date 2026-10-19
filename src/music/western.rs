@@ -485,19 +485,19 @@ fn wn_sounds(r: &mut Rng, s: &mut Synth, style: u8) {
         _ => (0.78, 0.54, 0.8),
     };
     mix(&mut ch[CH_LEAD], 0.75, -0.3, 0.35, 0.12, 0.0);
-    mix(&mut ch[CH_ARP], gtr, 0.4, 0.45, 0.2, 0.0);
-    mix(&mut ch[CH_KEYS], 0.7, -0.2, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_ARP], gtr, 0.55, 0.45, 0.2, 0.0);
+    mix(&mut ch[CH_KEYS], 0.7, -0.4, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_PAD], pad, 0.1, 0.4, 0.0, 0.0);
     mix(&mut ch[CH_DRONE], 0.63, 0.0, 0.45, 0.0, 0.0);
     mix(&mut ch[CH_BELL], 0.35, 0.45, 0.55, 0.0, 0.0);
     mix(&mut ch[CH_BASS], bass, 0.0, 0.15, 0.0, 0.0);
     mix(&mut ch[CH_KICK], if ride { 0.28 } else { 0.4 }, 0.0, 0.3, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], 0.7, 0.15, 0.3, 0.0, 0.0);
-    mix(&mut ch[CH_HAT], 0.48, -0.35, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_HAT], 0.48, -0.5, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_PERC], 0.45, 0.3, 0.4, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.35, -0.2, 0.45, 0.0, 0.0);
     mix(&mut ch[CH_FX], 0.3, 0.0, 0.5, 0.0, 0.0);
-    for (c, w) in [(CH_PAD, 0.8), (CH_DRONE, 0.8), (CH_BASS, 0.4)] {
+    for (c, w) in [(CH_PAD, 1.0), (CH_DRONE, 1.0), (CH_BASS, 0.6)] {
         ch[c].width = if ch[c].patch.samp != 0 { w } else { 1.0 };
     }
     s.rev.fb = r.range(0.8, 0.84);
@@ -652,6 +652,8 @@ impl Song {
         let e = sec.energy;
         if i == 0 {
             s.dly.target = (self.step_len() * 3.0) as f32;
+            // the long build: the leveller's target with the section's weight
+            s.m.target = 0.2 * (e * e).max(0.15);
         }
         if p.part == WP_END {
             self.wn_end(s, b, sec, m);
@@ -1120,9 +1122,10 @@ impl Song {
     }
 
     /// The Western's beat in any meter, for a mix: the gallop (the bass
-    /// drum on each beat, the field drum's eighth and two 16ths), the
-    /// tambourine in eighths, the anvil off the beat and a whip crack
-    /// closing a phrase in a strong section; a quiet one's castanets.
+    /// drum on each beat, the field drum's eighth and two 16ths, the
+    /// tambourine's eighths), the anvil off the beat and a whip crack
+    /// closing a phrase in a strong section; a quiet one's castanets; the
+    /// vibraslap's rattle at a section's turn.
     pub(super) fn western_beat(&mut self, _s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let (bs, beat) = (self.bar_steps(), self.beat_steps());
         let i = self.sec_bar;
@@ -1131,6 +1134,10 @@ impl Song {
         let h = self.human;
         let fill = if full || sec.kind == BUILD { self.fill(sec) } else { 0 };
         let r = &mut self.rng;
+        // a section's turn: the vibraslap's rattle
+        if i == 0 && matches!(sec.kind, INTRO | MAIN) {
+            b.hit(0.0, 0.0, CH_CYM, WC_SLAP, 0.55);
+        }
         if matches!(sec.kind, INTRO | BREAK) && m & (L_KICK | L_SNARE) == 0 {
             for st in (beat..bs).step_by(2) {
                 if r.chance(0.6) {
@@ -1153,10 +1160,10 @@ impl Song {
                 );
             }
         }
-        if full || sec.kind == BUILD {
-            for st in (0..bs).step_by(2) {
-                b.hit(st as f32, r.range(0.0, h), CH_HAT, 0, 0.35 + 0.1 * e);
-            }
+        // the tambourine in eighths with the gallop (shaken on the off-beats)
+        for st in (0..bs).step_by(2) {
+            let on = st % beat == 0;
+            b.hit(st as f32, r.range(0.0, h), CH_HAT, (!on) as u8, (0.35 + 0.1 * e) * if on { 1.0 } else { 0.8 });
         }
         if full && e >= 0.7 && bs > 2 {
             b.hit((bs - 2) as f32, r.range(0.0, h), CH_PERC, WK_ANVIL, 0.45);

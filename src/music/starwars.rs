@@ -771,20 +771,20 @@ fn sw_sounds(r: &mut Rng, s: &mut Synth, style: u8) {
         SWS_DARK => (4.0, 0.75, 0.15, 0.6),
         _ => (2.5, 1.06, 0.21, 0.68),
     };
-    mix(&mut ch[CH_LEAD], 0.8, -0.25, 0.32, 0.0, 0.0);
-    mix(&mut ch[CH_KEYS], 0.55, 0.3, 0.35, 0.0, 0.0);
-    mix(&mut ch[CH_ARP], arp, -0.35, 0.28, 0.0, 0.0);
+    mix(&mut ch[CH_LEAD], 0.8, -0.3, 0.32, 0.0, 0.0);
+    mix(&mut ch[CH_KEYS], 0.55, 0.4, 0.35, 0.0, 0.0);
+    mix(&mut ch[CH_ARP], arp, -0.45, 0.28, 0.0, 0.0);
     mix(&mut ch[CH_PAD], if style == SWS_BATTLE { 0.5 } else { 0.53 }, 0.0, 0.38, 0.0, 0.0);
-    mix(&mut ch[CH_BELL], 0.5, -0.5, 0.4, 0.0, 0.0);
-    mix(&mut ch[CH_DRONE], timp, 0.15, 0.35, 0.0, 0.0);
-    mix(&mut ch[CH_BASS], bass, 0.35, 0.25, 0.0, 0.0);
+    mix(&mut ch[CH_BELL], 0.5, -0.6, 0.4, 0.0, 0.0);
+    mix(&mut ch[CH_DRONE], timp, 0.2, 0.35, 0.0, 0.0);
+    mix(&mut ch[CH_BASS], bass, 0.45, 0.25, 0.0, 0.0);
     mix(&mut ch[CH_KICK], 0.3, 0.1, 0.35, 0.0, 0.0);
     mix(&mut ch[CH_SNARE], snare, 0.15, 0.3, 0.0, 0.0);
     mix(&mut ch[CH_HAT], 0.4, -0.3, 0.4, 0.0, 0.0);
     mix(&mut ch[CH_CYM], 0.42, 0.2, 0.4, 0.0, 0.0);
     mix(&mut ch[CH_FX], 0.35, 0.0, 0.5, 0.0, 0.0);
     // the hall's recordings narrowed to where they sit
-    for (c, w) in [(CH_LEAD, 0.4), (CH_KEYS, 0.6), (CH_ARP, 0.5), (CH_BASS, 0.5), (CH_DRONE, 0.5)] {
+    for (c, w) in [(CH_LEAD, 0.7), (CH_KEYS, 0.85), (CH_ARP, 0.85), (CH_BASS, 0.7), (CH_DRONE, 0.8)] {
         ch[c].width = if ch[c].patch.samp != 0 { w } else { 1.0 };
     }
     s.rev.fb = r.range(0.86, 0.9);
@@ -961,6 +961,11 @@ impl Song {
         let bs = self.sw.bs_at(i);
         let last = i + 1 == sec.bars;
         let mut c = self.sw_chords();
+        if i == 0 {
+            // a film score's arc: the leveller's target with the section's
+            // weight (the mystery well under the last statement)
+            s.m.target = 0.2 * (sec.energy * sec.energy).max(0.15);
+        }
         if p.part == SP_FINALE {
             self.sw_finale(s, b, sec, m);
             return;
@@ -1771,6 +1776,25 @@ impl Song {
         }
         if !full && sec.kind != BUILD && i % 2 == 0 {
             b.hit(0.0, r.range(0.0, h), CH_HAT, 0, 0.3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod pools {
+    use super::*;
+
+    /// Every chord of the Star Wars and Western pools parses, and each plan
+    /// is eight bars (sixteen chords).
+    #[test]
+    fn cinematic_pools_parse() {
+        for pool in SW_POOLS.iter().chain(WN_POOLS) {
+            for plan in pool.iter() {
+                for tok in plan.split_whitespace().flat_map(|t| t.split('+')) {
+                    assert!(parse_harm(tok).is_some(), "{tok} in {plan}");
+                }
+                assert_eq!(halves(plan).len(), 16, "{plan}");
+            }
         }
     }
 }
