@@ -434,6 +434,65 @@ UNPITCHED += [
       ["RopeSnare_hi_sn_Main_vl4_rr1.wav", "RopeSnare_hi_sn_Main_vl4_rr2.wav"]]),
 ]
 # -- end star wars / western -----------------------------------------------------------------
+# -- indonesian / celtic: the gamelan's and the session's recordings (2026-10-18)
+# Pitched: the balafon (VCSL's "EthnicXylo": wooden bars on gourds, the gamelan's gambang's
+# stand-in; partials 1 : 2.76 : 5.1, a free bar's), hard mallets, two layers; the folk (lever)
+# harp, one layer (v3), C2-C5 as named (C3-C6 sounding). Both folders name their notes an octave
+# low (spec.py, 2026-10-18: the balafon's "C4" sounds 523.7 Hz, its "F4" 700 Hz; the harp's
+# "C4" 522 Hz, its "A#2" 232 Hz).
+PITCHED += [
+    ("balafon", "hit", "VCSL", "Idiophones/Struck Idiophones/Balafon/Hard Mallet",
+     [("vl2", r"_vl2_"), ("vl3", r"_vl3_")], None),
+    ("folk_harp", "pluck", "VCSL", "Chordophones/Composite Chordophones/Folk Harp",
+     [("v3", r"_v3_")], r"_[A-G]#?[2-5]_"),
+]
+ROOT_FIX_FOLDER.update({
+    ("VCSL", "Idiophones/Struck Idiophones/Balafon/Hard Mallet"): 12,
+    ("VCSL", "Chordophones/Composite Chordophones/Folk Harp"): 12,
+})
+# Unpitched (root 60) but for the gong: VCSL's Gong 1, a bossed (nipple) gong sounding 143.5 Hz
+# (MIDI 49.61; its partials 1 : 2.04 : 2.46 : 2.9, two modes 6 Hz apart beating), retuned to C4
+# (TUNE_FILE, +1039 cents) so that root 60 is its pitch: the gamelan's gongs, kempul, kenong,
+# bonang and reyong are played from it at their own pitches; "ring" (capped at RING_SECONDS) three
+# layers. VCSL's Gong 2 and VSCO-2-CE's gong are mp3s (a RIFF/WAVE source is required): left out.
+# Kendang (the gamelan's drum) from the congas and bongos; the cengceng and kecer from a clash
+# cymbal's short strokes and a hi-hat; the ketuk, kempyang and kempli from the agogo bells.
+UNPITCHED += [
+    ("gamelan_gong", "ring", "VCSL", G + "Gong 1", [["gong_mf.wav"], ["gong_f.wav"], ["gong_fff.wav"]]),
+    ("agogo", "high", "VCSL", G + "Agogo Bells",
+     [["Agogo_High_v%d_rr1_Mid.wav" % v] for v in (1, 2, 3)]),
+    ("agogo", "low", "VCSL", G + "Agogo Bells", [["Agogo_Low_v%d_rr1_Mid.wav" % v] for v in (1, 2)]),
+    ("conga", "tumba", "VCSL", M + "Conga",
+     [["Tumba_HitN_v%d_rr1_Sum.wav" % v, "Tumba_HitN_v%d_rr2_Sum.wav" % v] for v in (2, 3, 4)]),
+    ("conga", "tumba_muted", "VCSL", M + "Conga",
+     [["Tumba_HitFM_v%d_rr1_Sum.wav" % v, "Tumba_HitFM_v%d_rr2_Sum.wav" % v] for v in (2, 3, 4)]),
+    ("conga", "open", "VCSL", M + "Conga",
+     [["Conga_HitN_v%d_rr1_Sum.wav" % v, "Conga_HitN_v%d_rr2_Sum.wav" % v] for v in (1, 2, 3)]),
+    ("conga", "muted", "VCSL", M + "Conga",
+     [["Conga_HitFM_v%d_rr1_Sum.wav" % v, "Conga_HitFM_v%d_rr2_Sum.wav" % v] for v in (1, 2)]),
+    ("conga", "quinto", "VCSL", M + "Conga",
+     [["Quinto_HitN_v%d_rr1_Sum.wav" % v, "Quinto_HitN_v%d_rr2_Sum.wav" % v] for v in (1, 2, 3)]),
+    ("conga", "quinto_muted", "VCSL", M + "Conga",
+     [["Quinto_HitFM1_v%d_rr1_Sum.wav" % v, "Quinto_HitFM1_v%d_rr2_Sum.wav" % v] for v in (1, 2)]),
+    ("bongo", "high", "VCSL", M + "Bongos",
+     [["BongoH_Hit1_v%d_rr1_Mid.wav" % v, "BongoH_Hit1_v%d_rr2_Mid.wav" % v] for v in (1, 2, 3)]),
+    ("bongo", "high_muted", "VCSL", M + "Bongos",
+     [["BongoH_HitMuted1_v%d_rr1_Mid.wav" % v, "BongoH_HitMuted1_v%d_rr2_Mid.wav" % v] for v in (1, 2, 3)]),
+    ("bongo", "low", "VCSL", M + "Bongos",
+     [["BongoL_Hit1_v%d_rr1_Mid.wav" % v, "BongoL_Hit1_v%d_rr2_Mid.wav" % v] for v in (1, 2, 3)]),
+    ("cymbal", "clash_short", "VCSL", G + "Clash Cymbals 1",
+     [["cymbal_crash1_short1.wav", "cymbal_crash1_short2.wav"]]),
+    ("cymbal", "clash", "VCSL", G + "Clash Cymbals 1",
+     [["cymbal_crash1_mp1.wav", "cymbal_crash1_mp2.wav"], ["cymbal_crash1_ff2.wav", "cymbal_crash1_ff3.wav"]]),
+    ("hihat", "closed", "VCSL", G + "Hi-Hat Cymbal",
+     [["HiHat_HitC_v%d_rr1_Mid.wav" % v, "HiHat_HitC_v%d_rr2_Mid.wav" % v] for v in (2, 3, 4)]),
+    ("hihat", "open", "VCSL", G + "Hi-Hat Cymbal", [["HiHat_HitO_rr1_Mid.wav", "HiHat_HitO_rr2_Mid.wav"]]),
+]
+# (keyed by its instrument too: STAR WARS's and WESTERN's "gong" plays the same files at their own pitch)
+TUNE_FILE.update({("VCSL", G + "Gong 1", f, "gamelan_gong"): -1039 for f in ("gong_mf.wav", "gong_f.wav", "gong_fff.wav")})
+RING_SECONDS = 10.0
+MAX_SECONDS.update({"ring": RING_SECONDS, "clash": 4.0, "open": 2.5, "tumba": 2.5, "quinto": 2.0})
+# -- end indonesian / celtic
 
 UNPITCHED_NAMES = {u[0] for u in UNPITCHED}
 LICENSE_FILES = {"VSCO-2-CE": ["LICENSE", "README.md", "Readme.txt"], "VCSL": ["LICENSE", "README.md"]}
@@ -614,7 +673,8 @@ def sumsq(a):
 def convert(job, src, stage):
     path = os.path.join(src, job["repo"], job["folder"], job["src"])
     check_wav_header(path)
-    a, ch = decode(path, TUNE_FILE.get((job["repo"], job["folder"], job["src"]), 0))
+    key = (job["repo"], job["folder"], job["src"])
+    a, ch = decode(path, TUNE_FILE.get(key + (job["instrument"],), TUNE_FILE.get(key, 0)))
     frames = len(a) // ch
     pk = peak_of(a)
     if frames < 480 or pk < 64:
@@ -799,6 +859,8 @@ def uptodate(dest):
 
 # --------------------------------------------------------------------------------------------
 def sources_md(jobs, gains, dest):
+    MBIRA_TUNE = {k: v for k, v in TUNE_FILE.items() if len(k) == 3}
+    GONG_TUNE = {k: v for k, v in TUNE_FILE.items() if len(k) == 4}
     by = {}
     for j in jobs:
         by.setdefault((j["instrument"], j["articulation"]), []).append(j)
@@ -852,7 +914,10 @@ def sources_md(jobs, gains, dest):
       " see `ROOT_FIX_FOLDER` in `tools/samples_manifest.py`. Unpitched percussion uses root 60.")
     w("- Retuned (resampled to its root, the length changing with it): %d files of the Tanzanian mbira, tuned"
       " to its own scale (%+d to %+d cents); see `TUNE_FILE` in `tools/samples_manifest.py`."
-      % (len(TUNE_FILE), min(TUNE_FILE.values()), max(TUNE_FILE.values())))
+      % (len(MBIRA_TUNE), min(MBIRA_TUNE.values()), max(MBIRA_TUNE.values())))
+    w("- Retuned the same way: the gamelan's gong (VCSL's Gong 1, %d files, %+d cents), so that its root"
+      " 60 is its pitch (the same files untuned are STAR WARS's and WESTERN's gong)."
+      % (len(GONG_TUNE), -min(GONG_TUNE.values())))
     w("- Velocity layers split 0-127 evenly, softest first. `gain_db` is the instrument/articulation's gain, putting"
       " the loudest layer's median RMS over the first 1 s after the onset at %g dBFS, plus a trim per root and"
       " layer that brings each to the loudest layer's median K-weighted (ITU-R BS.1770) level, over %g s after"

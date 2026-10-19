@@ -183,6 +183,11 @@ pub const GM_PRESETS: &[&str] = &[
     "Reverse Cymbal",
     "Church Bell",
     // -- end star wars / western
+    // -- indonesian / celtic: the suling's stand-in (an end-blown bamboo
+    // flute), the bouzouki's (a twelve-string's octave courses)
+    "Shakuhachi",
+    "12-String Guitar",
+    // -- end indonesian / celtic
 ];
 
 /// Its drum kits loaded (bank 128), by name.

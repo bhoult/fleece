@@ -67,7 +67,7 @@ use western::*;
 /// Whether `genre`'s pieces end on a final hit (its last bar its own in a mix,
 /// the drummer's beat left out).
 fn ends_on_a_hit(genre: usize) -> bool {
-    matches!(genre, POLKA | TAVERN | SKA | MARIACHI | STARWARS | WESTERN)
+    matches!(genre, POLKA | TAVERN | SKA | MARIACHI | INDONESIAN | STARWARS | CELTIC | WESTERN)
 }
 /// The music's ids: a genre alone (below `NG`), or a mix of a primary genre and a
 /// secondary one (`mix_id`): the primary writes the music (its form, meter,
@@ -12803,6 +12803,16 @@ fn palette(g: usize, ch: usize) -> Option<&'static [(&'static str, Make)]> {
         (MARIACHI, CH_BASS) => P_MARIACHI_BASS,
         (STARWARS, _) => return palette_starwars(ch),
         (WESTERN, _) => return palette_western(ch),
+        (INDONESIAN, CH_BELL | CH_ARP) => P_IDN_BARS,
+        (INDONESIAN, CH_KEYS | CH_PAD) => P_IDN_KETTLES,
+        (INDONESIAN, CH_LEAD) => P_IDN_LEAD,
+        (INDONESIAN, CH_BASS) => P_IDN_LOW,
+        (INDONESIAN, CH_DRONE) => P_IDN_GONG,
+        (CELTIC, CH_LEAD) => P_CE_LEAD,
+        (CELTIC, CH_BELL | CH_ARP) => P_CE_SECOND,
+        (CELTIC, CH_KEYS | CH_PAD) => P_CE_STRUM,
+        (CELTIC, CH_DRONE) => P_CE_DRONE,
+        (CELTIC, CH_BASS) => P_CE_BASS,
         _ => return None,
     })
 }
@@ -12843,6 +12853,14 @@ fn kit_palette(g: usize, ch: usize) -> Option<&'static [(&'static str, MakeKit)]
         (MARIACHI, CH_PERC) => K_MARIACHI_PERC,
         (STARWARS, _) => return kit_palette_starwars(ch),
         (WESTERN, _) => return kit_palette_western(ch),
+        (INDONESIAN, CH_KICK) => K_IDN_KICK,
+        (INDONESIAN, CH_SNARE) => K_IDN_SNARE,
+        (INDONESIAN, CH_HAT) => K_IDN_HAT,
+        (INDONESIAN, CH_PERC) => K_IDN_PERC,
+        (INDONESIAN, CH_CYM) => K_IDN_CYM,
+        (CELTIC, CH_KICK) => K_CE_KICK,
+        (CELTIC, CH_SNARE) => K_CE_SNARE,
+        (CELTIC, CH_PERC) => K_CE_PERC,
         _ => return None,
     })
 }
@@ -15247,6 +15265,8 @@ fn end_tail(genre: usize) -> f64 {
         AMBIENT => 8.0,
         LOFI => 5.0,
         TECHNO | SYNTHWAVE => 2.5,
+        // the gong ageng's ring
+        INDONESIAN => 6.0,
         _ => 3.5,
     }
 }
@@ -15605,7 +15625,8 @@ mod tests {
     /// techno's kick on the one, polka+techno's clap on the second beat; the
     /// tavern writer's frame drum (its second stroke) gone under another
     /// drummer but for the piece's last bar (under a drummer whose own kick
-    /// has a second stroke, mariachi's toe taps, it cannot be told apart).
+    /// has a second stroke, mariachi's toe taps, the kendang's dhah, the
+    /// bodhrán's top, it cannot be told apart).
     #[test]
     fn mixes_drum_in_the_writers_meter() {
         for p in 0..NG {
@@ -15630,7 +15651,7 @@ mod tests {
                                 let at = (t as f64 - t0) / step;
                                 assert!((-0.01..bs as f64).contains(&at), "{} seed {seed}: a hit at {at} of {bs}", name(id));
                                 assert!(
-                                    ending || !(p == TAVERN && !matches!(g, TAVERN | MARIACHI) && ch as usize == CH_KICK && kind == 1),
+                                    ending || !(p == TAVERN && !matches!(g, TAVERN | MARIACHI | INDONESIAN | CELTIC) && ch as usize == CH_KICK && kind == 1),
                                     "{}: the writer's frame drum",
                                     name(id)
                                 );
