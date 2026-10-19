@@ -9562,12 +9562,13 @@ fn ska_rec_trim(style: u8, ch: usize) -> f32 {
 /// `ska_rec_trim`'s, more for the recordings standing in for the 2-tone
 /// organs, the melodica and the Wurlitzer (an accordion's, a reed organ's,
 /// a harmonica's, an FM electric piano's), measured as the acoustic
-/// genres' trims are (each forced on both halves of its channel's pair, 30
-/// seeds' first 90 s, by style): the Farfisa's accordion 2.2 dB up in 2-tone; the melodica's
-/// harmonica 3.8 dB up in 2-tone and 6.3 in the first wave (the first
-/// wave's lead trim is the trumpet's; the harmonica's notes vary by up to
-/// 10 dB from one to the next, so its level varies by the piece's key and
-/// register); the Wurlitzer 1.1 and 2.5 dB down.
+/// genres' trims are (each forced on both halves of its channel's pair,
+/// 30 seeds' first 90 s, 60 for the melodica, by style): the Farfisa's
+/// accordion 2.2 dB up in 2-tone (the Vox's reed organ within a dB); the
+/// melodica's harmonica 3.8 dB up in 2-tone and 6.3 in the first wave (the
+/// first wave's lead trim is the trumpet's; the harmonica's notes differ
+/// by up to 10 dB from one to the next, so its level varies with the
+/// piece's key and register); the Wurlitzer 1.1 and 2.5 dB down.
 fn ska_rec_more(style: u8, ch: usize, samp: u16) -> f32 {
     let db = match (ch, style) {
         (CH_PAD, SKS_TWO) if rec_is(samp, "Accordion") => 2.2,
@@ -11018,7 +11019,7 @@ fn rec_keep(p: Patch, id: Option<u16>, note: f32, keep: impl FnOnce(Patch) -> Pa
 }
 
 /// `rec_keep`'s usual: a low-pass at `k` times the patch's cutoff, no
-/// resonance unless `res`, no envelope (a felt hammer, a darker horn).
+/// resonance unless `res`, no envelope (a felt hammer, a crumhorn's buzz).
 fn rec_lp(p: Patch, id: Option<u16>, note: f32, k: f32, res: f32) -> Patch {
     rec_keep(p, id, note, |q| Patch {
         filter: true,
