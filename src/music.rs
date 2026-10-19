@@ -4861,16 +4861,16 @@ impl Song {
         // the recorded instruments brought to the balance the synthesiser's had
         for (ch, pair, _) in self.band.tones.iter_mut() {
             for p in pair.iter_mut().filter(|p| p.samp != 0) {
-                p.gain *= ska_rec_trim(style, *ch) * ska_rec_more(style, *ch, p.samp);
+                p.gain *= ska_rec_trim(style, *ch) * ska_rec_more(style, *ch, p);
             }
         }
         for c in [CH_KEYS, CH_PAD, CH_DRONE, CH_BASS, CH_LEAD, CH_BELL, CH_ARP] {
             if s.ch[c].patch.samp != 0 {
-                s.ch[c].patch.gain *= ska_rec_trim(style, c) * ska_rec_more(style, c, s.ch[c].patch.samp);
+                s.ch[c].patch.gain *= ska_rec_trim(style, c) * ska_rec_more(style, c, &s.ch[c].patch);
             }
         }
         for (p, _) in self.sk.solos.iter_mut().filter(|(p, _)| p.samp != 0) {
-            p.gain *= ska_rec_trim(style, CH_LEAD) * ska_rec_more(style, CH_LEAD, p.samp);
+            p.gain *= ska_rec_trim(style, CH_LEAD) * ska_rec_more(style, CH_LEAD, p);
         }
         if style == SKS_FIRST {
             // the first wave's recordings in mono, as its records are
@@ -9565,23 +9565,47 @@ fn ska_rec_trim(style: u8, ch: usize) -> f32 {
     10f32.powf(db / 20.0)
 }
 
-/// `ska_rec_trim`'s, more for the recordings standing in for the 2-tone
-/// organs, the melodica and the Wurlitzer (an accordion's, a reed organ's,
-/// a harmonica's, an FM electric piano's), measured as the acoustic
-/// genres' trims are (each forced on both halves of its channel's pair,
-/// 30 seeds' first 90 s, 60 for the melodica, by style): the Farfisa's
-/// accordion 2.2 dB up in 2-tone (the Vox's reed organ within a dB); the
-/// melodica's harmonica 3.8 dB up in 2-tone and 6.3 in the first wave (the
-/// first wave's lead trim is the trumpet's; the harmonica's notes differ
-/// by up to 10 dB from one to the next, so its level varies with the
-/// piece's key and register); the Wurlitzer 1.1 and 2.5 dB down.
-fn ska_rec_more(style: u8, ch: usize, samp: u16) -> f32 {
+/// `ska_rec_trim`'s, more for each recording on a channel in a style
+/// (dB): measured as the acoustic genres' trims are (each forced on both
+/// halves of its channel's pair, the channel alone, K-weighted against its
+/// synthesiser's twin; 20-70 seeds' first 90 s by style), on the bank that
+/// evens each CC0 root and velocity layer. The stand-ins: the Farfisa's
+/// accordion, the melodica's harmonica, the Wurlitzer's FM piano; the CC0
+/// horns, saxes and bass (`ska_rec_trim`'s channel levels were measured on
+/// the bank before it was evened); `lp`: the tenor horn's trombone and the
+/// flugelhorn's trumpet, darker through their low-pass, which the
+/// levelling reads otherwise.
+fn ska_rec_more(style: u8, ch: usize, p: &Patch) -> f32 {
+    let is = |key: &str| rec_is(p.samp, key);
+    let lp = p.filter;
     let db = match (ch, style) {
-        (CH_PAD, SKS_TWO) if rec_is(samp, "Accordion") => 2.2,
-        (CH_LEAD, SKS_TWO) if rec_is(samp, "harmonica:sus") => 3.8,
-        (CH_LEAD, SKS_FIRST) if rec_is(samp, "harmonica:sus") => 6.3,
-        (CH_DRONE, SKS_TWO) if rec_is(samp, "FM Electric Piano") => -1.1,
-        (CH_DRONE, SKS_FIRST) if rec_is(samp, "FM Electric Piano") => -2.5,
+        (CH_PAD, SKS_TWO) if is("Accordion") => 2.2,
+        (CH_PAD, SKS_THIRD) if is("tenor_sax:auto") => 6.5,
+        (CH_LEAD, SKS_TWO) if is("harmonica:sus") => 3.8,
+        (CH_LEAD, SKS_FIRST) if is("harmonica:sus") => 9.1,
+        (CH_LEAD, SKS_TWO) if is("trumpet:auto") && lp => -1.3,
+        (CH_LEAD, SKS_TWO) if is("trumpet:auto") => -1.5,
+        (CH_LEAD, SKS_FIRST) if is("trumpet:auto") && lp => 1.9,
+        (CH_LEAD, SKS_FIRST) if is("trumpet:auto") => 2.3,
+        (CH_LEAD, SKS_THIRD) if is("trumpet:auto") => -1.0,
+        (CH_LEAD, SKS_FIRST) if is("tenor_sax:auto") => 3.7,
+        (CH_BELL, _) if is("trombone:auto") && lp => 3.7,
+        (CH_BELL, _) if is("trombone:auto") => 1.4,
+        (CH_BELL, SKS_TWO) if is("tenor_sax:auto") => 2.6,
+        (CH_BELL, SKS_FIRST) if is("tenor_sax:auto") => 6.0,
+        (CH_BELL, SKS_THIRD) if is("tenor_sax:auto") => 3.5,
+        (CH_BELL, SKS_TWO) if is("trumpet:auto") => 2.6,
+        (CH_BELL, SKS_FIRST) if is("trumpet:auto") => 5.0,
+        (CH_ARP, SKS_TWO) if is("trombone:auto") => -4.4,
+        (CH_ARP, SKS_FIRST) if is("trombone:auto") => -2.7,
+        (CH_ARP, SKS_THIRD) if is("trombone:auto") => -1.9,
+        (CH_ARP, SKS_TWO) if is("tenor_sax:auto") => 0.8,
+        (CH_ARP, SKS_FIRST) if is("tenor_sax:auto") => 2.2,
+        (CH_ARP, SKS_THIRD) if is("tenor_sax:auto") => 2.8,
+        (CH_BASS, SKS_FIRST) if is("contrabass:pizz") => 1.3,
+        (CH_BASS, SKS_TWO) if is("contrabass:pizz") => -1.8,
+        (CH_DRONE, SKS_TWO) if is("FM Electric Piano") => -1.1,
+        (CH_DRONE, SKS_FIRST) if is("FM Electric Piano") => -2.5,
         _ => 0.0,
     };
     10f32.powf(db / 20.0)
@@ -11867,7 +11891,7 @@ fn kit_hand_clap_synth(r: &mut Rng) -> Vec<DrumPatch> {
 fn kit_hand_clap(r: &mut Rng) -> Vec<DrumPatch> {
     rec_kit_db(
         kit_hand_clap_synth(r),
-        &[(samples::multi("claps", "solo"), 1.9), (samples::multi("claps", "solo"), 1.9)],
+        &[(samples::multi("claps", "solo"), -0.7), (samples::multi("claps", "solo"), -0.7)],
     )
 }
 
@@ -11923,7 +11947,7 @@ fn kit_tambourine_synth(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn kit_tambourine(r: &mut Rng) -> Vec<DrumPatch> {
-    rec_kit_db(kit_tambourine_synth(r), &[tambourine_rec(0, 1.4), tambourine_rec(1, 1.4)])
+    rec_kit_db(kit_tambourine_synth(r), &[tambourine_rec(0, -8.8), tambourine_rec(1, 1.4)])
 }
 fn kit_ride_synth(r: &mut Rng) -> Vec<DrumPatch> {
     let c = DrumPatch {
@@ -12130,7 +12154,7 @@ const K_TECH_KICK: &[(&str, MakeKit)] = &[
 const K_TECH_SNARE: &[(&str, MakeKit)] =
     &[("808 clap", kit_clap_808), ("snap", kit_snap), ("Linn snare", kit_snare_linn)];
 const K_TECH_HAT: &[(&str, MakeKit)] =
-    &[("808 hats", kit_hats_808), ("909 hats", kit_hats_909), ("shaker", kit_shaker)];
+    &[("808 hats", kit_hats_808), ("909 hats", kit_hats_909), ("shaker", techno_kit_shaker)];
 const K_TECH_PERC: &[(&str, MakeKit)] =
     &[("cowbell, toms, woodblock", kit_perc_metal), ("clave, congas", kit_perc_hand)];
 const K_CYM: &[(&str, MakeKit)] = &[("ride", kit_ride)];
@@ -12219,6 +12243,12 @@ fn lofi_kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
     kit_trim(kit_shaker(r), -2.0)
 }
 
+/// Techno's shaker, 2.8 dB up on its own trim (measured in techno's pieces
+/// as the acoustic genres' trims are).
+fn techno_kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
+    kit_trim(kit_shaker(r), 2.8)
+}
+
 fn lofi_kit_hats_808(r: &mut Rng) -> Vec<DrumPatch> {
     kit_trim(kit_hats_808(r), -12.8)
 }
@@ -12259,78 +12289,69 @@ fn band_trim(b: &mut Band, s: &Synth, table: &[(usize, &str, f32)], origs: &[(us
 // patch each replaces: measured over whole pieces, each band instrument in
 // turn on both halves of its channel's pair, the channel alone and the
 // leveller frozen, K-weighted (BS.1770) mean power against the
-// synthesiser's twin playing the same notes (10 seeds' first 90 s; 30 where
-// a lead's level varies from piece to piece). The levelling matches one
-// note's early 0.12 s, so it misreads a swell (a flute's vibrato), a short
-// note on a staccato whose level differs from the held one's across the
-// range, a soft note on a recording's soft layer (a trumpet's counter-line
-// in lo-fi), a pluck's ring. Under half a dB left out; none past 10 dB
-// (where a soft layer, not the level, is the difference: a gain cannot
-// make one note sound like another).
+// synthesiser's twin playing the same notes (10 seeds' first 90 s; the CC0
+// recordings' again since the bank evens each root and velocity layer).
+// The levelling matches one note's early 0.12 s, so it misreads a swell (a
+// flute's vibrato), a short note, a pluck's ring. Under half a dB left out.
 
 /// Polka's.
 const POLKA_REC_TRIMS: &[(usize, &str, f32)] = &[
-    (CH_BASS, "tuba:auto", 9.6),
+    (CH_BASS, "tuba:auto", 6.6),
     (CH_BASS, "Bandoneon", 4.4),
-    (CH_BASS, "contrabass:pizz", -4.2),
     (CH_KEYS, "Accordion", 3.0),
     (CH_KEYS, "Banjo", 1.8),
     (CH_KEYS, "Grand Piano", 0.8),
     (CH_KEYS, "Mandolin", 6.0),
     (CH_LEAD, "Italian Accordion", -1.3),
     (CH_LEAD, "Bandoneon", -2.5),
-    (CH_LEAD, "violin:sus", -3.3),
-    (CH_ARP, "clarinet:auto", -4.9),
-    (CH_ARP, "trumpet:auto", -7.4),
-    (CH_ARP, "horn:auto", -9.0),
-    (CH_ARP, "tenor_sax:auto", -4.2),
-    (CH_ARP, "violin:sus", -1.0),
-    (CH_ARP, "glockenspiel:hit", -1.9),
+    (CH_LEAD, "violin:sus", -2.8),
+    (CH_LEAD, "harmonica:vib", 3.3),
+    (CH_ARP, "clarinet:auto", -2.9),
+    (CH_ARP, "trumpet:auto", -2.3),
+    (CH_ARP, "trombone:auto", -1.7),
+    (CH_ARP, "tenor_sax:auto", -0.8),
+    (CH_ARP, "glockenspiel:hit", -1.5),
     (CH_ARP, "Piccolo", 1.3),
 ];
 
 /// The tavern's.
 const TAVERN_REC_TRIMS: &[(usize, &str, f32)] = &[
-    (CH_LEAD, "violin:sus", -5.0),
+    (CH_LEAD, "violin:sus", -4.0),
     (CH_LEAD, "Piccolo", 1.8),
-    (CH_LEAD, "recorder:auto", -6.7),
-    (CH_LEAD, "flute:auto", -10.0),
+    (CH_LEAD, "recorder:auto", -1.9),
+    (CH_LEAD, "flute:auto", -4.0),
     (CH_LEAD, "Bagpipe", -5.6),
     (CH_LEAD, "Fiddle", 2.4),
-    (CH_LEAD, "ocarina:vib", -0.9),
     (CH_LEAD, "Clarinet", -2.3),
-    (CH_BELL, "recorder:auto", -6.9),
+    (CH_BELL, "recorder:auto", -2.2),
     (CH_BELL, "Piccolo", 1.6),
-    (CH_BELL, "violin:sus", -3.4),
-    (CH_BELL, "harp:pluck", 2.9),
+    (CH_BELL, "violin:sus", -3.0),
+    (CH_BELL, "harp:pluck", -0.6),
     (CH_KEYS, "Nylon String Guitar", -0.7),
     (CH_KEYS, "Mandolin", 3.5),
-    (CH_KEYS, "harp:pluck", 5.5),
+    (CH_KEYS, "harp:pluck", 2.8),
     (CH_KEYS, "Dulcimer", 3.9),
     (CH_DRONE, "Bagpipe", 2.2),
     (CH_DRONE, "Voice Oohs", 2.1),
     (CH_BASS, "Cello", -2.2),
-    (CH_BASS, "contrabass:pizz", -3.6),
+    (CH_BASS, "contrabass:pizz", -2.0),
 ];
 
 /// Lo-fi's.
 const LOFI_REC_TRIMS: &[(usize, &str, f32)] = &[
     (CH_BASS, "Fingered Bass", -1.1),
-    (CH_BASS, "contrabass:pizz", -7.5),
-    (CH_LEAD, "vibraphone:soft", -5.3),
-    (CH_LEAD, "flute:auto", -10.0),
+    (CH_BASS, "contrabass:pizz", -1.5),
+    (CH_LEAD, "vibraphone:soft", -1.9),
+    (CH_LEAD, "flute:auto", -2.7),
     (CH_LEAD, "Harmon Mute Trumpet", -8.6),
-    (CH_LEAD, "tenor_sax:auto", -7.5),
-    (CH_LEAD, "harmonica:vib", -2.4),
-    (CH_LEAD, "trumpet:auto", -3.3),
-    (CH_LEAD, "clarinet:auto", -4.6),
-    (CH_BELL, "vibraphone:soft", 3.6),
-    (CH_BELL, "flute:auto", 1.1),
+    (CH_LEAD, "harmonica:vib", 5.5),
+    (CH_LEAD, "clarinet:auto", 1.0),
+    (CH_BELL, "vibraphone:soft", -5.0),
+    (CH_BELL, "flute:auto", -2.5),
     (CH_BELL, "Harmon Mute Trumpet", 3.0),
-    (CH_BELL, "tenor_sax:auto", 5.5),
-    (CH_BELL, "harmonica:vib", 5.1),
-    (CH_BELL, "trumpet:auto", 10.0),
-    (CH_BELL, "clarinet:auto", 1.0),
+    (CH_BELL, "tenor_sax:auto", 2.8),
+    (CH_BELL, "trumpet:auto", 1.2),
+    (CH_BELL, "clarinet:auto", -1.3),
     (CH_KEYS, "Tine Electric Piano", -1.0),
     (CH_KEYS, "FM Electric Piano", 1.3),
     (CH_KEYS, "Mellow Grand Piano", 2.6),
@@ -12344,28 +12365,26 @@ const AMBIENT_REC_TRIMS: &[(usize, &str, f32)] = &[
     (CH_PAD, "Warm Pad", -3.0),
     (CH_PAD, "Choir Aahs", 5.4),
     (CH_PAD, "Voice Oohs", 5.4),
-    (CH_PAD, "Bowed Glass", 10.0),
+    (CH_PAD, "Bowed Glass", 11.6),
     (CH_PAD, "Drawbar Organ", 5.0),
     (CH_ARP, "Celesta", 0.6),
     (CH_ARP, "FM Electric Piano", -2.7),
-    (CH_ARP, "kalimba:pluck", 2.6),
-    (CH_ARP, "harp:pluck", 4.7),
-    (CH_ARP, "marimba:hit", 4.9),
+    (CH_ARP, "kalimba:pluck", 4.6),
+    (CH_ARP, "harp:pluck", 1.7),
+    (CH_ARP, "marimba:hit", 1.3),
     (CH_ARP, "Nylon String Guitar", 2.1),
-    (CH_LEAD, "ocarina:vib", -1.2),
-    (CH_LEAD, "flute:auto", 1.6),
+    (CH_LEAD, "ocarina:vib", -2.0),
+    (CH_LEAD, "flute:auto", -0.7),
     (CH_LEAD, "Piccolo", -0.5),
-    (CH_BELL, "vibraphone:soft", -4.2),
+    (CH_BELL, "vibraphone:soft", -1.3),
     (CH_BELL, "Celesta", 1.5),
-    (CH_BELL, "marimba:hit", 1.4),
-    (CH_BELL, "kalimba:pluck", 8.1),
-    (CH_BELL, "harp:pluck", 4.3),
+    (CH_BELL, "marimba:hit", 2.7),
+    (CH_BELL, "kalimba:pluck", 5.4),
     (CH_BELL, "Grand Piano", 6.2),
     (CH_BELL, "Dulcimer", -1.3),
     (CH_BELL, "Crystal", -0.5),
     (CH_BELL, "Tubular Bells", 2.0),
     (CH_BASS, "Fretless Bass", -3.3),
-    (CH_BASS, "contrabass:pizz", -5.5),
     (CH_BASS, "Synth Bass 2", -1.3),
     (CH_DRONE, "Contrabass", -0.8),
     (CH_DRONE, "Voice Oohs", 4.0),
@@ -12491,6 +12510,8 @@ fn techno_rec_trim(ch: usize, acid: bool, samp: u16) -> f32 {
         // the stabs (shaped by their patch's decay: +0.7 and +0.9 dB in the
         // two bass styles)
         CH_KEYS if is_gm(samp, "Saw Lead") => 0.8,
+        // the CC0 recordings (the acoustic genres' method, the evened bank)
+        CH_LEAD if rec_is(samp, "marimba:hit") => 2.4,
         _ => 0.0,
     }
 }
@@ -12511,6 +12532,12 @@ fn synthwave_rec_trim(ch: usize, samp: u16) -> f32 {
         // the saw arpeggio, shaped by its patch's decay (the square's within
         // half a dB)
         CH_ARP if is_gm(samp, "Saw Lead") => 1.0,
+        // the CC0 recordings (the acoustic genres' method, the evened bank):
+        // the violins' pizzicato speaks short against the string's ring
+        CH_ARP if rec_is(samp, "glockenspiel:hit") => -2.0,
+        CH_ARP if rec_is(samp, "marimba:hit") => 2.4,
+        CH_ARP if rec_is(samp, "violins:pizz") => 13.5,
+        CH_BELL if rec_is(samp, "vibraphone:soft") => -3.9,
         _ => 0.0,
     }
 }
@@ -14198,7 +14225,7 @@ fn mariachi_kit_sampled(kit: Vec<DrumPatch>, recs: &[(Option<u16>, f32)]) -> Vec
 
 /// The first violins: a section (spiccato on short notes, held with vibrato).
 fn mariachi_rec_violins(r: &mut Rng) -> Patch {
-    mariachi_sampled(mariachi_violins(r), samples::multi("violins", "auto"), 0.29)
+    mariachi_sampled(mariachi_violins(r), samples::multi("violins", "auto"), 0.38)
 }
 
 /// The section held through every note (sweeter, slower to speak).
@@ -14208,7 +14235,7 @@ fn mariachi_rec_violins_sweet(r: &mut Rng) -> Patch {
 
 /// The second violins: fewer players (a solo violin's recording).
 fn mariachi_rec_violins2(r: &mut Rng) -> Patch {
-    mariachi_sampled(mariachi_violins(r), samples::multi("violin", "auto"), 0.6)
+    mariachi_sampled(mariachi_violins(r), samples::multi("violin", "auto"), 0.3)
 }
 
 fn mariachi_rec_violins_long(r: &mut Rng) -> Patch {
@@ -14230,7 +14257,7 @@ fn mariachi_rec_strings(r: &mut Rng) -> Patch {
 
 /// The trumpets: staccato on short notes, held with vibrato.
 fn mariachi_rec_trumpet(r: &mut Rng) -> Patch {
-    mariachi_sampled(mariachi_trumpet(r), samples::multi("trumpet", "auto"), 0.35)
+    mariachi_sampled(mariachi_trumpet(r), samples::multi("trumpet", "auto"), 0.245)
 }
 
 /// The flugelhorns' place: a trumpet held straight, no vibrato.
@@ -14369,7 +14396,7 @@ fn mariachi_kit_cajon(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.5,
         ..low
     };
-    let recs = [(samples::multi("cajon", "hit3"), 0.8), (samples::multi("cajon", "hit1"), 0.5)];
+    let recs = [(samples::multi("cajon", "hit3"), 1.24), (samples::multi("cajon", "hit1"), 0.78)];
     mariachi_kit_sampled(vec![low, high], &recs)
 }
 
@@ -14385,13 +14412,13 @@ fn mariachi_kit_palmas(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.8,
         ..DRUM
     };
-    let recs = [(samples::multi("claps", "group"), 0.4), (samples::multi("claps", "group"), 0.25)];
+    let recs = [(samples::multi("claps", "group"), 0.305), (samples::multi("claps", "group"), 0.19)];
     mariachi_kit_sampled(vec![c, DrumPatch { claps: 2, ndec: 0.05, gain: 0.5, ..c }], &recs)
 }
 
 /// Hand claps, a few hands: [a clap, a softer one].
 fn mariachi_kit_claps(r: &mut Rng) -> Vec<DrumPatch> {
-    let recs = [(samples::multi("claps", "solo"), 0.4), (samples::multi("claps", "solo"), 0.25)];
+    let recs = [(samples::multi("claps", "solo"), 0.695), (samples::multi("claps", "solo"), 0.435)];
     mariachi_kit_sampled(kit_hand_clap_synth(r), &recs)
 }
 
@@ -14407,13 +14434,13 @@ fn mariachi_kit_maracas(r: &mut Rng) -> Vec<DrumPatch> {
         gain: 0.55,
         ..DRUM
     };
-    let recs = [(samples::multi("shaker", "small"), 0.55), (samples::multi("shaker", "large"), 0.55)];
+    let recs = [(samples::multi("shaker", "small"), 0.27), (samples::multi("shaker", "large"), 0.27)];
     mariachi_kit_sampled(vec![c, DrumPatch { ndec: 0.16, natt: 0.03, ..c }], &recs)
 }
 
 /// A shaker: [a shake down, a roll].
 fn mariachi_kit_shaker(r: &mut Rng) -> Vec<DrumPatch> {
-    let recs = [(samples::multi("shaker", "small_down"), 0.55), (samples::multi("shaker", "small_roll"), 0.55)];
+    let recs = [(samples::multi("shaker", "small_down"), 0.42), (samples::multi("shaker", "small_roll"), 0.42)];
     mariachi_kit_sampled(kit_shaker_synth(r), &recs)
 }
 
@@ -14446,10 +14473,10 @@ fn mariachi_kit_guiro(r: &mut Rng) -> Vec<DrumPatch> {
     };
     let recs = [
         (samples::drum("Standard", 75), 0.55),
-        (samples::multi("cajon", "hit3"), 0.7),
-        (samples::multi("cajon", "hit2"), 0.7),
-        (samples::multi("cajon", "hit1"), 0.7),
-        (samples::multi("guiro", "short"), 0.5),
+        (samples::multi("cajon", "hit3"), 0.56),
+        (samples::multi("cajon", "hit2"), 0.56),
+        (samples::multi("cajon", "hit1"), 0.56),
+        (samples::multi("guiro", "short"), 0.4),
     ];
     mariachi_kit_sampled(vec![clave, cajon(110.0), cajon(160.0), cajon(240.0), guiro], &recs)
 }
@@ -14537,6 +14564,23 @@ const K_MARIACHI_HAT: &[(&str, MakeKit)] = &[("maracas", mariachi_kit_maracas), 
 const K_MARIACHI_PERC: &[(&str, MakeKit)] =
     &[("guiro, clave, cajón", mariachi_kit_guiro), ("clave, congas", mariachi_kit_congas)];
 
+/// Mariachi's band's recordings against their synthesiser's twins (as
+/// `POLKA_REC_TRIMS`, on the evened bank; the originals' gains set the
+/// channels, the band's picks levelled to them): the CC0 ones, the flute
+/// and the salterio; the trumpets that follow the trumpets' original; the
+/// string ensemble, which the levelling's 14 dB limit leaves too quiet.
+const MARIACHI_REC_TRIMS: &[(usize, &str, f32)] = &[
+    (CH_LEAD, "violins:sus", -2.2),
+    (CH_LEAD, "flute:auto", -2.2),
+    (CH_DRONE, "violins:sus", 2.0),
+    (CH_DRONE, "Strings Slow", 18.2),
+    (CH_ARP, "trumpet:sus", 2.9),
+    (CH_ARP, "Trumpet", 2.4),
+    (CH_ARP, "Harmon Mute Trumpet", -1.8),
+    (CH_BELL, "harp:pluck", 5.0),
+    (CH_BELL, "psaltery:pluck", 2.8),
+];
+
 fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
     let mut b = Band::default();
     b.tone(r, s, CH_LEAD, P_MARIACHI_VIOLIN, 76.0);
@@ -14551,7 +14595,7 @@ fn band_mariachi(r: &mut Rng, s: &Synth) -> Band {
     b.kit(r, s, CH_HAT, K_MARIACHI_HAT);
     b.kit(r, s, CH_PERC, K_MARIACHI_PERC);
     // the flute's and the salterio's recordings (the others' have their gains)
-    band_trim(&mut b, s, &[(CH_LEAD, "flute:auto", -2.2), (CH_BELL, "psaltery:pluck", 2.8)], &[]);
+    band_trim(&mut b, s, MARIACHI_REC_TRIMS, &[]);
     b
 }
 
