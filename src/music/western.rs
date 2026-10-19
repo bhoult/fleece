@@ -342,7 +342,7 @@ fn wn_kit_cym(r: &mut Rng) -> Vec<DrumPatch> {
 }
 
 fn wn_kit_snare(r: &mut Rng) -> Vec<DrumPatch> {
-    let id = multi_or("field_snare", "hit", "Brush");
+    let id = samples::multi("field_snare", "hit").or_else(|| samples::drum("Orchestra Kit", 38));
     rec_kit(sw_kit_snare_synth(r), &[id, id])
 }
 
@@ -631,6 +631,10 @@ impl Song {
         self.prog = self.wn.progs
             [(p.part == WP_MORE || p.part == WP_CLIMAX) as usize & (self.wn.style == WNS_RIDE) as usize]
             .clone();
+        if self.sec == 0 {
+            // the piece's tempo as set (a mix's moved toward its drummer's)
+            self.wn.bpm0 = self.bpm;
+        }
         self.bpm = self.wn.bpm0 * p.pace as f64;
         let bs = self.wn.bar_steps;
         let mut bars = vec![bs; sec.bars as usize];
@@ -853,7 +857,6 @@ impl Song {
         let bar = (i % 8) as f32;
         let notes: Vec<Tn> = self.wn.theme.iter().filter(|n| (n.st / fb).floor() == bar).copied().collect();
         let vel = 0.65 + 0.3 * sec.energy;
-        let up = if part == WP_CLIMAX && self.wn.style == WNS_DUEL { 0 } else { 0 };
         let mut prev_end = -1.0f32;
         for n in notes {
             let st = n.st - bar * fb;
@@ -862,7 +865,7 @@ impl Song {
             }
             let slide = (st - prev_end).abs() < 0.6 && n.len >= 2.0;
             let len = n.len * 0.97;
-            b.note(st, self.rng.range(0.0, self.human), CH_LEAD, self.wn.tonic + n.p + up, n.v * vel, len, slide);
+            b.note(st, self.rng.range(0.0, self.human), CH_LEAD, self.wn.tonic + n.p, n.v * vel, len, slide);
             prev_end = st + n.len;
         }
     }

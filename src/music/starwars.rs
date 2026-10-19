@@ -525,7 +525,7 @@ pub(super) fn sw_kit_snare_synth(r: &mut Rng) -> Vec<DrumPatch> {
 
 /// The concert snare (CC0, six layers), or the field drum's (the western's).
 fn sw_kit_snare(r: &mut Rng) -> Vec<DrumPatch> {
-    let id = multi_or("snare", "hit", "Brush");
+    let id = samples::multi("snare", "hit").or_else(|| samples::drum("Orchestra Kit", 38));
     rec_kit(sw_kit_snare_synth(r), &[id, id])
 }
 
@@ -1012,7 +1012,7 @@ impl Song {
             self.sw_brass(s, b, c, p, bs, e, m);
         }
         if m & L_LEAD != 0 {
-            self.sw_lead(s, b, p, sec, bs, m);
+            self.sw_lead(b, p, sec, bs);
         }
         if m & L_BELL != 0 {
             self.sw_colour(b, c, p.part, bs, e, last);
@@ -1023,12 +1023,14 @@ impl Song {
         self.sw_drums(s, b, sec, m, p.part, bs, last);
     }
 
-    /// Chords held through the bar (each change voice-led) on `ch`.
+    /// Chords held through the bar (each change voice-led: the strings'
+    /// from their last chord, the others' from the brass's) on `ch`.
     fn sw_held(&mut self, b: &mut Bar, ch: usize, c: [Harm; 2], lo: i32, hi: i32, vel: f32, bs: u32) {
         let two = c[1] != c[0];
         let half = bs as f32 / 2.0;
         for (h, &x) in c.iter().enumerate().take(if two { 2 } else { 1 }) {
-            let v = self.voicing(x, lo, hi, &self.pad_v, false);
+            let prev = if ch == CH_PAD { &self.pad_v } else { &self.sw.brass_v };
+            let v = self.voicing(x, lo, hi, prev, false);
             for (k, &n) in v.iter().enumerate() {
                 b.note(
                     h as f32 * half,
@@ -1040,7 +1042,11 @@ impl Song {
                     false,
                 );
             }
-            self.pad_v = v;
+            if ch == CH_PAD {
+                self.pad_v = v;
+            } else {
+                self.sw.brass_v = v;
+            }
         }
     }
 
@@ -1254,7 +1260,7 @@ impl Song {
     /// The tune: the fanfare's call (its top two voices), the theme (or the
     /// second), the mystery's fragments of the second theme, softly; the
     /// build's call on its last two bars.
-    fn sw_lead(&mut self, s: &Synth, b: &mut Bar, p: SwPart, sec: Sec, bs: u32, m: u32) {
+    fn sw_lead(&mut self, b: &mut Bar, p: SwPart, sec: Sec, bs: u32) {
         let i = self.sec_bar;
         let fb = self.sw.bar_steps as f32;
         let tonic = self.sw.tonic;
@@ -1288,8 +1294,7 @@ impl Song {
                     .filter(|n| (n.st / fb).floor() == bar)
                     .map(|n| Tn { st: n.st - bar * fb, ..*n })
                     .collect();
-                let oct = if p.part == SP_THEME && p.rep >= 2 && self.sw.style == SWS_MARCH { 0 } else { 0 };
-                (v, oct, if p.part == SP_LOVE || p.part == SP_MYSTERY { 1.0 } else { 0.88 })
+                (v, 0, if p.part == SP_LOVE || p.part == SP_MYSTERY { 1.0 } else { 0.88 })
             }
         };
         let soft = if p.part == SP_MYSTERY { 0.6 } else { 1.0 };
@@ -1310,7 +1315,6 @@ impl Song {
                 b.note(n.st, j, CH_LEAD, pt - 12, n.v * vel * 0.8, len, false);
             }
         }
-        let _ = (s, m);
     }
 
     /// The harp, the celesta, the glockenspiel: the chord's arpeggio up in
@@ -1614,7 +1618,6 @@ impl Song {
         };
         if i + 1 < sec.bars {
             let c = [steps[i.min(1) as usize]; 2];
-            let fake = SwPart { part: SP_BUILD, dress: 0, rep: 0 };
             if m & L_PAD != 0 {
                 self.sw_held(b, CH_PAD, c, 55, 79, 0.75, bs);
             }
@@ -1651,7 +1654,6 @@ impl Song {
                 bs,
                 i + 2 == sec.bars,
             );
-            let _ = fake;
             return;
         }
         // the last chord
@@ -1801,4 +1803,3 @@ mod pools {
         }
     }
 }
-
