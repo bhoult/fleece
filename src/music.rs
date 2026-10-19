@@ -29,8 +29,20 @@ use std::time::{Duration, Instant};
 use crate::samples::{self, Bank, SAMPLER, Sampler};
 
 /// Genre names, shown on screen in capitals (the app's font has only A-Z, 0-9 and " -.:/!+()[],%").
-pub const GENRES: &[&str] =
-    &["AMBIENT", "TECHNO", "SYNTHWAVE", "LO-FI", "POLKA", "TAVERN", "SKA", "MARIACHI", "INDONESIAN", "STAR WARS", "CELTIC", "WESTERN"];
+pub const GENRES: &[&str] = &[
+    "AMBIENT",
+    "TECHNO",
+    "SYNTHWAVE",
+    "LO-FI",
+    "POLKA",
+    "TAVERN",
+    "SKA",
+    "MARIACHI",
+    "INDONESIAN",
+    "STARCONFLICT",
+    "CELTIC",
+    "WESTERN",
+];
 const AMBIENT: usize = 0;
 const TECHNO: usize = 1;
 const SYNTHWAVE: usize = 2;
@@ -40,7 +52,7 @@ const TAVERN: usize = 5;
 const SKA: usize = 6;
 const MARIACHI: usize = 7;
 const INDONESIAN: usize = 8;
-const STARWARS: usize = 9;
+const STARCONFLICT: usize = 9;
 const CELTIC: usize = 10;
 const WESTERN: usize = 11;
 /// Other names `find` takes for a genre (squashed, as it compares them).
@@ -49,7 +61,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("SPAGHETTIWESTERN", "WESTERN"),
     ("SPAGHETTI", "WESTERN"),
     ("GAMELAN", "INDONESIAN"),
-    ("SPACEOPERA", "STARWARS"),
+    ("SPACEOPERA", "STARCONFLICT"),
 ];
 /// How many genres.
 const NG: usize = GENRES.len();
@@ -57,17 +69,17 @@ const NG: usize = GENRES.len();
 // the later genres, each in a file of its own (src/music/)
 mod celtic;
 mod indonesian;
-mod starwars;
+mod starconflict;
 mod western;
 use celtic::*;
 use indonesian::*;
-use starwars::*;
+use starconflict::*;
 use western::*;
 
 /// Whether `genre`'s pieces end on a final hit (its last bar its own in a mix,
 /// the drummer's beat left out).
 fn ends_on_a_hit(genre: usize) -> bool {
-    matches!(genre, POLKA | TAVERN | SKA | MARIACHI | INDONESIAN | STARWARS | CELTIC | WESTERN)
+    matches!(genre, POLKA | TAVERN | SKA | MARIACHI | INDONESIAN | STARCONFLICT | CELTIC | WESTERN)
 }
 /// The music's ids: a genre alone (below `NG`), or a mix of a primary genre and a
 /// secondary one (`mix_id`): the primary writes the music (its form, meter,
@@ -1906,7 +1918,7 @@ impl Synth {
             SKA => 0.85,
             MARIACHI => 0.85,
             INDONESIAN => 1.0,
-            STARWARS => 1.3,
+            STARCONFLICT => 1.3,
             CELTIC => 0.75,
             WESTERN => 1.1,
             _ => 0.9,
@@ -2699,7 +2711,7 @@ struct Song {
     sk: Ska,
     mc: Mariachi,
     idn: Indonesian,
-    sw: StarWars,
+    sw: StarConflict,
     ce: Celtic,
     wn: Western,
     /// where the music is to end (`--ending natural`), else None: it goes on
@@ -2777,7 +2789,7 @@ impl Song {
             sk: Ska::default(),
             mc: Mariachi::default(),
             idn: Indonesian::default(),
-            sw: StarWars::default(),
+            sw: StarConflict::default(),
             ce: Celtic::default(),
             wn: Western::default(),
             end: None,
@@ -2798,7 +2810,7 @@ impl Song {
             SKA => self.sk.bar_steps.max(1),
             MARIACHI => self.mc.bar_steps.max(1),
             INDONESIAN => self.idn.bar_steps.max(1),
-            STARWARS => self.sw.bs_at(self.sec_bar),
+            STARCONFLICT => self.sw.bs_at(self.sec_bar),
             CELTIC => self.ce.bar_steps.max(1),
             WESTERN => self.wn.bs_at(self.sec_bar),
             _ => 16,
@@ -2812,18 +2824,18 @@ impl Song {
             SKA => self.sk.beat_steps.max(1),
             MARIACHI => self.mc.beat_steps.max(1),
             INDONESIAN => self.idn.beat_steps.max(1),
-            STARWARS => self.sw.beat_steps.max(1),
+            STARCONFLICT => self.sw.beat_steps.max(1),
             CELTIC => self.ce.beat_steps.max(1),
             WESTERN => self.wn.beat_steps.max(1),
             _ => 4,
         }
     }
 
-    /// Bar `k` of the section playing, in samples (star wars's and western's
+    /// Bar `k` of the section playing, in samples (starconflict's and western's
     /// meters change from bar to bar).
     fn bar_len_at(&self, k: u32) -> f64 {
         let steps = match self.genre {
-            STARWARS => self.sw.bs_at(k),
+            STARCONFLICT => self.sw.bs_at(k),
             WESTERN => self.wn.bs_at(k),
             _ => self.bar_steps(),
         };
@@ -3003,7 +3015,8 @@ impl Song {
         }
         let len = self.bar_steps() as f64 * self.step_len();
         // (a jig's; mariachi's, the battle's and the gallop's 6/8 are even)
-        let lilt = if self.beat_steps() == 6 && !matches!(self.genre, MARIACHI | STARWARS | WESTERN) { 0.18 } else { 0.0 };
+        let lilt =
+            if self.beat_steps() == 6 && !matches!(self.genre, MARIACHI | STARCONFLICT | WESTERN) { 0.18 } else { 0.0 };
         let mut b = Bar { t0, step: self.step_len(), swing: self.swing, lilt, lift: self.lift, ev };
         if self.sec_bar.is_multiple_of(8) && self.sec_bar > 0 && sec.kind == MAIN {
             // now and then an optional layer sits out a phrase
@@ -3015,7 +3028,7 @@ impl Song {
                 SKA => &[L_DRONE, L_PAD, L_PERC, L_OHAT],
                 MARIACHI => &[L_BELL, L_DRONE, L_PAD, L_HAT],
                 INDONESIAN => &[L_LEAD, L_PERC, L_HAT],
-                STARWARS => &[L_BELL, L_HAT, L_CTR],
+                STARCONFLICT => &[L_BELL, L_HAT, L_CTR],
                 CELTIC => &[L_LEAD, L_PERC, L_HAT],
                 WESTERN => &[L_BELL, L_HAT, L_CTR],
                 _ => &[L_HAT],
@@ -3036,7 +3049,7 @@ impl Song {
             SKA => self.ska(s, &mut b, sec, m),
             MARIACHI => self.mariachi(s, &mut b, sec, m),
             INDONESIAN => self.indonesian(s, &mut b, sec, m),
-            STARWARS => self.starwars(s, &mut b, sec, m),
+            STARCONFLICT => self.starconflict(s, &mut b, sec, m),
             CELTIC => self.celtic(s, &mut b, sec, m),
             WESTERN => self.western(s, &mut b, sec, m),
             _ => self.polka(&mut b, sec),
@@ -3101,7 +3114,7 @@ impl Song {
         // the outro's length, as near as can be told before it starts (star
         // wars's and western's meters are made with each section, their last
         // bar long: a bar more for them)
-        let extra = if matches!(self.genre, STARWARS | WESTERN) { 1.0 } else { 0.0 };
+        let extra = if matches!(self.genre, STARCONFLICT | WESTERN) { 1.0 } else { 0.0 };
         let outro = (self.plan[last].bars as f64 + extra) * bar;
         if self.sec == last {
             // the outro in its course: another piece after it, or the last
@@ -3164,9 +3177,9 @@ impl Song {
             SKA => [5.0, 1.0, 0.0, 0.0, 1.5, 1.5, 0.5],
             // mariachi: major mostly, minor ones in harmonic minor
             MARIACHI => [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4],
-            // star wars: major (the march) or minor (the battle, the dark
+            // starconflict: major (the march) or minor (the battle, the dark
             // march); the western: minor mostly, Phrygian now and then
-            STARWARS => [4.0, 0.0, 0.6, 1.2, 0.8, 3.0, 1.2],
+            STARCONFLICT => [4.0, 0.0, 0.6, 1.2, 0.8, 3.0, 1.2],
             WESTERN => [1.0, 1.0, 1.0, 0.0, 0.6, 3.0, 2.0],
             INDONESIAN | CELTIC => [3.0, 3.0, 0.0, 0.5, 1.0, 1.0, 0.0],
             // polka: major mostly, now and then a minor one
@@ -3192,7 +3205,7 @@ impl Song {
             SKA => self.piece_ska(s),
             MARIACHI => self.piece_mariachi(s),
             INDONESIAN => self.piece_indonesian(s),
-            STARWARS => self.piece_starwars(s),
+            STARCONFLICT => self.piece_starconflict(s),
             CELTIC => self.piece_celtic(s),
             WESTERN => self.piece_western(s),
             _ => self.piece_polka(s),
@@ -3209,7 +3222,7 @@ impl Song {
             (SKA, _) => self.sk.meter,
             (MARIACHI, _) => self.mc.meter,
             (INDONESIAN, _) => self.idn.meter,
-            (STARWARS, _) => self.sw.meter,
+            (STARCONFLICT, _) => self.sw.meter,
             (CELTIC, _) => self.ce.meter,
             (WESTERN, _) => self.wn.meter,
             _ => "4/4",
@@ -3238,7 +3251,7 @@ impl Song {
             (SYNTHWAVE, MAIN) => (sec.mask & L_LEAD != 0) as usize,
             (LOFI, MAIN) => (sec.mask & L_LEAD != 0 || r.chance(0.3)) as usize,
             (SKA, _) => self.sk.map.get(self.sec).map_or(0, |x| x.dress as usize),
-            (STARWARS, _) => self.sw.dress_at(self.sec),
+            (STARCONFLICT, _) => self.sw.dress_at(self.sec),
             (WESTERN, _) => self.wn.dress_at(self.sec),
             _ => 0,
         };
@@ -3309,7 +3322,7 @@ impl Song {
             SKA => self.ska_section(),
             MARIACHI => self.mariachi_section(),
             INDONESIAN => self.indonesian_section(),
-            STARWARS => self.starwars_section(),
+            STARCONFLICT => self.starconflict_section(),
             CELTIC => self.celtic_section(),
             WESTERN => self.western_section(),
             _ => self.polka_section(),
@@ -6417,7 +6430,7 @@ impl Song {
             Some(SKA) => self.ska_beat(b, sec, m),
             Some(MARIACHI) => self.mariachi_beat(s, b, sec, m),
             Some(INDONESIAN) => self.indonesian_beat(s, b, sec, m),
-            Some(STARWARS) => self.starwars_beat(s, b, sec, m),
+            Some(STARCONFLICT) => self.starconflict_beat(s, b, sec, m),
             Some(CELTIC) => self.celtic_beat(s, b, sec, m),
             Some(WESTERN) => self.western_beat(s, b, sec, m),
             Some(_) => self.tavern_drums(b, sec, m),
@@ -12818,7 +12831,7 @@ fn palette(g: usize, ch: usize) -> Option<&'static [(&'static str, Make)]> {
         (MARIACHI, CH_KEYS) => P_MARIACHI_STRUM,
         (MARIACHI, CH_PAD | CH_DRONE) => P_MARIACHI_SUSTAIN,
         (MARIACHI, CH_BASS) => P_MARIACHI_BASS,
-        (STARWARS, _) => return palette_starwars(ch),
+        (STARCONFLICT, _) => return palette_starconflict(ch),
         (WESTERN, _) => return palette_western(ch),
         (INDONESIAN, CH_BELL | CH_ARP) => P_IDN_BARS,
         (INDONESIAN, CH_KEYS | CH_PAD) => P_IDN_KETTLES,
@@ -12868,7 +12881,7 @@ fn kit_palette(g: usize, ch: usize) -> Option<&'static [(&'static str, MakeKit)]
         (MARIACHI, CH_SNARE) => K_MARIACHI_SNARE,
         (MARIACHI, CH_HAT) => K_MARIACHI_HAT,
         (MARIACHI, CH_PERC) => K_MARIACHI_PERC,
-        (STARWARS, _) => return kit_palette_starwars(ch),
+        (STARCONFLICT, _) => return kit_palette_starconflict(ch),
         (WESTERN, _) => return kit_palette_western(ch),
         (INDONESIAN, CH_KICK) => K_IDN_KICK,
         (INDONESIAN, CH_SNARE) => K_IDN_SNARE,
@@ -12902,7 +12915,7 @@ fn sounds(g: usize, r: &mut Rng, s: &mut Synth) {
         }
         MARIACHI => sounds_mariachi(r, s),
         INDONESIAN => sounds_indonesian(r, s),
-        STARWARS => sounds_starwars(r, s),
+        STARCONFLICT => sounds_starconflict(r, s),
         CELTIC => sounds_celtic(r, s),
         WESTERN => sounds_western(r, s),
         _ => sounds_tavern(r, s),

@@ -407,7 +407,7 @@ fn band_western(r: &mut Rng, s: &Synth, style: u8) -> Band {
 }
 
 /// The recordings against the synthesiser's patches they replace, by style
-/// and channel (dB), measured as Star Wars's are (`sw_rec_trim`): the
+/// and channel (dB), measured as Starconflict's are (`sw_rec_trim`): the
 /// strings' swell and the choir read loud by the levelling's early note,
 /// the harmonica and ocarina quiet; the bass drum, the vibraslap and the
 /// gong ring otherwise than the synthesiser's.

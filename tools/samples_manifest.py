@@ -356,8 +356,8 @@ UNPITCHED = [
     ("finger_cymbals", "hit", "VCSL", G + "Finger Cymbals", [["Fing_Cymb.wav"]]),
 ]
 
-# -- star wars / western ---------------------------------------------------------------------
-# The orchestra's other sections (STAR WARS) and the spaghetti western's percussion (WESTERN).
+# -- starconflict / western ---------------------------------------------------------------------
+# The orchestra's other sections (STARCONFLICT) and the spaghetti western's percussion (WESTERN).
 # Every VSCO-2-CE folder here names its notes an octave low, as its others do (C3 = middle C):
 # each one's lowest note is then its instrument's (the cellos' C2, the violas' C3, the
 # contrabass's F#1, the bassoon's Bb1, the oboe's Bb3, the violins' G3). Checked on the converted
@@ -433,7 +433,7 @@ UNPITCHED += [
       ["RopeSnare_hi_sn_Main_vl3_rr1.wav", "RopeSnare_hi_sn_Main_vl3_rr3.wav"],
       ["RopeSnare_hi_sn_Main_vl4_rr1.wav", "RopeSnare_hi_sn_Main_vl4_rr2.wav"]]),
 ]
-# -- end star wars / western -----------------------------------------------------------------
+# -- end starconflict / western -----------------------------------------------------------------
 # -- indonesian / celtic: the gamelan's and the session's recordings (2026-10-18)
 # Pitched: the balafon (VCSL's "EthnicXylo": wooden bars on gourds, the gamelan's gambang's
 # stand-in; partials 1 : 2.76 : 5.1, a free bar's), hard mallets, two layers; the folk (lever)
@@ -488,7 +488,7 @@ UNPITCHED += [
      [["HiHat_HitC_v%d_rr1_Mid.wav" % v, "HiHat_HitC_v%d_rr2_Mid.wav" % v] for v in (2, 3, 4)]),
     ("hihat", "open", "VCSL", G + "Hi-Hat Cymbal", [["HiHat_HitO_rr1_Mid.wav", "HiHat_HitO_rr2_Mid.wav"]]),
 ]
-# (keyed by its instrument too: STAR WARS's and WESTERN's "gong" plays the same files at their own pitch)
+# (keyed by its instrument too: STARCONFLICT's and WESTERN's "gong" plays the same files at their own pitch)
 TUNE_FILE.update({("VCSL", G + "Gong 1", f, "gamelan_gong"): -1039 for f in ("gong_mf.wav", "gong_f.wav", "gong_fff.wav")})
 RING_SECONDS = 10.0
 MAX_SECONDS.update({"ring": RING_SECONDS, "clash": 4.0, "open": 2.5, "tumba": 2.5, "quinto": 2.0})
@@ -916,7 +916,7 @@ def sources_md(jobs, gains, dest):
       " to its own scale (%+d to %+d cents); see `TUNE_FILE` in `tools/samples_manifest.py`."
       % (len(MBIRA_TUNE), min(MBIRA_TUNE.values()), max(MBIRA_TUNE.values())))
     w("- Retuned the same way: the gamelan's gong (VCSL's Gong 1, %d files, %+d cents), so that its root"
-      " 60 is its pitch (the same files untuned are STAR WARS's and WESTERN's gong)."
+      " 60 is its pitch (the same files untuned are STARCONFLICT's and WESTERN's gong)."
       % (len(GONG_TUNE), -min(GONG_TUNE.values())))
     w("- Velocity layers split 0-127 evenly, softest first. `gain_db` is the instrument/articulation's gain, putting"
       " the loudest layer's median RMS over the first 1 s after the onset at %g dBFS, plus a trim per root and"

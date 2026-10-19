@@ -1,4 +1,4 @@
-//! STAR WARS: a space-opera film score in John Williams's manner, its tunes,
+//! STARCONFLICT: a space-opera film score in John Williams's manner, its tunes,
 //! fanfares and progressions fleece's own (none of the films'): brass
 //! fanfares in fourths and fifths over string ostinatos, a heroic march with
 //! triplet pickups and a lyrical second theme on the strings with a horn
@@ -45,7 +45,7 @@ pub(super) struct Tn {
     pub(super) v: f32,
 }
 
-/// A section of a Star Wars piece: its part, which of the instrument pairs,
+/// A section of a Starconflict piece: its part, which of the instrument pairs,
 /// which time through.
 #[derive(Clone, Copy, Default)]
 pub(super) struct SwPart {
@@ -54,9 +54,9 @@ pub(super) struct SwPart {
     rep: u32,
 }
 
-/// A Star Wars piece's state.
+/// A Starconflict piece's state.
 #[derive(Default)]
-pub(super) struct StarWars {
+pub(super) struct StarConflict {
     /// 16ths a bar (the section's usual) and a beat, the meter's name
     pub(super) bar_steps: u32,
     pub(super) beat_steps: u32,
@@ -80,7 +80,7 @@ pub(super) struct StarWars {
     brass_v: Vec<i32>,
 }
 
-impl StarWars {
+impl StarConflict {
     /// The 16ths in bar `k` of the section (the parent's bar_steps()).
     pub(super) fn bs_at(&self, k: u32) -> u32 {
         self.bars.get(k as usize).copied().unwrap_or(self.bar_steps).max(1)
@@ -625,8 +625,8 @@ const K_SW_SNARE: &[(&str, MakeKit)] = &[("snare drum", sw_kit_snare)];
 const K_SW_HAT: &[(&str, MakeKit)] = &[("triangle", sw_kit_triangle)];
 const K_SW_CYM: &[(&str, MakeKit)] = &[("cymbals and gong", sw_kit_cymbals)];
 
-/// Star Wars's instruments for the part channel `ch` plays in another genre.
-pub(super) fn palette_starwars(ch: usize) -> Option<&'static [(&'static str, Make)]> {
+/// Starconflict's instruments for the part channel `ch` plays in another genre.
+pub(super) fn palette_starconflict(ch: usize) -> Option<&'static [(&'static str, Make)]> {
     Some(match ch {
         CH_LEAD => P_SW_THEME,
         CH_KEYS => P_SW_BRASS,
@@ -640,7 +640,7 @@ pub(super) fn palette_starwars(ch: usize) -> Option<&'static [(&'static str, Mak
 }
 
 /// Its kits for drum channel `ch`.
-pub(super) fn kit_palette_starwars(ch: usize) -> Option<&'static [(&'static str, MakeKit)]> {
+pub(super) fn kit_palette_starconflict(ch: usize) -> Option<&'static [(&'static str, MakeKit)]> {
     Some(match ch {
         CH_KICK => K_SW_KICK,
         CH_SNARE => K_SW_SNARE,
@@ -661,7 +661,7 @@ fn sw_pair(band: &mut Band, r: &mut Rng, s: &Synth, ch: usize, a: Option<Make>, 
 
 /// The band: for each role the verses' instrument (A) and the second
 /// theme's and the mystery's (B).
-fn band_starwars(r: &mut Rng, s: &Synth, style: u8) -> Band {
+fn band_starconflict(r: &mut Rng, s: &Synth, style: u8) -> Band {
     let mut b = Band::default();
     match style {
         SWS_MARCH => {
@@ -729,8 +729,8 @@ fn sw_kit_trims(style: u8) -> [(usize, f32); 4] {
     }
 }
 
-/// Star Wars's sounds (a mix's drummer's: the march's or the battle's).
-pub(super) fn sounds_starwars(r: &mut Rng, s: &mut Synth) {
+/// Starconflict's sounds (a mix's drummer's: the march's or the battle's).
+pub(super) fn sounds_starconflict(r: &mut Rng, s: &mut Synth) {
     let style = if r.bit_chance() { SWS_MARCH } else { SWS_BATTLE };
     sw_sounds(r, s, style)
 }
@@ -805,7 +805,7 @@ fn sw_sounds(r: &mut Rng, s: &mut Synth, style: u8) {
 }
 
 impl Song {
-    pub(super) fn piece_starwars(&mut self, s: &mut Synth) {
+    pub(super) fn piece_starconflict(&mut self, s: &mut Synth) {
         // (no Dorian: its major fourth in a minor key is the films' own)
         if self.mode == 1 {
             self.mode = AEOLIAN;
@@ -902,7 +902,7 @@ impl Song {
         }
         self.progs = progs.clone();
         self.prog = progs[0].clone();
-        self.sw = StarWars {
+        self.sw = StarConflict {
             bar_steps: bs,
             beat_steps: beat,
             meter,
@@ -918,14 +918,14 @@ impl Song {
             brass_v: Vec::new(),
         };
         sw_sounds(r, s, style);
-        self.band = band_starwars(r, s, style);
+        self.band = band_starconflict(r, s, style);
         rec_trim(&mut self.band, s, |ch, _| sw_rec_trim(style, six, ch));
     }
 
     /// A section begins: its chords, its bars' lengths (the battle's bar of
     /// 3/4 or 9/8 closing a phrase now and then; the finale's last bar
     /// long, for its chord to ring).
-    pub(super) fn starwars_section(&mut self) {
+    pub(super) fn starconflict_section(&mut self) {
         let sec = self.plan[self.sec];
         let p = self.sw.map[self.sec];
         let (bs, beat) = (self.sw.bar_steps, self.sw.beat_steps);
@@ -957,8 +957,8 @@ impl Song {
         [self.chord(self.sec_bar * 2), self.chord(self.sec_bar * 2 + 1)]
     }
 
-    /// A bar of Star Wars.
-    pub(super) fn starwars(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+    /// A bar of Starconflict.
+    pub(super) fn starconflict(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let p = self.sw.map[self.sec];
         let i = self.sec_bar;
         let bs = self.sw.bs_at(i);
@@ -1484,7 +1484,7 @@ impl Song {
         }
     }
 
-    /// The percussion of a Star Wars bar: the march's snare (and its
+    /// The percussion of a Starconflict bar: the march's snare (and its
     /// triplet drag into each phrase), the bass drum on the strong beats,
     /// the battle's driving snare; the triangle under the second theme;
     /// a clash on each theme's downbeat (the gong's in the dark march), a
@@ -1712,13 +1712,13 @@ impl Song {
         b.hit(0.0, 0.0, CH_SNARE, 0, 0.7);
     }
 
-    /// Star Wars's beat in any meter, for a mix: the bass drum on the
+    /// Starconflict's beat in any meter, for a mix: the bass drum on the
     /// downbeat (the middle of the bar too when it is strong), the snare's
     /// march (the beats, an "and" now and then, a drag closing a phrase),
     /// the battle's driving 16ths in a strong section's B groups; the
     /// triangle in a quiet one; a clash on a section's downbeat, a swell
     /// into a main section's.
-    pub(super) fn starwars_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
+    pub(super) fn starconflict_beat(&mut self, s: &mut Synth, b: &mut Bar, sec: Sec, m: u32) {
         let (bs, beat) = (self.bar_steps(), self.beat_steps());
         let i = self.sec_bar;
         let e = sec.energy;
@@ -1789,7 +1789,7 @@ impl Song {
 mod pools {
     use super::*;
 
-    /// Every chord of the Star Wars and Western pools parses, and each plan
+    /// Every chord of the Starconflict and Western pools parses, and each plan
     /// is eight bars (sixteen chords).
     #[test]
     fn cinematic_pools_parse() {

@@ -177,12 +177,12 @@ pub const GM_PRESETS: &[&str] = &[
     "Concert Bass Drum",
     "808 Tom",
     "Timpani",
-    // -- star wars / western: the strings' tremolo, a cymbal's swell (a
+    // -- starconflict / western: the strings' tremolo, a cymbal's swell (a
     // reversed crash), a church bell
     "Strings Tremolo",
     "Reverse Cymbal",
     "Church Bell",
-    // -- end star wars / western
+    // -- end starconflict / western
     // -- indonesian / celtic: the suling's stand-in (an end-blown bamboo
     // flute), the bouzouki's (a twelve-string's octave courses)
     "Shakuhachi",
