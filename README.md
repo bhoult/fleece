@@ -1,5 +1,7 @@
 # fleece
 
+Made by Claude Opus 5.5, instigated by [Brandon Hoult](https://hoult.co).
+
 A live fractal flame animator in the manner of [Electric Sheep](https://electricsheep.org). The flames are rendered in real time on the GPU and on every CPU core at once. It is written in Rust with no crates: the window and OpenGL 4.6 context come from libSDL2, and every GL call is looked up at run time.
 
 ```
