@@ -4,6 +4,12 @@ Made by Claude Opus 5.5, instigated by [Brandon Hoult](https://hoult.co).
 
 A live fractal flame animator in the manner of [Electric Sheep](https://electricsheep.org). The flames are rendered in real time on the GPU and on every CPU core at once. It is written in Rust with no crates: the window and OpenGL 4.6 context come from libSDL2, and every GL call is looked up at run time.
 
+<p align="center">
+  <a href="https://drive.google.com/file/d/1vLBH4VHJcQslgLdFYgJigdtVDVO1Qebe/view"><img src="docs/fleece.webp" width="720" alt="A sheep like an eight-petalled flower turns and morphs into one of glowing orange and blue rings"></a>
+  <br>
+  <sub>Eleven seconds of <a href="https://drive.google.com/file/d/1vLBH4VHJcQslgLdFYgJigdtVDVO1Qebe/view">ten minutes of the show</a> (1080p, no sound, on Google Drive): one sheep morphing into the next. More <a href="#videos">videos</a> below, with music.</sub>
+</p>
+
 ```
 cargo build --release
 target/release/fleece                 # Electric Sheep's 800x592 frame, scaled to the window, 30 fps
@@ -14,9 +20,91 @@ target/release/fleece 2k              # render at a size instead: 1080p, 2k (256
 
 By default fleece renders Electric Sheep's standard frame, 800x592, and scales it to the window with black bars, as the Electric Sheep player shows its 800x592 videos. At that size this machine gets roughly 700–2,500 samples per pixel per frame at 30 fps without supersampling, and about 60 % of that at the automatic 2x; the server renders each frame at 2,000. `--quality N` holds every frame at N samples per pixel (2,000 runs at about 14–20 fps here). `--es-hd` renders the HD flock's 1280x720, `--render WxH` any fixed size, and `--native` the window's own size.
 
+<p align="center">
+  <img src="docs/window.jpg" width="880" alt="fleece's window: a sheep of blue, green and orange swirls, with four lines of text and three rows of buttons along the top">
+  <br>
+  <sub>The window at 1280x720. The HUD names the sheep and credits it (electricsheep.247.12341, designed by freakiebeat; artwork by Scott Draves and the Electric Sheep, CC BY), and each button is lit while its setting is on (see "Mouse" below). H hides them.</sub>
+</p>
+
+## Videos
+
+Each picture opens its video in Google Drive's player. All 23 are in [one Drive folder](https://drive.google.com/drive/folders/1x27nHd_QSMpPuzrSOHq7Nw5AajnYotQr), and the [Flock](https://experiments.galedra.org/flock/) page plays them in place and lists every sheep in each (each file's metadata lists them too).
+
+The one-minute videos are 1080p at 30 fps with stereo sound, made with `--video` and `--music`: one piece of fleece's music (the genre and seed under each), composed first, and the show following it, every frame at 2,000 samples a pixel. Each piece winds down to its ending as the picture fades out. [Ten minutes of the show](https://drive.google.com/file/d/1vLBH4VHJcQslgLdFYgJigdtVDVO1Qebe/view), the one the clip at the top comes from, has no music.
+
+### Twelve genres
+
+<table>
+<tr>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1ITvyBgOZM7MdmTsmQC7MjXXvLjcPnUwV/view"><img src="docs/videos/01.jpg" width="100%" alt="Play Ambient"></a><br><b><a href="https://drive.google.com/file/d/1ITvyBgOZM7MdmTsmQC7MjXXvLjcPnUwV/view">Ambient</a></b><br>seed 1<br><sub>Slow pads and choirs, bells, celesta, kalimba and harp over a drone, with wind or rain drifting through.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/10AsWE8GWQdt2ilwkLiFh-0Z0jOp6Lgor/view"><img src="docs/videos/02.jpg" width="100%" alt="Play Techno"></a><br><b><a href="https://drive.google.com/file/d/10AsWE8GWQdt2ilwkLiFh-0Z0jOp6Lgor/view">Techno</a></b><br>seed 2<br><sub>A kick on every beat, claps, an acid bassline, a rumble under the kick and the sidechain pumping.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1BAzUDqGuskJrTPy-0EOM3oHukl-MO-D3/view"><img src="docs/videos/03.jpg" width="100%" alt="Play Synthwave"></a><br><b><a href="https://drive.google.com/file/d/1BAzUDqGuskJrTPy-0EOM3oHukl-MO-D3/view">Synthwave</a></b><br>seed 3<br><sub>Arpeggios and pads, a synth lead, and a drum machine with the kick on one and three.</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1eMb4fyarO23Lgo6cKmdvu6GmMVx6leR8/view"><img src="docs/videos/04.jpg" width="100%" alt="Play Lo-fi"></a><br><b><a href="https://drive.google.com/file/d/1eMb4fyarO23Lgo6cKmdvu6GmMVx6leR8/view">Lo-fi</a></b><br>seed 4<br><sub>A boom-bap beat under electric piano and a lazy lead, with vinyl crackle and tape wow.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1yIJUQ2DcSfLARpgwmCelLhBDa2Pfct7Q/view"><img src="docs/videos/05.jpg" width="100%" alt="Play Polka"></a><br><b><a href="https://drive.google.com/file/d/1yIJUQ2DcSfLARpgwmCelLhBDa2Pfct7Q/view">Polka</a></b><br>seed 5<br><sub>Oom on the beat and pah off it, with tuba and accordion.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1kp9Q-bDK2pSXpzfrRxP1NxCvv0TZivg9/view"><img src="docs/videos/06.jpg" width="100%" alt="Play Tavern"></a><br><b><a href="https://drive.google.com/file/d/1kp9Q-bDK2pSXpzfrRxP1NxCvv0TZivg9/view">Tavern</a></b><br>seed 6<br><sub>Medieval jigs, reels and dances on lute, fiddle, whistle, hurdy-gurdy and frame drum.</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1KBC8FSAwA1LC8huBX2dhNyQmrsK3Qyzu/view"><img src="docs/videos/07.jpg" width="100%" alt="Play Ska"></a><br><b><a href="https://drive.google.com/file/d/1KBC8FSAwA1LC8huBX2dhNyQmrsK3Qyzu/view">Ska</a></b><br>seed 7<br><sub>Third-wave ska-punk in a minor key: the guitar chopping every off-beat, horns in close harmony, choruses of distorted power chords.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1jhTjVaBxN7i2sthb_Z2EE0DxjvbePpLE/view"><img src="docs/videos/08.jpg" width="100%" alt="Play Mariachi"></a><br><b><a href="https://drive.google.com/file/d/1jhTjVaBxN7i2sthb_Z2EE0DxjvbePpLE/view">Mariachi</a></b><br>seed 8<br><sub>A son jalisciense, 6/8 against 3/4: violins and trumpets trading the tune in thirds and sixths over vihuela, guitar, guitarrón and harp.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1BE6ojn5wKk4an2T6I_ujzmhfbm53tq1p/view"><img src="docs/videos/09.jpg" width="100%" alt="Play Indonesian"></a><br><b><a href="https://drive.google.com/file/d/1BE6ojn5wKk4an2T6I_ujzmhfbm53tq1p/view">Indonesian</a></b><br>seed 9<br><sub>Gamelan, in tunings of its own rather than the piano&#x27;s: bronze bars and gongs, each gong cycle marked off by the great gong.</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1oLoQ5j2zRJ79rdlebpjZE894ysDjW43z/view"><img src="docs/videos/10.jpg" width="100%" alt="Play Starconflict"></a><br><b><a href="https://drive.google.com/file/d/1oLoQ5j2zRJ79rdlebpjZE894ysDjW43z/view">Starconflict</a></b><br>seed 10<br><sub>A space-opera film score in John Williams&#x27;s manner, its themes fleece&#x27;s own: brass fanfares, marches and battles over strings and timpani.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/19UB-L9B-XhjKkIfku5qmQbjRGs1rfpeD/view"><img src="docs/videos/11.jpg" width="100%" alt="Play Celtic"></a><br><b><a href="https://drive.google.com/file/d/19UB-L9B-XhjKkIfku5qmQbjRGs1rfpeD/view">Celtic</a></b><br>seed 11<br><sub>The Irish and Scottish session: reels, jigs and hornpipes on fiddle, flute or whistle and accordion, a DADGAD guitar and the bodhrán.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1FN_7sXxWzktNNp-W_rnDGxcKY9BWQhq2/view"><img src="docs/videos/12.jpg" width="100%" alt="Play Western"></a><br><b><a href="https://drive.google.com/file/d/1FN_7sXxWzktNNp-W_rnDGxcKY9BWQhq2/view">Western</a></b><br>seed 12<br><sub>A spaghetti-western score in Ennio Morricone&#x27;s manner, its tunes fleece&#x27;s own: whistle, twangy guitar, choir, trumpet and bells.</sub></td>
+</tr>
+</table>
+
+### Ska and mariachi, three more ways each
+
+Each genre has styles of its own, and a piece picks one.
+
+<table>
+<tr>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1RQgBgNn2RDEWV4jBEfDlydq_J1UjWOEk/view"><img src="docs/videos/13.jpg" width="100%" alt="Play Ska, first wave"></a><br><b><a href="https://drive.google.com/file/d/1RQgBgNn2RDEWV4jBEfDlydq_J1UjWOEk/view">Ska, first wave</a></b><br>ska · seed 20<br><sub>Jamaica in the early sixties: a shuffle, a jazz band&#x27;s horns, piano and Hammond. A♭ major, 129 bpm.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1ORQ1dD6c-C2_stV88pTBgPzEqC8cjxCW/view"><img src="docs/videos/14.jpg" width="100%" alt="Play Ska, 2-tone"></a><br><b><a href="https://drive.google.com/file/d/1ORQ1dD6c-C2_stV88pTBgPzEqC8cjxCW/view">Ska, 2-tone</a></b><br>ska · seed 17<br><sub>Britain in the late seventies: faster and nearly straight, with an organ bubbling and a picked bass. A harmonic minor, 140 bpm.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1rFxUA1eE2z1QE7e8SdSCguhW0yg_F5PE/view"><img src="docs/videos/15.jpg" width="100%" alt="Play Ska, third wave in a major key"></a><br><b><a href="https://drive.google.com/file/d/1rFxUA1eE2z1QE7e8SdSCguhW0yg_F5PE/view">Ska, third wave in a major key</a></b><br>ska · seed 27<br><sub>Ska-punk again, this time in G major: skanking verses that break into driving choruses under four horns.</sub></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1BGZ-vztZk-I2-kdNCkht0HJQDyIIM31w/view"><img src="docs/videos/16.jpg" width="100%" alt="Play Mariachi, huapango"></a><br><b><a href="https://drive.google.com/file/d/1BGZ-vztZk-I2-kdNCkht0HJQDyIIM31w/view">Mariachi, huapango</a></b><br>mariachi · seed 14<br><sub>A huapango in 6/8: the strum syncopated, the tune leaping up to long high notes.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1n9faZxeC3X02xOBrguA7K9WgM2uchffi/view"><img src="docs/videos/17.jpg" width="100%" alt="Play Mariachi, ranchera valseada"></a><br><b><a href="https://drive.google.com/file/d/1n9faZxeC3X02xOBrguA7K9WgM2uchffi/view">Mariachi, ranchera valseada</a></b><br>mariachi · seed 22<br><sub>A ranchera in waltz time, 3/4, the violins and trumpets taking turns with the tune.</sub></td>
+<td width="33%" valign="top"><a href="https://drive.google.com/file/d/1168VCbbmkEBHAcXMoGGvpSa2mMXTI7q0/view"><img src="docs/videos/18.jpg" width="100%" alt="Play Mariachi, bolero ranchero"></a><br><b><a href="https://drive.google.com/file/d/1168VCbbmkEBHAcXMoGGvpSa2mMXTI7q0/view">Mariachi, bolero ranchero</a></b><br>mariachi · seed 47<br><sub>The slow one: a bolero ranchero in 4/4.</sub></td>
+</tr>
+</table>
+
+### Mixes
+
+The first genre writes the music (its form, meter, chords and tunes), the second drums for it, and every part gets an instrument from each.
+
+<table>
+<tr>
+<td width="50%" valign="top"><a href="https://drive.google.com/file/d/1TR9cBAELB22Is2C24aKcBVmWAyxoLcpm/view"><img src="docs/videos/19.jpg" width="100%" alt="Play Ska with mariachi"></a><br><b><a href="https://drive.google.com/file/d/1TR9cBAELB22Is2C24aKcBVmWAyxoLcpm/view">Ska with mariachi</a></b><br>ska + mariachi · seed 48<br><sub>Ska writes the music, 2-tone this time, and mariachi drums it; every part pairs an instrument from each band.</sub></td>
+<td width="50%" valign="top"><a href="https://drive.google.com/file/d/1A63OgH4ucF5TF3BxUHX5VdijIVSGzMXB/view"><img src="docs/videos/20.jpg" width="100%" alt="Play Mariachi with ska"></a><br><b><a href="https://drive.google.com/file/d/1A63OgH4ucF5TF3BxUHX5VdijIVSGzMXB/view">Mariachi with ska</a></b><br>mariachi + ska · seed 49<br><sub>The other way round: a ranchera polkeada in 2/4 with ska&#x27;s drums under it.</sub></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><a href="https://drive.google.com/file/d/1sYvz_i3qCrXk--yj-8FvXbjc90_-hqzz/view"><img src="docs/videos/21.jpg" width="100%" alt="Play Techno with ska"></a><br><b><a href="https://drive.google.com/file/d/1sYvz_i3qCrXk--yj-8FvXbjc90_-hqzz/view">Techno with ska</a></b><br>techno + ska · seed 50<br><sub>Techno writes the music and ska drums it; every part pairs an instrument from each.</sub></td>
+<td width="50%" valign="top"><a href="https://drive.google.com/file/d/1HgIvFiUvFErUTz4_UUZ0tRm4-6M_Znsx/view"><img src="docs/videos/22.jpg" width="100%" alt="Play Techno with mariachi"></a><br><b><a href="https://drive.google.com/file/d/1HgIvFiUvFErUTz4_UUZ0tRm4-6M_Znsx/view">Techno with mariachi</a></b><br>techno + mariachi · seed 51<br><sub>Techno writes the music and mariachi drums it; every part pairs an instrument from each.</sub></td>
+</tr>
+</table>
+
 ## Version 2
 
 v2 adds ten things to the show. Electric Sheep's show as it was is still there: `V` switches between the two, and `--classic` starts without them.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/classic.jpg" width="100%" alt="A sheep as Electric Sheep showed it: crisp, grainy blue-green lattices round a bright star"></td>
+    <td width="50%"><img src="docs/v2.jpg" width="100%" alt="The same sheep with v2's effects: softer and glowing, the camera moved in"></td>
+  </tr>
+  <tr>
+    <td><sub><code>--classic</code>: Electric Sheep's show as it was</sub></td>
+    <td><sub>v2's defaults: glow, short trails, levels, drift and wobble</sub></td>
+  </tr>
+</table>
+
+<sub>The same sheep eight seconds in, at 1280x720: electricsheep.244.01326, designed by brood (artwork by Scott Draves and the Electric Sheep, CC BY).</sub>
 
 | | key | flag | default | what it does |
 | --- | --- | --- | --- | --- |
@@ -43,6 +131,19 @@ v2 adds ten things to the show. Electric Sheep's show as it was is still there: 
 - **The 3 key** tilts any sheep: it leans back about 43°, swaying, with the same lean whatever the sheep's own zoom. Pressed again, it adds depth of field: the middle of the plane stays sharp while the near and far edges blur.
 - **Speed:** a flat flame without these runs exactly the chaos game it always did. 3D is a separate variant of the GPU shader and of the CPU loop. A general 3D shader is compiled in the background at start, so the first tilted frame doesn't wait for a compile.
 - `--varcheck` covers the new variations with a tilted camera, and one case with depth of field.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/flat.jpg" width="100%" alt="A sheep of four glowing discs, green, cyan, pink and red, seen flat"></td>
+    <td width="50%"><img src="docs/3d.jpg" width="100%" alt="The same sheep tilted back in perspective, its near and far edges blurred"></td>
+  </tr>
+  <tr>
+    <td><sub>Flat</sub></td>
+    <td><sub><code>--tilt 2</code> (3 pressed twice): tilted back, with depth of field</sub></td>
+  </tr>
+</table>
+
+<sub>electricsheep.248.24674, designed by fractalapple (artwork by Scott Draves and the Electric Sheep, CC BY).</sub>
 
 **Taste.** Each candidate is measured on a small render of its first frame: colourfulness (Hasler and Süsstrunk), coverage, brightness entropy, detail, symmetry, distinct colours, mean brightness and streaks. Streaks measures how much the picture's colour gradients point one way. A linear score of those says how much it looks like a real Electric Sheep. `fleece --tastefit` fitted the score to 3,000 genebank sheep against 3,000 random sheep that pass flam3's tests, with a cross-validated correlation of 0.58. Real sheep are more colourful and more detailed and use more distinct colours. A fixed penalty applies past the streaks of 99% of real sheep. Without it, a direct-colour flame painting stripes across the frame would win on colourfulness. The HUD shows each sheep's score. Every Up or Down vote nudges the score towards what you like, and the window keeps it in `~/.local/share/fleece/taste.txt`. (Fitted to the genebank's own Electric Sheep ratings instead, `--tastefit --breed 1`, the same measures predict little: r 0.12. Those sheep had all survived the flock already.)
 
@@ -257,6 +358,7 @@ The headless modes use SDL's offscreen driver, so the context is made on the GPU
 | `src/gl.rs`, `src/sdl.rs` | the OpenGL loader and the SDL2 calls |
 | `src/hud.rs`, `src/png.rs` | the 5x7 text and a PNG writer |
 | `assets/flam3-palettes.bin` | flam3's 701 palettes (from flam3-palettes.xml) |
+| `docs/` | the README's pictures: the screenshots (headless runs at 1280x720, `--frames 241 --every 80 --out DIR --seed N`, frame 240; seeds 99, 21 and 11), the clip (ten minutes of the show, 9:25 to 9:36) and the videos' thumbnails |
 
 ## Requirements and licence
 
